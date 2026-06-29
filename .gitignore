@@ -1,0 +1,25 @@
+# Secrets — NEVER commit
+.env
+
+# Runtime state
+state.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# OS
+.DS_Store
+
+# Uploads
+.uploads/
+
+# Memory data (mem0 / Qdrant local storage)
+memory_data/
+
+# Temp files
+feishu_login_qr.png
+*.png
