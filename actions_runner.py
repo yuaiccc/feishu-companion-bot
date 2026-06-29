@@ -308,7 +308,7 @@ def fetch_private_repo_commits(repo: str) -> list[dict]:
 
 # 已知的仓库通俗描述（覆盖常见仓库）
 _REPO_DESC_MAP = {
-    "project-history": "项目历史记录，记录开发过程和关键节点",
+    "project-history": "和舒舒的聊天机器人",
     "bytedance-algorithm-roadmap": "字节跳动算法路线图，系统学习算法",
     "interview": "程序员面试题库，备战技术面试",
     "paddle": "百度飞桨深度学习框架",
@@ -389,10 +389,66 @@ def _explain_repo(repo_name: str, gh_desc: str) -> str:
         return gh_desc or repo_name
 
 
+def _generate_summary(activities: list[dict]) -> str:
+    """用 DeepSeek 生成最近活动的总结。"""
+    if not activities or not DEEPSEEK_API_KEY:
+        return ""
+
+    # 统计活动
+    push_count = sum(1 for a in activities if a.get("type") == "PushEvent")
+    star_count = sum(1 for a in activities if a.get("type") == "WatchEvent")
+    repos = set(a.get("repo", {}).get("name", "") for a in activities if a.get("repo", {}).get("name"))
+
+    # 收集 commit messages
+    commit_msgs = []
+    for a in activities:
+        if a.get("type") == "PushEvent":
+            for c in a.get("payload", {}).get("commits", []):
+                msg = c.get("message", "").strip().split("\n")[0]
+                if msg:
+                    commit_msgs.append(msg)
+
+    summary_input = f"提交 {push_count} 次，收藏 {star_count} 个项目，涉及仓库: {', '.join(repos)}"
+    if commit_msgs:
+        summary_input += f"\n提交信息: {'; '.join(commit_msgs[:5])}"
+
+    try:
+        import requests
+        resp = requests.post(
+            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": DEEPSEEK_MODEL,
+                "messages": [
+                    {"role": "system", "content": "你是三哥的AI助手。根据三哥最近的 GitHub 活动数据，写一段简短的活动总结（2-3句话），语气轻松活泼。不要列清单，用自然语言描述他在做什么。"},
+                    {"role": "user", "content": summary_input},
+                ],
+                "temperature": 0.7,
+                "max_tokens": 100,
+            },
+            timeout=20,
+        )
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return ""
+
+
 def build_commit_card(activities: list[dict]) -> dict:
-    """构建飞书卡片表格。"""
+    """构建飞书卡片表格。Star 收藏合并成一行。"""
+    # 先把 Star 事件合并
+    star_repos = []
+    other_activities = []
+    for a in activities:
+        atype = a.get("type", "")
+        repo = a.get("repo", {}).get("name", "")
+        if atype == "WatchEvent":
+            if repo not in star_repos:
+                star_repos.append(repo)
+        else:
+            other_activities.append(a)
+
     table_rows = []
-    for a in activities[:10]:
+    for a in other_activities[:10]:
         atype = a.get("type", "")
         repo = a.get("repo", {}).get("name", "")
         short_repo = repo.split("/")[-1] if "/" in repo else repo
@@ -405,8 +461,6 @@ def build_commit_card(activities: list[dict]) -> dict:
             count = len(msgs)
             brief = "; ".join(m.get("message", "").strip().split("\n")[0][:30] for m in msgs) if msgs else ""
             content = f"提交 {count} 次" + (f": {brief}" if brief else "")
-        elif atype == "WatchEvent":
-            content = "Star 收藏"
         else:
             content = atype
 
@@ -420,6 +474,21 @@ def build_commit_card(activities: list[dict]) -> dict:
 
         table_rows.append({"time": time_str, "desc": desc, "content": content})
 
+    # Star 合并成一行
+    if star_repos:
+        star_descs = []
+        for r in star_repos:
+            short = r.split("/")[-1] if "/" in r else r
+            star_descs.append(f"{short}: {fetch_repo_desc(r)}")
+        table_rows.append({
+            "time": datetime.now(SHANGHAI).strftime("%m-%d %H:%M"),
+            "desc": "; ".join(star_descs),
+            "content": f"Star 收藏 {len(star_repos)} 个项目",
+        })
+
+    # 生成总结
+    summary = _generate_summary(activities)
+
     return {
         "msg_type": "interactive",
         "card": {
@@ -432,24 +501,45 @@ def build_commit_card(activities: list[dict]) -> dict:
             "body": {
                 "direction": "vertical",
                 "padding": "12px 12px 12px 12px",
-                "elements": [
-                    {
-                        "tag": "table",
-                        "columns": [
-                            {"data_type": "text", "name": "time", "display_name": "时间", "horizontal_align": "center", "width": "20%"},
-                            {"data_type": "text", "name": "desc", "display_name": "项目介绍", "horizontal_align": "left", "width": "35%"},
-                            {"data_type": "text", "name": "content", "display_name": "操作", "horizontal_align": "left", "width": "auto"},
-                        ],
-                        "rows": table_rows,
-                        "row_height": "low",
-                        "header_style": {"background_style": "grey", "bold": True, "lines": 1},
-                        "page_size": min(len(table_rows), 20),
-                    },
-                    {
-                        "tag": "markdown",
-                        "content": f"📊 本次共 {len(activities)} 条活动",
-                    },
-                ],
+    # 构建 elements
+    body_elements = []
+    if summary:
+        body_elements.append({
+            "tag": "markdown",
+            "content": summary,
+        })
+    body_elements.extend([
+        {
+            "tag": "table",
+            "columns": [
+                {"data_type": "text", "name": "time", "display_name": "时间", "horizontal_align": "center", "width": "20%"},
+                {"data_type": "text", "name": "desc", "display_name": "项目介绍", "horizontal_align": "left", "width": "35%"},
+                {"data_type": "text", "name": "content", "display_name": "操作", "horizontal_align": "left", "width": "auto"},
+            ],
+            "rows": table_rows,
+            "row_height": "low",
+            "header_style": {"background_style": "grey", "bold": True, "lines": 1},
+            "page_size": min(len(table_rows), 20),
+        },
+        {
+            "tag": "markdown",
+            "content": f"📊 本次共 {len(activities)} 条活动",
+        },
+    ])
+
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "schema": "2.0",
+            "config": {"update_multi": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "三哥最近的新活动"},
+                "template": "turquoise",
+            },
+            "body": {
+                "direction": "vertical",
+                "padding": "12px 12px 12px 12px",
+                "elements": body_elements,
             },
         },
     }

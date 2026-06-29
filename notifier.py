@@ -8,7 +8,7 @@ _repo_desc_cache: dict[str, str] = {}
 
 # 已知的仓库通俗描述（覆盖常见仓库）
 _REPO_DESC_MAP = {
-    "project-history": "项目历史记录，记录开发过程和关键节点",
+    "project-history": "和舒舒的聊天机器人",
     "bytedance-algorithm-roadmap": "字节跳动算法路线图，系统学习算法",
     "interview": "程序员面试题库，备战技术面试",
     "paddle": "百度飞桨深度学习框架",
@@ -63,13 +63,27 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
     repo_count = len(repo_set)
     activity_count = len(activities)
 
-    # 构建原生 table 的行数据
+    # 构建原生 table 的行数据 — Star 收藏合并成一行
+    star_repos = []
     table_rows = []
     for a in activities:
+        if a.get("type") == "WatchEvent":
+            if a["repo"] not in star_repos:
+                star_repos.append(a["repo"])
+        else:
+            table_rows.append({
+                "time": _format_time(a["created_at"]),
+                "desc": _get_repo_desc(a["repo"]),
+                "content": _format_content(a),
+            })
+
+    # Star 合并成一行
+    if star_repos:
+        star_descs = [f"{r.split('/')[-1]}: {_get_repo_desc(r)}" for r in star_repos]
         table_rows.append({
-            "time": _format_time(a["created_at"]),
-            "desc": _get_repo_desc(a["repo"]),
-            "content": _format_content(a),
+            "time": _format_time(activities[0]["created_at"]) if activities else "",
+            "desc": "; ".join(star_descs),
+            "content": f"Star 收藏 {len(star_repos)} 个项目",
         })
 
     # body elements

@@ -2,8 +2,8 @@ name: Feishu Bot
 
 on:
   schedule:
-    # 每 10 分钟运行一次（GitHub Actions cron 最短 5 分钟，但 10 分钟更省额度）
-    - cron: '*/10 * * * *'
+    # 每 5 分钟运行一次
+    - cron: '*/5 * * * *'
   workflow_dispatch: # 支持手动触发
 
 jobs:

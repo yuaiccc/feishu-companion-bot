@@ -59,6 +59,7 @@ from feishu_api import (
 )
 from memory import add_memories, search_memories, get_all_memories, format_for_deepseek as format_memories
 from bitable_api import add_records as bitable_add_records
+from local_apps import get_app_summary
 
 
 # ---- 模拟数据（用于 --test 模式） ----
@@ -276,8 +277,8 @@ def on_message_received(msg_data: dict):
         is_github_query = any(kw in content.lower() for kw in github_keywords)
 
         if is_github_query and not is_shushu:
-            # 三哥问 commit/在干嘛 → 拉 GitHub 数据 + DeepSeek 总结 + 表格（引用回复）
-            print(f"  [GitHub查询] 检测到关键词，拉取 GitHub 数据 + 生成总结...", flush=True)
+            # 三哥问 commit/在干嘛 → 拉 GitHub 数据 + 本地应用状态 + 总结
+            print(f"  [GitHub查询] 检测到关键词，拉取 GitHub 数据 + 本地应用 + 生成总结...", flush=True)
             try:
                 check_github(receive_id=chat_id, force=True, with_summary=True, reply_to=message_id)
             except Exception as e:
@@ -286,6 +287,14 @@ def on_message_received(msg_data: dict):
                     reply_text("GitHub 数据拉取失败，稍后再试试", message_id)
                 else:
                     send_text("GitHub 数据拉取失败，稍后再试试", receive_id=chat_id)
+
+            # 额外发送一条本地应用状态（只读，不操作）
+            try:
+                app_summary = get_app_summary()
+                if app_summary and message_id:
+                    reply_text(f"💻 三哥电脑当前状态: {app_summary}", message_id)
+            except Exception as e:
+                print(f"  [警告] 获取本地应用失败: {e}", flush=True)
 
             # 删掉思考表情，加 OK 表情
             if thinking_reaction_id and message_id:

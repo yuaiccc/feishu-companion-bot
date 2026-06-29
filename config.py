@@ -38,7 +38,7 @@ GITHUB_PRIVATE_REPOS = [
 
 # ---- 运行配置 ----
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "600"))
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
 
 # ---- 状态文件 ----
 STATE_FILE = BASE_DIR / "state.json"
