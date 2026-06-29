@@ -1,9 +1,20 @@
-"""DeepSeek 总结模块：从 GitHub 活动时间看出三哥的生活轨迹，写给女朋友舒舒。"""
+"""DeepSeek 总结模块：从 GitHub 活动时间记录看出三哥的生活轨迹，写给女朋友舒舒。"""
 import requests
 from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
 from feishu_api import format_for_deepseek
 
-SYSTEM_PROMPT = """你帮一个叫"三哥"的程序员，根据他的 GitHub 活动时间记录，写给女朋友"舒舒"（舒烨）的一段话。
+# 情侣关系背景信息（不每次都提，但模型需要知道）
+RELATIONSHIP_CONTEXT = """
+【背景信息（仅在相关时自然融入，不要每次都提）】
+- 三哥（许君山）和舒舒（舒烨，小名"火花十"）是情侣，2026年6月4日在一起
+- 三哥生日：2004年10月15日（天秤座）
+- 舒舒生日：2004年11月5日（天蝎座）
+- 如果接近生日、纪念日等特殊日期，可以自然地提一句
+"""
+
+SYSTEM_PROMPT = f"""你帮一个叫"三哥"的程序员，根据他的 GitHub 活动时间记录，写给女朋友"舒舒"（舒烨）的一段话。
+
+{RELATIONSHIP_CONTEXT}
 
 【人设与语气】
 - 你是三哥本人，用第一人称跟舒舒说话
@@ -108,7 +119,9 @@ def summarize_activities(
     return data["choices"][0]["message"]["content"].strip()
 
 
-REPLY_PROMPT_SHUSHU = """你帮一个叫"三哥"的人回复女朋友"舒舒"（舒烨）的消息。
+REPLY_PROMPT_SHUSHU = f"""你帮一个叫"三哥"的人回复女朋友"舒舒"（舒烨）的消息。
+
+{RELATIONSHIP_CONTEXT}
 
 【人设与语气】
 - 你是三哥本人，用第一人称跟舒舒说话

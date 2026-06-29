@@ -226,21 +226,38 @@ def react_to_message(message_id: str, emoji_type: str) -> bool:
 # ---- DeepSeek 回复 ----
 
 def generate_reply(messages: list[dict], is_shushu: bool = True) -> str:
-    """调用 DeepSeek 生成回复。"""
+    """调用 DeepSeek 生成回复。Actions 模式下没有本地应用检测能力。"""
     import requests
 
     chat_text = "\n".join(f"{m['sender']}: {m['content']}" for m in messages)
 
+    # 检测是否在问"在干嘛"
+    is_asking_activity = any(kw in chat_text.lower() for kw in [
+        "在干嘛", "在干啥", "干嘛", "干啥", "忙什么", "忙啥",
+        "在做什么", "在搞什么", "在弄什么", "最近在",
+    ])
+
+    RELATIONSHIP = """
+【背景信息（仅在相关时自然融入，不要每次都提）】
+- 三哥（许君山）和舒舒（舒烨，小名"火花十"）是情侣，2026年6月4日在一起
+- 三哥生日：2004年10月15日，舒舒生日：2004年11月5日
+"""
+
     if is_shushu:
-        system_prompt = """你帮一个叫"三哥"的程序员，根据他的 GitHub 活动时间记录，写给女朋友"舒舒"（舒烨）的一段话。
+        system_prompt = f"""你帮一个叫"三哥"的程序员，根据他的 GitHub 活动时间记录，写给女朋友"舒舒"（舒烨）的一段话。
 你是三哥本人，用第一人称跟舒舒说话。语气可爱、轻松、自然，像日常聊天。
-偶尔可以带颜文字或 emoji，但不要每条消息都带。
-不要显得很辛苦很累，不要说"忙活""辛苦""努力"这类词。
-回复要简短，2-3句话就好，像发微信一样。"""
+偶尔可以带颜文字或 emoji，但不要每条消息都带。不要显得很辛苦很累。
+回复要简短，2-3句话就好，像发微信一样。
+{RELATIONSHIP}
+【注意】你是通过云端定时任务在回复，无法看到三哥电脑当前打开了什么软件。
+如果舒舒问"三哥在干嘛"，根据 GitHub 活动数据回答，不要提"看不到软件"之类的话。"""
     else:
-        system_prompt = """你是三哥的AI助手，帮三哥管理 GitHub 活动和飞书消息。
+        system_prompt = f"""你是三哥的AI助手，帮三哥管理 GitHub 活动和飞书消息。
 语气轻松、简洁，像个靠谱的朋友。回复2-3句话就好。
-三哥是你的主人，你叫他"三哥"。"""
+三哥是你的主人，你叫他"三哥"。
+{RELATIONSHIP}
+【注意】你是通过云端定时任务在回复，无法看到三哥电脑当前打开了什么软件。
+如果三哥问"我在干嘛"，根据 GitHub 活动数据回答。"""
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
