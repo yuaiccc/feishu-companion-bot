@@ -1,30 +1,62 @@
-"""GitHub Events API 客户端：拉取用户公开活动并解析成结构化数据。"""
+"""GitHub Events API 客户端：拉取用户公开活动并解析成结构化数据。
+也支持直接轮询 private 仓库的 commits（Events API 不返回 private 仓库活动）。
+"""
 import requests
 
 GITHUB_API = "https://api.github.com"
 
 
-def fetch_github_events(username: str, token: str = "") -> list[dict]:
-    """获取用户最近的公开 GitHub 事件（最多 30 条/页）。"""
+def _headers(token: str = "") -> dict:
     headers = {"Accept": "application/vnd.github+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def fetch_github_events(username: str, token: str = "") -> list[dict]:
+    """获取用户最近的公开 GitHub 事件（最多 30 条/页）。"""
     url = f"{GITHUB_API}/users/{username}/events/public"
-    resp = requests.get(url, headers=headers, timeout=30)
+    resp = requests.get(url, headers=_headers(token), timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def fetch_private_repo_commits(repo: str, token: str = "", per_page: int = 10) -> list[dict]:
+    """直接拉取 private 仓库最近的 commits，返回模拟成 GitHub Event 格式的列表。
+    这样可以和 Events API 的事件统一处理。
+    """
+    url = f"{GITHUB_API}/repos/{repo}/commits"
+    resp = requests.get(url, headers=_headers(token), params={"per_page": per_page}, timeout=30)
+    if resp.status_code != 200:
+        return []
+    commits = resp.json()
+    events = []
+    for c in commits:
+        msg = c.get("commit", {}).get("message", "")
+        date = c.get("commit", {}).get("author", {}).get("date", "")
+        sha = c.get("sha", "")
+        events.append({
+            "id": f"private-{repo}-{sha[:8]}",
+            "type": "PushEvent",
+            "repo": {"name": repo},
+            "created_at": date,
+            "payload": {
+                "ref": "refs/heads/main",
+                "size": 1,
+                "head": sha,
+                "commits": [{"message": msg}],
+            },
+        })
+    return events
 
 
 def fetch_commit_messages(repo: str, head_sha: str, token: str = "") -> list[str]:
     """用 head SHA 拉取该 commit 的 message（以及它的 parent 链）。
     GitHub Events API 有时只返回 head SHA 不返回 commits 详情，需要补抓。
     """
-    headers = {"Accept": "application/vnd.github+json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
     url = f"{GITHUB_API}/repos/{repo}/commits/{head_sha}"
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=_headers(token), timeout=15)
         resp.raise_for_status()
         data = resp.json()
         messages = [data.get("commit", {}).get("message", "")]

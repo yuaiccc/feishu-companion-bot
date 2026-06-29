@@ -31,6 +31,10 @@ MEMORY_DIR = BASE_DIR / os.getenv("MEMORY_DIR", "memory_data")
 # ---- GitHub ----
 GITHUB_USERNAME = os.getenv("GITHUB_USERNAME", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+# 额外追踪的 private 仓库（Events API 不返回 private 仓库活动）
+GITHUB_PRIVATE_REPOS = [
+    r.strip() for r in os.getenv("GITHUB_PRIVATE_REPOS", "").split(",") if r.strip()
+]
 
 # ---- 运行配置 ----
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
