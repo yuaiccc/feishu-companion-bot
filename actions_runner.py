@@ -406,8 +406,26 @@ def _explain_repo(repo_name: str, gh_desc: str) -> str:
         return gh_desc or repo_name
 
 
+def _parse_time(time_str: str):
+    """解析 GitHub 时间字符串为 datetime。失败返回 None。"""
+    if not time_str:
+        return None
+    try:
+        return datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _format_time(time_str: str) -> str:
+    """格式化时间字符串为 MM-DD HH:MM（上海时区）。"""
+    dt = _parse_time(time_str)
+    if not dt:
+        return ""
+    return dt.astimezone(SHANGHAI).strftime("%m-%d %H:%M")
+
+
 def _generate_summary(activities: list[dict]) -> str:
-    """用 DeepSeek 生成最近活动的总结。"""
+    """用 DeepSeek 生成最近活动的总结。Actions 模式下可能三哥不在线。"""
     if not activities or not DEEPSEEK_API_KEY:
         return ""
 
@@ -425,6 +443,19 @@ def _generate_summary(activities: list[dict]) -> str:
                 if msg:
                     commit_msgs.append(msg)
 
+    # 判断三哥可能不在线的理由
+    now_hour = datetime.now(SHANGHAI).hour
+    offline_reason = ""
+    if 0 <= now_hour < 7:
+        offline_reason = "现在凌晨了，三哥可能已经睡了，这段是他睡着前自动跑的记录。"
+    elif 7 <= now_hour < 9:
+        offline_reason = "这个点三哥可能在去上课的路上。"
+    elif 12 <= now_hour < 14:
+        offline_reason = "午休时间，三哥可能在吃饭。"
+    elif 22 <= now_hour < 24:
+        offline_reason = "挺晚了，三哥可能准备休息了。"
+    offline_note = f"\n（这是云端自动回复，{offline_reason}）" if offline_reason else "\n（这是云端自动回复，三哥电脑可能没开）"
+
     summary_input = f"提交 {push_count} 次，收藏 {star_count} 个项目，涉及仓库: {', '.join(repos)}"
     if commit_msgs:
         summary_input += f"\n提交信息: {'; '.join(commit_msgs[:5])}"
@@ -437,11 +468,13 @@ def _generate_summary(activities: list[dict]) -> str:
             json={
                 "model": DEEPSEEK_MODEL,
                 "messages": [
-                    {"role": "system", "content": "你是三哥的AI助手。根据三哥最近的 GitHub 活动数据，写一段简短的活动总结（2-3句话），语气轻松活泼。不要列清单，用自然语言描述他在做什么。"},
+                    {"role": "system", "content": f"""你是三哥（许君山）的AI助手，根据三哥最近的 GitHub 活动数据，写一段简短的活动总结（2-3句话），语气轻松活泼。不要列清单，用自然语言描述他在做什么。
+{offline_note}
+三哥是学生，不要提同事、上班之类的话。"""},
                     {"role": "user", "content": summary_input},
                 ],
                 "temperature": 0.7,
-                "max_tokens": 100,
+                "max_tokens": 120,
             },
             timeout=20,
         )
@@ -451,9 +484,10 @@ def _generate_summary(activities: list[dict]) -> str:
 
 
 def build_commit_card(activities: list[dict]) -> dict:
-    """构建飞书卡片表格。Star 收藏合并成一行。"""
+    """构建飞书卡片表格。Star 合并一行，同一项目1小时内提交合并一行。"""
     # 先把 Star 事件合并
     star_repos = []
+    push_groups: dict[str, list[dict]] = {}  # repo -> [activities within 1h]
     other_activities = []
     for a in activities:
         atype = a.get("type", "")
@@ -461,34 +495,53 @@ def build_commit_card(activities: list[dict]) -> dict:
         if atype == "WatchEvent":
             if repo not in star_repos:
                 star_repos.append(repo)
+        elif atype == "PushEvent":
+            # 检查是否可以合并到已有分组（同一仓库 + 1小时内）
+            merged = False
+            if repo in push_groups and push_groups[repo]:
+                last_time = _parse_time(push_groups[repo][-1].get("created_at", ""))
+                cur_time = _parse_time(a.get("created_at", ""))
+                if last_time and cur_time and abs((cur_time - last_time).total_seconds()) <= 3600:
+                    push_groups[repo].append(a)
+                    merged = True
+            if not merged:
+                push_groups.setdefault(repo, []).append(a)
         else:
             other_activities.append(a)
 
     table_rows = []
-    for a in other_activities[:10]:
-        atype = a.get("type", "")
-        repo = a.get("repo", {}).get("name", "")
-        short_repo = repo.split("/")[-1] if "/" in repo else repo
-        desc = fetch_repo_desc(repo)
-
-        # 格式化操作
-        detail = a.get("payload", {})
-        if atype == "PushEvent":
+    # 合并后的 push 分组
+    for repo, group in push_groups.items():
+        if len(group) == 1:
+            a = group[0]
+            detail = a.get("payload", {})
             msgs = detail.get("commits", [])
             count = len(msgs)
             brief = "; ".join(m.get("message", "").strip().split("\n")[0][:30] for m in msgs) if msgs else ""
             content = f"提交 {count} 次" + (f": {brief}" if brief else "")
+            time_str = _format_time(a.get("created_at", ""))
+            desc = fetch_repo_desc(repo)
         else:
-            content = atype
+            total_commits = sum(len(g.get("payload", {}).get("commits", [])) for g in group)
+            all_msgs = []
+            for g in group:
+                for c in g.get("payload", {}).get("commits", []):
+                    msg = c.get("message", "").strip().split("\n")[0][:30]
+                    if msg:
+                        all_msgs.append(msg)
+            brief = "; ".join(all_msgs[:3]) if all_msgs else ""
+            content = f"提交 {total_commits} 次" + (f": {brief}" if brief else "")
+            time_str = _format_time(group[0].get("created_at", ""))
+            desc = fetch_repo_desc(repo)
+        table_rows.append({"time": time_str, "desc": desc, "content": content})
 
-        time_str = ""
-        created = a.get("created_at", "")
-        try:
-            dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-            time_str = dt.astimezone(SHANGHAI).strftime("%m-%d %H:%M")
-        except Exception:
-            time_str = created[:16]
-
+    # 其他活动
+    for a in other_activities[:10]:
+        atype = a.get("type", "")
+        repo = a.get("repo", {}).get("name", "")
+        desc = fetch_repo_desc(repo)
+        content = atype
+        time_str = _format_time(a.get("created_at", ""))
         table_rows.append({"time": time_str, "desc": desc, "content": content})
 
     # Star 合并成一行

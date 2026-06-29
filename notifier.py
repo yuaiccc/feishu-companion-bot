@@ -58,23 +58,63 @@ def _get_repo_desc(repo: str) -> str:
 def build_message(activities: list[dict], summary: str = "") -> dict:
     """构建飞书交互式卡片消息：原生 table 表格 + 统计。summary 可选。
     使用 schema 2.0 格式和原生 table 组件。
+    同一项目 1 小时内的提交合并成一行。
     """
     repo_set = {a["repo"] for a in activities if a["repo"]}
     repo_count = len(repo_set)
     activity_count = len(activities)
 
-    # 构建原生 table 的行数据 — Star 收藏合并成一行
+    # ---- 合并同一项目 1 小时内的 PushEvent ----
     star_repos = []
     table_rows = []
+    push_groups: dict[str, list[dict]] = {}  # repo -> [activities within 1h]
+
     for a in activities:
         if a.get("type") == "WatchEvent":
             if a["repo"] not in star_repos:
                 star_repos.append(a["repo"])
+        elif a.get("type") == "PushEvent":
+            repo = a["repo"]
+            # 检查是否可以合并到已有分组（同一仓库 + 1小时内）
+            merged = False
+            if repo in push_groups and push_groups[repo]:
+                last_time = _parse_time(push_groups[repo][-1]["created_at"])
+                cur_time = _parse_time(a["created_at"])
+                if last_time and cur_time and abs((cur_time - last_time).total_seconds()) <= 3600:
+                    push_groups[repo].append(a)
+                    merged = True
+            if not merged:
+                push_groups.setdefault(repo, []).append(a)
         else:
             table_rows.append({
                 "time": _format_time(a["created_at"]),
                 "desc": _get_repo_desc(a["repo"]),
                 "content": _format_content(a),
+            })
+
+    # 把合并后的 push 分组转成表格行
+    for repo, group in push_groups.items():
+        if len(group) == 1:
+            # 单条不合并
+            a = group[0]
+            table_rows.append({
+                "time": _format_time(a["created_at"]),
+                "desc": _get_repo_desc(a["repo"]),
+                "content": _format_content(a),
+            })
+        else:
+            # 多条合并
+            first_time = _format_time(group[0]["created_at"])
+            total_commits = sum(g["detail"].get("commit_count", 1) for g in group)
+            all_msgs = []
+            for g in group:
+                all_msgs.extend(g["detail"].get("commit_messages", []))
+            brief = _brief_messages(all_msgs[:3])  # 只取前3条消息摘要
+            content = f"提交 {total_commits} 次" + (f": {brief}" if brief else "")
+            table_rows.append({
+                "time": first_time,
+                "desc": _get_repo_desc(repo),
+                "content": content,
             })
 
     # Star 合并成一行
@@ -166,6 +206,14 @@ def _format_time(iso_str: str) -> str:
         return dt.astimezone(_SHANGHAI).strftime("%m-%d %H:%M")
     except Exception:
         return iso_str
+
+
+def _parse_time(iso_str: str):
+    """把 ISO 时间转成 datetime 对象，失败返回 None。"""
+    try:
+        return datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _short_repo(full: str) -> str:

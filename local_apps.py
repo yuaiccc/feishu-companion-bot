@@ -1,37 +1,11 @@
-"""本地应用检测模块：读取当前打开的应用列表（只读，不操作）。
-用 AppleScript 获取前台应用和窗口列表。
+"""本地应用检测模块：读取当前前台活跃应用（只读，不操作）。
+重点看前台在用什么，而不是列出一堆后台打开的。
 """
 import subprocess
-import plistlib
-
-
-def get_running_apps() -> list[str]:
-    """获取当前正在运行的可见应用列表（不含系统进程）。"""
-    script = """
-    tell application "System Events"
-        set visibleApps to {}
-        repeat with proc in (every process whose background only is false)
-            set end of visibleApps to name of proc
-        end repeat
-        return visibleApps
-    end tell
-    """
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return []
-        # osascript 返回逗号分隔的列表
-        apps = [a.strip() for a in result.stdout.strip().split(",") if a.strip()]
-        return apps
-    except Exception:
-        return []
 
 
 def get_frontmost_app() -> str:
-    """获取当前最前台的 应用名称。"""
+    """获取当前最前台的应用名称。"""
     script = """
     tell application "System Events"
         set frontApp to name of first process whose frontmost is true
@@ -50,26 +24,80 @@ def get_frontmost_app() -> str:
     return ""
 
 
-def get_app_summary() -> str:
-    """获取当前应用状态的中文摘要，用于告诉舒舒三哥在干什么。"""
-    front = get_frontmost_app()
-    running = get_running_apps()
+def get_frontmost_window_title() -> str:
+    """获取当前前台应用的窗口标题（能看出具体在做什么）。"""
+    script = """
+    tell application "System Events"
+        set frontProc to first process whose frontmost is true
+        try
+            set winTitle to title of front window of frontProc
+            return winTitle
+        on error
+            return ""
+        end try
+    end tell
+    """
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
 
-    if not running:
+
+def get_recent_apps(n: int = 3) -> list[str]:
+    """获取最近活跃的 n 个应用（按 AXRecentWindows 或窗口顺序）。
+    AppleScript 无法直接获取"最近使用顺序"，这里用前台 + 可见窗口顶部的几个。
+    """
+    script = f"""
+    tell application "System Events"
+        set visibleProcs to {{}}
+        repeat with proc in (every process whose background only is false and frontmost is false)
+            try
+                if (count of windows of proc) > 0 then
+                    set end of visibleProcs to name of proc
+                end if
+            end try
+        end repeat
+        return visibleProcs
+    end tell
+    """
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return []
+        apps = [a.strip() for a in result.stdout.strip().split(",") if a.strip()]
+        # 去掉系统应用
+        system_apps = {"Finder", "Dock", "SystemUIServer", "ControlCenter",
+                       "Spotlight", "WindowManager", "CoreServicesUIAgent"}
+        apps = [a for a in apps if a not in system_apps]
+        return apps[:n]
+    except Exception:
+        return []
+
+
+def get_app_summary() -> str:
+    """获取当前前台应用状态摘要，重点突出在做什么。
+    返回格式: "正在用 Terminal（标题: xxx），旁边还开着 Claude, Feishu"
+    """
+    front = get_frontmost_app()
+    win_title = get_frontmost_window_title()
+    recent = get_recent_apps(3)
+
+    if not front:
         return ""
 
-    # 过滤掉 Finder 等系统应用，保留有意思的
-    interesting = [a for a in running if a not in (
-        "Finder", "Dock", "SystemUIServer", "ControlCenter",
-        "Spotlight", "WindowManager", "CoreServicesUIAgent",
-    )]
+    parts = [f"正在用 {front}"]
+    if win_title:
+        parts.append(f"（{win_title[:50]}）")
+    if recent:
+        parts.append(f"旁边还开着: {', '.join(recent)}")
 
-    summary_parts = []
-    if front:
-        summary_parts.append(f"正在用 {front}")
-    if interesting:
-        # 去重
-        unique = list(dict.fromkeys(interesting))
-        summary_parts.append(f"打开了: {', '.join(unique)}")
-
-    return "，".join(summary_parts)
+    return "，".join(parts)

@@ -33,6 +33,9 @@ from config import (
     DRY_RUN,
     FEISHU_READ_MESSAGES,
     MEMORY_ENABLED,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_MODEL,
 )
 from github_client import fetch_github_events, fetch_private_repo_commits, parse_events
 from summarizer import summarize_activities, reply_to_shushu, reply_to_shushu_stream
@@ -217,7 +220,127 @@ def check_github(receive_id: str = "", force: bool = False, with_summary: bool =
     else:
         print("  没有 GitHub 活动", flush=True)
         if force:
-            send_text("最近没有新的 GitHub 活动哦", receive_id=receive_id)
+            # force 模式下没有新活动，但仍展示最近的活动记录
+            if raw_events:
+                print(f"  [force] 展示最近 {min(5, len(raw_events))} 条活动", flush=True)
+                recent_raw = raw_events[:5]
+                activities = parse_events(recent_raw, GITHUB_TOKEN)
+                summary = ""
+                if with_summary:
+                    try:
+                        summary = summarize_activities(activities)
+                    except Exception:
+                        pass
+                card = build_message(activities, summary=summary)
+                if reply_to:
+                    reply_card(card, reply_to)
+                else:
+                    send_card(card, receive_id=receive_id)
+            else:
+                send_text("最近确实没有 GitHub 活动记录", receive_id=receive_id)
+
+
+# ---- LLM 意图判断 ----
+
+def _should_use_tools(content: str, sender: str = "") -> bool:
+    """用 DeepSeek 判断这条消息是否需要调用工具（GitHub 数据 + 本地应用状态）。
+    返回 True 表示需要调用工具，False 表示纯聊天即可。
+    """
+    import requests as req
+
+    # 短消息快速跳过
+    if len(content) <= 2:
+        return False
+
+    try:
+        resp = req.post(
+            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": DEEPSEEK_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": """判断用户消息是否在询问"某人最近在做什么""在干嘛""忙什么"等需要了解状态的问题。
+
+以下情况回复 YES（需要查工具）：
+- "在干嘛""在干什么""忙什么""最近在做什么"
+- "最近怎么样""最近忙不忙"
+- "看看代码""最近提交""commit""代码记录"
+- "最近活动""最近进度"
+- "你在干嘛""他在干嘛""三哥在干嘛"
+
+以下情况回复 NO（纯聊天，不需要工具）：
+- "你好""嗨""hi""早"
+- "谢谢""拜拜""晚安"
+- "想你""爱你""哈哈""好的"
+- "今天天气""吃什么"
+
+只回复 YES 或 NO。""",
+                    },
+                    {"role": "user", "content": f"用户消息: {content}"},
+                ],
+                "temperature": 0.0,
+                "max_tokens": 5,
+            },
+            timeout=10,
+        )
+        result = resp.json()["choices"][0]["message"]["content"].strip().upper()
+        return "YES" in result
+    except Exception as e:
+        print(f"  [意图判断] 失败，默认不调用工具: {e}", flush=True)
+        return False
+
+
+def _interpret_apps(app_summary: str) -> str:
+    """让 DeepSeek 根据本地应用列表，推测三哥在干什么，用通俗中文回复。"""
+    import requests as req
+
+    try:
+        resp = req.post(
+            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": DEEPSEEK_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": """你是三哥（许君山）本人，根据电脑当前打开的应用列表，跟女朋友舒舒（舒烨）说一句你在干什么。
+
+要求：
+- 用第一人称，语气轻松可爱，像日常聊天
+- 1-2句话就好，不要长篇大论
+- 把英文名翻译成通俗中文，不要出现英文 app 名
+- 根据前台应用和窗口标题推测三哥可能在做什么
+- 偶尔可以带个 emoji
+- 不要说"我推测你在"，直接说"我在XXX"
+- 结尾偶尔加一句关心舒舒的话，不要每次都说，大概三分之一的概率带一句
+
+例子：
+输入: 正在用 Terminal（main.py），旁边还开着: Claude, Feishu
+输出: 在敲代码呢，改着咱俩的聊天机器人～想你
+
+输入: 正在用 Feishu
+输出: 在看飞书消息呢～
+""",
+                    },
+                    {"role": "user", "content": f"应用状态: {app_summary}"},
+                ],
+                "temperature": 0.7,
+                "max_tokens": 80,
+            },
+            timeout=15,
+        )
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"  [应用解读] 失败: {e}", flush=True)
+        return ""
 
 
 def github_poll_loop():
@@ -265,20 +388,27 @@ def on_message_received(msg_data: dict):
             except Exception as e:
                 print(f"  [警告] 添加思考表情失败: {e}", flush=True)
 
-        # ---- 第1.5步：检测是否在问 GitHub/commit/最近在干嘛，如果是直接拉真实数据 ----
-        github_keywords = [
-            "commit", "代码", "提交", "看看最近", "最近做", "github",
-            "git", "仓库", "push", "写了什么", "最近写", "活动",
-            "看看代码", "代码记录", "编程",
-            "在干嘛", "在干啥", "干嘛", "干啥", "忙什么", "忙啥",
-            "最近在", "最近搞", "最近弄", "最近看", "最近学",
-            "在做什么", "在搞什么", "在弄什么",
-        ]
-        is_github_query = any(kw in content.lower() for kw in github_keywords)
+        # ---- 第1.5步：用 LLM 判断是否需要调用工具（GitHub 数据 + 本地应用状态）----
+        needs_tools = _should_use_tools(content, sender_name)
+        if needs_tools and not is_shushu:
+            # 先发本地应用解读（DeepSeek 推测三哥在干什么）
+            app_interpretation = ""
+            try:
+                app_summary = get_app_summary()
+                if app_summary:
+                    app_interpretation = _interpret_apps(app_summary)
+                    if app_interpretation and message_id:
+                        reply_text(app_interpretation, message_id)
+                        print(f"  [本地应用] 已发送解读: {app_interpretation[:50]}...", flush=True)
+                    else:
+                        print(f"  [本地应用] DeepSeek 解读失败", flush=True)
+                else:
+                    print(f"  [本地应用] 未获取到应用状态", flush=True)
+            except Exception as e:
+                print(f"  [警告] 获取本地应用失败: {e}", flush=True)
 
-        if is_github_query and not is_shushu:
-            # 三哥问 commit/在干嘛 → 拉 GitHub 数据 + 本地应用状态 + 总结
-            print(f"  [GitHub查询] 检测到关键词，拉取 GitHub 数据 + 本地应用 + 生成总结...", flush=True)
+            # 再拉 GitHub 数据 + 总结表格
+            print(f"  [工具调用] LLM 判断需要调用工具，拉取 GitHub 数据 + 生成总结...", flush=True)
             try:
                 check_github(receive_id=chat_id, force=True, with_summary=True, reply_to=message_id)
             except Exception as e:
@@ -287,14 +417,6 @@ def on_message_received(msg_data: dict):
                     reply_text("GitHub 数据拉取失败，稍后再试试", message_id)
                 else:
                     send_text("GitHub 数据拉取失败，稍后再试试", receive_id=chat_id)
-
-            # 额外发送一条本地应用状态（只读，不操作）
-            try:
-                app_summary = get_app_summary()
-                if app_summary and message_id:
-                    reply_text(f"💻 三哥电脑当前状态: {app_summary}", message_id)
-            except Exception as e:
-                print(f"  [警告] 获取本地应用失败: {e}", flush=True)
 
             # 删掉思考表情，加 OK 表情
             if thinking_reaction_id and message_id:

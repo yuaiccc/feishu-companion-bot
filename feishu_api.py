@@ -610,22 +610,28 @@ def start_event_listener(on_message_received=None):
 
     def _handle_message(data: P2ImMessageReceiveV1) -> None:
         """处理收到的消息事件。"""
-        print(f"\n  [长连接] _handle_message 被调用了!", flush=True)
+        nonlocal _processed_ids
         try:
             event = data.event
             msg = event.message
             sender_info = event.sender
 
-            # ---- 去重：飞书 SDK 可能对同一事件触发两次回调 ----
-            msg_key = msg.message_id
-            if msg_key in _processed_ids:
-                print(f"  [长连接] 跳过重复消息: {msg_key}", flush=True)
+            # ---- 双重去重：event_id + message_id ----
+            # 飞书"至少发送一次"策略可能重发，用 event_id 和 message_id 双重判断
+            header = data.header if hasattr(data, "header") else None
+            event_id = header.event_id if header and hasattr(header, "event_id") else ""
+            message_id = msg.message_id if hasattr(msg, "message_id") else ""
+            dedup_key = f"{event_id}:{message_id}" if event_id else message_id
+
+            if dedup_key in _processed_ids:
+                print(f"  [长连接] 跳过重复消息: event_id={event_id} message_id={message_id}", flush=True)
                 return
-            _processed_ids.add(msg_key)
-            # 防止集合无限增长，保留最近 200 条
-            if len(_processed_ids) > 200:
-                _processed_ids.clear()
-                _processed_ids.add(msg_key)
+            _processed_ids.add(dedup_key)
+            # 保留最近 500 条，防止无限增长
+            if len(_processed_ids) > 500:
+                _processed_ids = set(list(_processed_ids)[-300:])
+
+            print(f"\n  [长连接] 收到新消息: event_id={event_id} message_id={message_id}", flush=True)
 
             sender_id = sender_info.sender_id.open_id if sender_info and sender_info.sender_id else ""
             sender_type = sender_info.sender_type if sender_info else ""
