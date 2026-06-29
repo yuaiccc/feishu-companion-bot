@@ -489,18 +489,6 @@ def build_commit_card(activities: list[dict]) -> dict:
     # 生成总结
     summary = _generate_summary(activities)
 
-    return {
-        "msg_type": "interactive",
-        "card": {
-            "schema": "2.0",
-            "config": {"update_multi": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": "三哥最近的新活动"},
-                "template": "turquoise",
-            },
-            "body": {
-                "direction": "vertical",
-                "padding": "12px 12px 12px 12px",
     # 构建 elements
     body_elements = []
     if summary:
@@ -526,6 +514,23 @@ def build_commit_card(activities: list[dict]) -> dict:
             "content": f"📊 本次共 {len(activities)} 条活动",
         },
     ])
+
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "schema": "2.0",
+            "config": {"update_multi": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "三哥最近的新活动"},
+                "template": "turquoise",
+            },
+            "body": {
+                "direction": "vertical",
+                "padding": "12px 12px 12px 12px",
+                "elements": body_elements,
+            },
+        },
+    }
 
     return {
         "msg_type": "interactive",
