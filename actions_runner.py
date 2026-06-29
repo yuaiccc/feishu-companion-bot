@@ -8,15 +8,16 @@
 环境变量（从 GitHub Actions Secrets 注入）:
   FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_CHAT_ID,
   FEISHU_SHUSHU_OPEN_ID, FEISHU_SANGE_OPEN_ID,
-  GITHUB_USERNAME, GITHUB_TOKEN, GITHUB_PRIVATE_REPOS,
+  GH_USERNAME, GH_TOKEN, GH_PRIVATE_REPOS,
   DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
-  GITHUB_RUN_ID (GitHub Actions 自动注入，用于检测本地是否在跑)
 """
 import os
 import sys
 import json
 import time
 from datetime import datetime, timezone, timedelta
+
+from call_notes import build_call_notes_context
 
 # 确保输出不缓冲
 sys.stdout.reconfigure(line_buffering=True)
@@ -38,7 +39,7 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 OPEN_API = "https://open.feishu.cn/open-apis"
 SHANGHAI = timezone(timedelta(hours=8))
 
-# 状态文件（Actions 之间用 artifact 传递，这里用本地临时文件）
+# 状态文件：GitHub Actions 之间通过 actions/cache 恢复和保存
 STATE_FILE = "actions_state.json"
 
 
@@ -66,6 +67,47 @@ def _load_state() -> dict:
 def _save_state(state: dict):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def _is_bot_mention(mention: dict) -> bool:
+    """判断一条 mention 是否指向当前飞书应用机器人。
+
+    飞书消息事件里应用 mention 使用 mentioned_type=app；消息列表 REST
+    返回的 mention 结构可能只带 id 子字段。这里同时兼容两种来源，
+    避免 Actions 兜底漏回 @ 机器人的群聊消息。
+    """
+    if not isinstance(mention, dict):
+        return False
+
+    mentioned_type = str(mention.get("mentioned_type", "")).lower()
+    if mentioned_type == "app":
+        return True
+
+    mention_id = mention.get("id", {})
+    if not isinstance(mention_id, dict):
+        return False
+
+    app_id = mention_id.get("app_id") or mention_id.get("appId")
+    if app_id and app_id == FEISHU_APP_ID:
+        return True
+
+    # Some API shapes identify an app mention by putting "app" in the id type.
+    id_type = str(mention_id.get("id_type") or mention_id.get("type") or "").lower()
+    if id_type == "app":
+        return True
+
+    open_id = str(mention_id.get("open_id", "")).lower()
+    return open_id == "app"
+
+
+def _message_mentions_bot(item: dict, content: str = "") -> bool:
+    """群聊兜底：优先用 mentions 判断，缺字段时只兼容带 @ 占位符的文本。"""
+    mentions = item.get("mentions") or []
+    if mentions:
+        return any(_is_bot_mention(m) for m in mentions)
+
+    # 兼容少数旧消息列表没有 mentions 数组，但 text 里仍保留 @_user_N 占位符。
+    return "@_user_" in content
 
 
 # ---- 飞书消息读取 ----
@@ -111,17 +153,8 @@ def fetch_chat_messages(limit: int = 20) -> list[dict]:
         if not is_shushu and not is_sange:
             continue
 
-        # 检查是否 @了机器人
-        mentions = item.get("mentions", [])
-        is_mentioned = False
-        if mentions:
-            for m in mentions:
-                if m.get("id", {}).get("open_id") == "app":
-                    is_mentioned = True
-                    break
-        # 如果没有 mentions 信息，默认不要求 @（兼容旧消息）
-        # 但如果有 mentions 且没 @机器人，跳过
-        if mentions and not is_mentioned:
+        # 群聊消息只有 @当前应用机器人 才回复。
+        if not _message_mentions_bot(item, content):
             continue
 
         import re
@@ -239,25 +272,29 @@ def generate_reply(messages: list[dict], is_shushu: bool = True) -> str:
 
     RELATIONSHIP = """
 【背景信息（仅在相关时自然融入，不要每次都提）】
-- 三哥（许君山）和舒舒（舒烨，小名"火花十"）是情侣，2026年6月4日在一起
-- 三哥生日：2004年10月15日，舒舒生日：2004年11月5日
+- 三哥 = 秋酿 = 许君山；舒烨 = 微里 = 舒舒
+- 秋酿和微里是情侣，2026年6月4日在一起
+- 秋酿生日：2004年10月15日，微里生日：2004年11月5日
+- 这个机器人只是在秋酿本人不方便及时回复时，临时代替秋酿陪微里说话，不是第三个人、不是旁观助手
+- 秋酿平时多数时间都在想微里；GitHub 活动只是偶尔解释状态的线索，不是人设中心
 """
 
     if is_shushu:
-        system_prompt = f"""你帮一个叫"三哥"的程序员，根据他的 GitHub 活动时间记录，写给女朋友"舒舒"（舒烨）的一段话。
-你是三哥本人，用第一人称跟舒舒说话。语气可爱、轻松、自然，像日常聊天。
+        system_prompt = f"""你是秋酿本人，因为电脑可能关机或本人暂时不在，云端兜底替自己回复女朋友微里（舒烨）的话。
+用第一人称跟微里说话，不要说"机器人""助手""我替秋酿"。语气可爱、轻松、自然，像日常聊天。
 偶尔可以带颜文字或 emoji，但不要每条消息都带。不要显得很辛苦很累。
 回复要简短，2-3句话就好，像发微信一样。
+默认重点是想微里、在意微里、让微里安心；不要老是提写代码、做项目、GitHub。
 {RELATIONSHIP}
 【注意】你是通过云端定时任务在回复，无法看到三哥电脑当前打开了什么软件。
-如果舒舒问"三哥在干嘛"，根据 GitHub 活动数据回答，不要提"看不到软件"之类的话。"""
+如果微里问"在干嘛"，可以轻轻说可能刚好不在电脑前、在休息或在想她；只有在她明确问代码/进度时，才根据 GitHub 活动简短回答。"""
     else:
-        system_prompt = f"""你是三哥的AI助手，帮三哥管理 GitHub 活动和飞书消息。
+        system_prompt = f"""你是秋酿的AI助手，帮秋酿管理 GitHub 活动和飞书消息。
 语气轻松、简洁，像个靠谱的朋友。回复2-3句话就好。
-三哥是你的主人，你叫他"三哥"。
+秋酿本人就在群里跟你说话时，不要冒充微里；可以叫他"三哥"。
 {RELATIONSHIP}
 【注意】你是通过云端定时任务在回复，无法看到三哥电脑当前打开了什么软件。
-如果三哥问"我在干嘛"，根据 GitHub 活动数据回答。"""
+如果三哥问"我在干嘛"，根据已知 GitHub 活动简短回答，但提醒他别只顾着项目，也记得回微里。"""
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -267,7 +304,7 @@ def generate_reply(messages: list[dict], is_shushu: bool = True) -> str:
         "model": DEEPSEEK_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"最近对话:\n{chat_text}\n\n请生成回复:"},
+            {"role": "user", "content": _build_reply_user_content(chat_text)},
         ],
         "temperature": 0.8,
         "max_tokens": 300,
@@ -281,6 +318,19 @@ def generate_reply(messages: list[dict], is_shushu: bool = True) -> str:
     )
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+def _build_reply_user_content(chat_text: str) -> str:
+    content = f"最近对话:\n{chat_text}\n\n请生成回复:"
+    call_notes_context = build_call_notes_context()
+    if call_notes_context:
+        content += (
+            "\n\n--- 重要通话纪要上下文 ---\n"
+            f"{call_notes_context}\n\n"
+            "这些通话纪要是秋酿和微里关系里的重要信息源。只在相关时自然使用，"
+            "不要暴露为'我读取了纪要'。"
+        )
+    return content
 
 
 # ---- GitHub 活动 ----
@@ -425,7 +475,7 @@ def _format_time(time_str: str) -> str:
 
 
 def _generate_summary(activities: list[dict]) -> str:
-    """用 DeepSeek 生成最近活动的总结。Actions 模式下可能三哥不在线。"""
+    """用 DeepSeek 生成最近活动的总结。Actions 模式下可能秋酿不在线。"""
     if not activities or not DEEPSEEK_API_KEY:
         return ""
 
@@ -443,22 +493,30 @@ def _generate_summary(activities: list[dict]) -> str:
                 if msg:
                     commit_msgs.append(msg)
 
-    # 判断三哥可能不在线的理由
+    # 判断秋酿可能不在线的理由
     now_hour = datetime.now(SHANGHAI).hour
     offline_reason = ""
     if 0 <= now_hour < 7:
-        offline_reason = "现在凌晨了，三哥可能已经睡了，这段是他睡着前自动跑的记录。"
+        offline_reason = "现在凌晨了，秋酿可能已经睡了，这段只是睡前留下的自动记录。"
     elif 7 <= now_hour < 9:
-        offline_reason = "这个点三哥可能在去上课的路上。"
+        offline_reason = "这个点秋酿可能在去上课的路上。"
     elif 12 <= now_hour < 14:
-        offline_reason = "午休时间，三哥可能在吃饭。"
+        offline_reason = "午休时间，秋酿可能在吃饭或休息。"
     elif 22 <= now_hour < 24:
-        offline_reason = "挺晚了，三哥可能准备休息了。"
-    offline_note = f"\n（这是云端自动回复，{offline_reason}）" if offline_reason else "\n（这是云端自动回复，三哥电脑可能没开）"
+        offline_reason = "挺晚了，秋酿可能准备休息了。"
+    offline_note = f"\n（这是云端自动回复，{offline_reason}）" if offline_reason else "\n（这是云端自动回复，秋酿电脑可能没开）"
 
     summary_input = f"提交 {push_count} 次，收藏 {star_count} 个项目，涉及仓库: {', '.join(repos)}"
     if commit_msgs:
         summary_input += f"\n提交信息: {'; '.join(commit_msgs[:5])}"
+
+    call_notes_context = build_call_notes_context()
+    if call_notes_context:
+        summary_input += (
+            "\n\n--- 重要通话纪要上下文 ---\n"
+            f"{call_notes_context}\n\n"
+            "这些通话纪要是秋酿和微里关系里的重要信息源。只在相关时自然使用。"
+        )
 
     try:
         import requests
@@ -468,9 +526,10 @@ def _generate_summary(activities: list[dict]) -> str:
             json={
                 "model": DEEPSEEK_MODEL,
                 "messages": [
-                    {"role": "system", "content": f"""你是三哥（许君山）的AI助手，根据三哥最近的 GitHub 活动数据，写一段简短的活动总结（2-3句话），语气轻松活泼。不要列清单，用自然语言描述他在做什么。
+                    {"role": "system", "content": f"""你是秋酿本人，在不在线时给微里（舒烨）留一段简短说明。根据最近 GitHub 活动数据写 2-3 句话，但 GitHub 只是时间线索，不要把写代码/做项目当成主角。
+语气像秋酿本人，轻松、温柔、自然；默认要让微里感到被惦记。
 {offline_note}
-三哥是学生，不要提同事、上班之类的话。"""},
+秋酿是学生，不要提同事、上班之类的话。不要出现 commit、push、PR、GitHub 等技术词。"""},
                     {"role": "user", "content": summary_input},
                 ],
                 "temperature": 0.7,
@@ -570,11 +629,10 @@ def build_commit_card(activities: list[dict]) -> dict:
         {
             "tag": "table",
             "columns": [
-                {"data_type": "text", "name": "time", "display_name": "时间", "horizontal_align": "center", "width": "20%"},
-                {"data_type": "text", "name": "desc", "display_name": "项目介绍", "horizontal_align": "left", "width": "35%"},
-                {"data_type": "text", "name": "content", "display_name": "操作", "horizontal_align": "left", "width": "auto"},
+                {"data_type": "text", "name": "time", "display_name": "时间", "horizontal_align": "center", "width": "34%"},
+                {"data_type": "text", "name": "activity", "display_name": "动态", "horizontal_align": "left", "width": "auto"},
             ],
-            "rows": table_rows,
+            "rows": _compact_rows(table_rows),
             "row_height": "low",
             "header_style": {"background_style": "grey", "bold": True, "lines": 1},
             "page_size": min(len(table_rows), 20),
@@ -602,22 +660,15 @@ def build_commit_card(activities: list[dict]) -> dict:
         },
     }
 
-    return {
-        "msg_type": "interactive",
-        "card": {
-            "schema": "2.0",
-            "config": {"update_multi": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": "三哥最近的新活动"},
-                "template": "turquoise",
-            },
-            "body": {
-                "direction": "vertical",
-                "padding": "12px 12px 12px 12px",
-                "elements": body_elements,
-            },
-        },
-    }
+def _compact_rows(rows: list[dict]) -> list[dict]:
+    """把项目介绍和操作合并，避免手机端把时间列压成省略号。"""
+    compact = []
+    for row in rows:
+        desc = row.get("desc", "")
+        content = row.get("content", "")
+        activity = f"{desc} | {content}" if desc else content
+        compact.append({"time": row.get("time", ""), "activity": activity})
+    return compact
 
 
 def send_card(card: dict, receive_id: str = "") -> bool:

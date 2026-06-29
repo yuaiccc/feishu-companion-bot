@@ -45,6 +45,9 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           DEEPSEEK_BASE_URL: https://api.deepseek.com
           DEEPSEEK_MODEL: deepseek-chat
+          CALL_NOTES_ENABLED: ${{ secrets.CALL_NOTES_ENABLED }}
+          FEISHU_MINUTE_TOKENS: ${{ secrets.FEISHU_MINUTE_TOKENS }}
+          CALL_NOTES_MAX_CHARS: ${{ secrets.CALL_NOTES_MAX_CHARS }}
         run: python actions_runner.py
 
       - name: Save state

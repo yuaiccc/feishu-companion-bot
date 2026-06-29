@@ -136,7 +136,7 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
             "content": summary,
         })
 
-    # 原生 table 组件
+    # 原生 table 组件。手机端列宽很窄，保留两列让时间完整显示。
     body_elements.append({
         "tag": "table",
         "columns": [
@@ -145,24 +145,17 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
                 "name": "time",
                 "display_name": "时间",
                 "horizontal_align": "center",
-                "width": "20%",
+                "width": "34%",
             },
             {
                 "data_type": "text",
-                "name": "desc",
-                "display_name": "项目介绍",
-                "horizontal_align": "left",
-                "width": "35%",
-            },
-            {
-                "data_type": "text",
-                "name": "content",
-                "display_name": "操作",
+                "name": "activity",
+                "display_name": "动态",
                 "horizontal_align": "left",
                 "width": "auto",
             },
         ],
-        "rows": table_rows,
+        "rows": _compact_rows(table_rows),
         "row_height": "low",
         "header_style": {
             "background_style": "grey",
@@ -206,6 +199,17 @@ def _format_time(iso_str: str) -> str:
         return dt.astimezone(_SHANGHAI).strftime("%m-%d %H:%M")
     except Exception:
         return iso_str
+
+
+def _compact_rows(rows: list[dict]) -> list[dict]:
+    """把项目介绍和操作合并，避免手机端把时间列压成省略号。"""
+    compact = []
+    for row in rows:
+        desc = row.get("desc", "")
+        content = row.get("content", "")
+        activity = f"{desc} | {content}" if desc else content
+        compact.append({"time": row.get("time", ""), "activity": activity})
+    return compact
 
 
 def _parse_time(iso_str: str):
