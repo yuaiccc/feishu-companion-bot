@@ -152,11 +152,11 @@ def _search_relevant_memories(query: str) -> list[str]:
 
 # ---- GitHub 轮询逻辑 ----
 
-def check_github(receive_id: str = "", force: bool = False, with_summary: bool = False, reply_to: str = ""):
+def check_github(receive_id: str = "", force: bool = False, with_summary: bool = True, reply_to: str = ""):
     """检查 GitHub 活动，有新的就推 commit 表格。
     receive_id: 指定发送目标（私聊 chat_id），为空则发到默认群聊
     force: True 时跳过去重，强制拉取最近活动并发送（用户主动查询时用）
-    with_summary: True 时用 DeepSeek 生成总结放在表格上方
+    with_summary: 保留兼容参数；活动卡片现在始终尝试 DeepSeek 总结
     reply_to: 指定 message_id 时用引用回复（在原消息下方回复），否则用 send_card
     """
     state = load_state()
@@ -193,17 +193,7 @@ def check_github(receive_id: str = "", force: bool = False, with_summary: bool =
         for a in activities:
             print(f"    [{a['type']}] {a['repo']} - {a['created_at']}", flush=True)
 
-        # 可选：用 DeepSeek 生成总结
-        summary = ""
-        if with_summary:
-            try:
-                print("  正在生成总结...", flush=True)
-                call_notes_context = build_call_notes_context()
-                summary = summarize_activities(activities, call_notes_context=call_notes_context)
-                if summary:
-                    print(f"  总结: {summary[:80]}...", flush=True)
-            except Exception as e:
-                print(f"  生成总结失败: {e}", flush=True)
+        summary = _generate_activity_summary(activities)
 
         card = build_message(activities, summary=summary)
         if reply_to:
@@ -227,12 +217,7 @@ def check_github(receive_id: str = "", force: bool = False, with_summary: bool =
                 print(f"  [force] 展示最近 {min(5, len(raw_events))} 条活动", flush=True)
                 recent_raw = raw_events[:5]
                 activities = parse_events(recent_raw, GITHUB_TOKEN)
-                summary = ""
-                if with_summary:
-                    try:
-                        summary = summarize_activities(activities)
-                    except Exception:
-                        pass
+                summary = _generate_activity_summary(activities)
                 card = build_message(activities, summary=summary)
                 if reply_to:
                     reply_card(card, reply_to)
@@ -240,6 +225,30 @@ def check_github(receive_id: str = "", force: bool = False, with_summary: bool =
                     send_card(card, receive_id=receive_id)
             else:
                 send_text("最近确实没有 GitHub 活动记录", receive_id=receive_id)
+
+
+def _generate_activity_summary(activities: list[dict]) -> str:
+    """活动卡片必须带总结：优先 DeepSeek，失败时给显式兜底文本。"""
+    try:
+        print("  正在生成 DeepSeek 总结...", flush=True)
+        call_notes_context = build_call_notes_context()
+        summary = summarize_activities(activities, call_notes_context=call_notes_context)
+        if summary:
+            print(f"  总结: {summary[:80]}...", flush=True)
+            return summary
+        print("  [警告] DeepSeek 总结为空，使用兜底总结", flush=True)
+    except Exception as e:
+        print(f"  [警告] DeepSeek 总结失败，使用兜底总结: {e}", flush=True)
+    return _fallback_activity_summary(activities)
+
+
+def _fallback_activity_summary(activities: list[dict]) -> str:
+    repos = sorted({a.get("repo", "") for a in activities if a.get("repo")})
+    repo_text = "、".join(r.split("/")[-1] for r in repos[:2]) if repos else "电脑这边"
+    return (
+        f"微里，秋酿这边刚刚有 {len(activities)} 条新动态，主要是 {repo_text} 这边留了一点记录。"
+        "DeepSeek 总结刚刚没生成出来，但我还是先把时间线放下面给你看，心里一直惦记着你。"
+    )
 
 
 # ---- LLM 意图判断 ----

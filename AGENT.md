@@ -78,6 +78,7 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
 # 飞书用户 ID
 FEISHU_SHUSHU_OPEN_ID=ou_xxx    # 舒舒
 FEISHU_SANGE_OPEN_ID=ou_xxx     # 三哥
+FEISHU_BOT_OPEN_ID=ou_xxx       # 机器人 open_id，Actions 兜底判断 @ 需要
 FEISHU_CHAT_ID=oc_xxx           # 群聊 ID
 FEISHU_READ_MESSAGES=true
 
@@ -106,6 +107,8 @@ MEMORY_DIR=memory_data
 | `FEISHU_CHAT_ID` | 群聊 ID |
 | `FEISHU_SHUSHU_OPEN_ID` | 舒舒的 open_id |
 | `FEISHU_SANGE_OPEN_ID` | 三哥的 open_id |
+| `FEISHU_BOT_OPEN_ID` | 机器人 open_id，用于 Actions 历史消息 API 精确判断 @ |
+| `FEISHU_BOT_NAME` | 可选兜底，无法拿到 bot open_id 时使用，不如 open_id 稳定 |
 | `GH_USERNAME` | GitHub 用户名（注意：不能以 GITHUB_ 开头） |
 | `GH_TOKEN` | GitHub PAT（注意：不能以 GITHUB_ 开头） |
 | `GH_PRIVATE_REPOS` | 私有仓库列表 |
@@ -167,6 +170,8 @@ workflow 里 `environment: feishu`，所以 Secrets 必须加到 Environment `fe
 
 ### 10. 群聊 @机器人判断
 群聊消息只有 @机器人才回复，私聊全部回复。检查 `mentions` 里 `mentioned_type == "app"`。
+
+注意：长连接事件里有 `mentioned_type == "app"`；但历史消息 REST API 的 `mentions[].id` 按官方文档是被 @ 用户或机器人的 open_id 字符串。因此 GitHub Actions 兜底必须配置 `FEISHU_BOT_OPEN_ID`，否则无法稳定区分“@机器人”和“@其他人”。
 
 维护飞书消息字段时以官方文档为准，不要凭猜测改字段结构：
 https://open.feishu.cn/document/home/index

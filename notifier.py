@@ -129,12 +129,10 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
     # body elements
     body_elements = []
 
-    # 可选的总结文本
-    if summary:
-        body_elements.append({
-            "tag": "markdown",
-            "content": summary,
-        })
+    body_elements.append({
+        "tag": "markdown",
+        "content": summary or "微里，秋酿这边刚刚有新动态。总结暂时没生成出来，但我先把时间线放下面给你看。",
+    })
 
     # 原生 table 组件。手机端列宽很窄，保留两列让时间完整显示。
     body_elements.append({

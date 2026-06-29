@@ -39,6 +39,8 @@ jobs:
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
           FEISHU_SHUSHU_OPEN_ID: ${{ secrets.FEISHU_SHUSHU_OPEN_ID }}
           FEISHU_SANGE_OPEN_ID: ${{ secrets.FEISHU_SANGE_OPEN_ID }}
+          FEISHU_BOT_OPEN_ID: ${{ secrets.FEISHU_BOT_OPEN_ID }}
+          FEISHU_BOT_NAME: ${{ secrets.FEISHU_BOT_NAME }}
           GH_USERNAME: ${{ secrets.GH_USERNAME }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GH_PRIVATE_REPOS: ${{ secrets.GH_PRIVATE_REPOS }}

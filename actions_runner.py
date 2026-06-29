@@ -29,6 +29,8 @@ FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
 FEISHU_CHAT_ID = os.getenv("FEISHU_CHAT_ID", "")
 FEISHU_SHUSHU_OPEN_ID = os.getenv("FEISHU_SHUSHU_OPEN_ID", "")
 FEISHU_SANGE_OPEN_ID = os.getenv("FEISHU_SANGE_OPEN_ID", "")
+FEISHU_BOT_OPEN_ID = os.getenv("FEISHU_BOT_OPEN_ID", "")
+FEISHU_BOT_NAME = os.getenv("FEISHU_BOT_NAME", "")
 GITHUB_USERNAME = os.getenv("GH_USERNAME", "")
 GITHUB_TOKEN = os.getenv("GH_TOKEN", "")
 GITHUB_PRIVATE_REPOS = [r.strip() for r in os.getenv("GH_PRIVATE_REPOS", "").split(",") if r.strip()]
@@ -73,8 +75,8 @@ def _is_bot_mention(mention: dict) -> bool:
     """判断一条 mention 是否指向当前飞书应用机器人。
 
     飞书消息事件里应用 mention 使用 mentioned_type=app；消息列表 REST
-    返回的 mention 结构可能只带 id 子字段。这里同时兼容两种来源，
-    避免 Actions 兜底漏回 @ 机器人的群聊消息。
+    的 mentions[].id 是被 @ 用户或机器人的 open_id 字符串。
+    Actions 兜底要配置 FEISHU_BOT_OPEN_ID 才能精确判断 @ 机器人。
     """
     if not isinstance(mention, dict):
         return False
@@ -83,8 +85,12 @@ def _is_bot_mention(mention: dict) -> bool:
     if mentioned_type == "app":
         return True
 
-    mention_id = mention.get("id", {})
-    if not isinstance(mention_id, dict):
+    mention_id = mention.get("id", "")
+    if isinstance(mention_id, str):
+        if FEISHU_BOT_OPEN_ID and mention_id == FEISHU_BOT_OPEN_ID:
+            return True
+        if FEISHU_BOT_NAME and mention.get("name") == FEISHU_BOT_NAME:
+            return True
         return False
 
     app_id = mention_id.get("app_id") or mention_id.get("appId")
@@ -101,7 +107,7 @@ def _is_bot_mention(mention: dict) -> bool:
 
 
 def _message_mentions_bot(item: dict, content: str = "") -> bool:
-    """群聊兜底：优先用 mentions 判断，缺字段时只兼容带 @ 占位符的文本。"""
+    """群聊兜底：优先用 mentions 判断，缺字段时只兼容旧占位符文本。"""
     mentions = item.get("mentions") or []
     if mentions:
         return any(_is_bot_mention(m) for m in mentions)
@@ -476,8 +482,11 @@ def _format_time(time_str: str) -> str:
 
 def _generate_summary(activities: list[dict]) -> str:
     """用 DeepSeek 生成最近活动的总结。Actions 模式下可能秋酿不在线。"""
-    if not activities or not DEEPSEEK_API_KEY:
+    if not activities:
         return ""
+    if not DEEPSEEK_API_KEY:
+        print("  [Actions] 缺少 DEEPSEEK_API_KEY，使用兜底活动总结", flush=True)
+        return _fallback_activity_summary(activities)
 
     # 统计活动
     push_count = sum(1 for a in activities if a.get("type") == "PushEvent")
@@ -537,9 +546,26 @@ def _generate_summary(activities: list[dict]) -> str:
             },
             timeout=20,
         )
-        return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception:
-        return ""
+        result = resp.json()["choices"][0]["message"]["content"].strip()
+        if result:
+            return result
+        print("  [Actions] DeepSeek 活动总结为空，使用兜底活动总结", flush=True)
+    except Exception as exc:
+        print(f"  [Actions] DeepSeek 活动总结失败，使用兜底活动总结: {exc}", flush=True)
+    return _fallback_activity_summary(activities)
+
+
+def _fallback_activity_summary(activities: list[dict]) -> str:
+    repos = sorted({
+        a.get("repo", {}).get("name", "")
+        for a in activities
+        if a.get("repo", {}).get("name", "")
+    })
+    repo_text = "、".join(r.split("/")[-1] for r in repos[:2]) if repos else "电脑这边"
+    return (
+        f"微里，秋酿这边刚刚有 {len(activities)} 条新动态，主要是 {repo_text} 这边留了一点记录。"
+        "DeepSeek 总结刚刚没生成出来，但我还是先把时间线放下面给你看，心里一直惦记着你。"
+    )
 
 
 def build_commit_card(activities: list[dict]) -> dict:
