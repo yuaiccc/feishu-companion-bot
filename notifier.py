@@ -132,7 +132,7 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
             "schema": "2.0",
             "config": {"update_multi": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "三哥的 GitHub 进度汇报"},
+                "title": {"tag": "plain_text", "content": "三哥最近的新活动"},
                 "template": "turquoise",
                 "padding": "12px 12px 12px 12px",
             },

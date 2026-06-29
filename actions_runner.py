@@ -306,17 +306,87 @@ def fetch_private_repo_commits(repo: str) -> list[dict]:
     return events
 
 
+# 已知的仓库通俗描述（覆盖常见仓库）
+_REPO_DESC_MAP = {
+    "project-history": "项目历史记录，记录开发过程和关键节点",
+    "bytedance-algorithm-roadmap": "字节跳动算法路线图，系统学习算法",
+    "interview": "程序员面试题库，备战技术面试",
+    "paddle": "百度飞桨深度学习框架",
+    "mall": "电商系统实战项目（Spring Boot）",
+    "MediaCrawler": "社交媒体数据爬虫工具",
+    "electrobun": "跨平台桌面应用开发框架",
+    "agentops": "AI Agent 运维监控工具",
+}
+
+# repo 描述缓存
+_repo_desc_cache: dict[str, str] = {}
+
+
 def fetch_repo_desc(repo: str) -> str:
-    import requests
+    """获取仓库的通俗描述。优先内置映射，其次 DeepSeek 解释，最后 GitHub API。"""
+    if not repo:
+        return ""
+    short = repo.split("/")[-1] if "/" in repo else repo
+    if short in _repo_desc_cache:
+        return _repo_desc_cache[short]
+
+    # 1. 先查内置映射
+    if short in _REPO_DESC_MAP:
+        _repo_desc_cache[short] = _REPO_DESC_MAP[short]
+        return _REPO_DESC_MAP[short]
+
+    # 2. 查 GitHub API 的 description，然后用 DeepSeek 解释
+    gh_desc = ""
     try:
+        import requests
         resp = requests.get(
             f"https://api.github.com/repos/{repo}",
             headers={"Authorization": f"token {GITHUB_TOKEN}"},
             timeout=10,
         )
-        return resp.json().get("description", "") or ""
+        gh_desc = resp.json().get("description", "") or ""
     except Exception:
-        return ""
+        pass
+
+    if gh_desc:
+        # 用 DeepSeek 翻译成通俗中文
+        explained = _explain_repo(short, gh_desc)
+        _repo_desc_cache[short] = explained
+        return explained
+
+    # 3. 没有描述，用仓库名让 DeepSeek 猜
+    explained = _explain_repo(short, "")
+    _repo_desc_cache[short] = explained
+    return explained
+
+
+def _explain_repo(repo_name: str, gh_desc: str) -> str:
+    """用 DeepSeek 把仓库描述翻译成通俗易懂的中文。"""
+    if not DEEPSEEK_API_KEY:
+        return gh_desc or repo_name
+
+    try:
+        import requests
+        prompt = "你是一个项目解释器。给你一个 GitHub 仓库名和描述，用一句通俗的中文解释这个项目是干什么的，不超过20个字。只输出解释，不要多余的话。"
+        user_msg = f"仓库名: {repo_name}\nGitHub描述: {gh_desc}" if gh_desc else f"仓库名: {repo_name}\nGitHub描述: (无)"
+        resp = requests.post(
+            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": DEEPSEEK_MODEL,
+                "messages": [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                "temperature": 0.1,
+                "max_tokens": 50,
+            },
+            timeout=15,
+        )
+        result = resp.json()["choices"][0]["message"]["content"].strip()
+        return result
+    except Exception:
+        return gh_desc or repo_name
 
 
 def build_commit_card(activities: list[dict]) -> dict:
@@ -356,7 +426,7 @@ def build_commit_card(activities: list[dict]) -> dict:
             "schema": "2.0",
             "config": {"update_multi": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "三哥的 GitHub 进度汇报"},
+                "title": {"tag": "plain_text", "content": "三哥最近的新活动"},
                 "template": "turquoise",
             },
             "body": {
