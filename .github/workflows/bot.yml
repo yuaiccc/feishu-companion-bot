@@ -38,9 +38,9 @@ jobs:
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
           FEISHU_SHUSHU_OPEN_ID: ${{ secrets.FEISHU_SHUSHU_OPEN_ID }}
           FEISHU_SANGE_OPEN_ID: ${{ secrets.FEISHU_SANGE_OPEN_ID }}
-          GITHUB_USERNAME: ${{ secrets.GITHUB_USERNAME }}
-          GITHUB_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
-          GITHUB_PRIVATE_REPOS: ${{ secrets.GITHUB_PRIVATE_REPOS }}
+          GH_USERNAME: ${{ secrets.GH_USERNAME }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_PRIVATE_REPOS: ${{ secrets.GH_PRIVATE_REPOS }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           DEEPSEEK_BASE_URL: https://api.deepseek.com
           DEEPSEEK_MODEL: deepseek-chat
