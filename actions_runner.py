@@ -166,7 +166,7 @@ def fetch_chat_messages(limit: int = 20) -> list[dict]:
         import re
         content = re.sub(r'@_user_\d+', '', content).strip()
         if not content:
-            continue
+            content = "只叫了你一声"
 
         messages.append({
             "message_id": item.get("message_id", ""),

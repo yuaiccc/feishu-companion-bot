@@ -674,7 +674,7 @@ def start_event_listener(on_message_received=None):
             import re
             content = re.sub(r'@_user_\d+', '', content).strip()
             if not content:
-                return
+                content = "只叫了你一声"
 
             time_str = _format_time(msg.create_time)
             is_shushu = sender_id == FEISHU_SHUSHU_OPEN_ID
