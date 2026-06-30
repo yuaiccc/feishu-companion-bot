@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import html
-import json
 import uuid
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -16,20 +15,19 @@ from config import (
     FEISHU_APP_SECRET,
     FEISHU_OPEN_API,
     LOVE_NOTE_DOC_TOKEN,
-    LOVE_NOTE_MESSAGE_LIMIT,
     LOVE_NOTE_RUN_AT,
     LOVE_NOTE_WIKI_TOKEN,
 )
-from feishu_api import fetch_chat_messages
 from state import load_state, save_state
 from text_safety import sanitize_public_text
 
 
 _SHANGHAI = timezone(timedelta(hours=8))
+_MAX_DOCUMENT_SOURCE_CHARS = 12000
 
 
 def run_daily_love_note(target_date: datetime | None = None, force: bool = False) -> str:
-    """Summarize today's chat and append it to the configured love note."""
+    """Summarize the configured love-note document and append the daily note."""
     target_date = target_date or datetime.now(_SHANGHAI)
     date_key = target_date.strftime("%Y-%m-%d")
 
@@ -37,11 +35,11 @@ def run_daily_love_note(target_date: datetime | None = None, force: bool = False
     if not force and state.get("last_love_note_date") == date_key:
         return f"{date_key} 已经写入过恋爱笔记，跳过。"
 
-    messages = _today_messages(target_date)
-    if not messages:
-        return f"{date_key} 没有读到可总结的聊天内容，跳过。"
+    source_text = fetch_love_note_content()
+    if not source_text.strip():
+        return f"{date_key} 没有读到可总结的文档内容，跳过。"
 
-    summary = summarize_love_day(messages, date_key)
+    summary = summarize_love_document(source_text, date_key)
     append_love_note(summary)
 
     state["last_love_note_date"] = date_key
@@ -49,11 +47,17 @@ def run_daily_love_note(target_date: datetime | None = None, force: bool = False
     return summary
 
 
-def summarize_love_day(messages: list[dict], date_key: str) -> str:
-    chat_text = "\n".join(
-        f"[{m.get('time')}] {m.get('sender')}: {m.get('content')}"
-        for m in messages
-    )
+def preview_daily_love_note(target_date: datetime | None = None) -> str:
+    """Generate the daily love-note summary without writing the document or state."""
+    target_date = target_date or datetime.now(_SHANGHAI)
+    source_text = fetch_love_note_content()
+    if not source_text.strip():
+        return f"{target_date:%Y-%m-%d} 没有读到可总结的文档内容。"
+    return summarize_love_document(source_text, target_date.strftime("%Y-%m-%d"))
+
+
+def summarize_love_document(document_text: str, date_key: str) -> str:
+    source_text = _trim_document_source(document_text)
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
@@ -63,31 +67,33 @@ def summarize_love_day(messages: list[dict], date_key: str) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": """你是三哥的小弟，负责把三哥和舒舒当天的聊天整理成恋爱笔记。
+                "content": """你是三哥的小弟，负责把三哥和舒舒的飞书恋爱笔记整理成每日总结。
 要求：
 - 输出 Markdown，不要代码块
 - 温柔、真实，不要过度腻
 - 舒舒和烨子是同一个人，称呼时二选一，不要并列
 - 不要冒充三哥本人
-- 保留当天有画面感的一两句话
-- 不要编造聊天里没有的事情
-- “舒舒说的话”只能引用当天聊天里 sender 为舒舒的原文；如果没有舒舒文字消息，写“今天没有可引用的舒舒文字消息”
-- 不要把三哥转述、猜测或表情包脑补成舒舒说的话""",
+- 输入是飞书文档正文，不是聊天消息列表
+- 只总结文档里已经写下来的内容，不要编造编辑时间、未出现的对话或当天事件
+- 可以保留文档里有画面感的一两句话，但必须来自原文
+- 文档正文通常没有作者元数据；如果无法从文字本身判断是谁说的，不要强行归到舒舒或三哥名下
+- 不要写“舒舒觉得/舒舒说/三哥说”这类归因，除非原文明确能支持；可以改写成“文档里写到”
+- 忽略已经生成过的“每日总结”章节，避免总结套总结""",
             },
             {
                 "role": "user",
                 "content": f"""日期：{date_key}
 
-当天聊天：
-{chat_text}
+恋爱笔记正文：
+{source_text}
 
 请按这个结构输出：
-## {date_key}
+## 每日总结 {date_key}
 
-### 今天的小事
+### 文档里记录的小事
 - ...
 
-### 舒舒说的话
+### 值得留住的话
 > ...
 
 ### 三哥该记得
@@ -108,6 +114,13 @@ def summarize_love_day(messages: list[dict], date_key: str) -> str:
     )
     resp.raise_for_status()
     return sanitize_public_text(resp.json()["choices"][0]["message"]["content"].strip())
+
+
+def fetch_love_note_content() -> str:
+    doc_token = LOVE_NOTE_DOC_TOKEN or resolve_wiki_doc_token(LOVE_NOTE_WIKI_TOKEN)
+    if not doc_token:
+        raise RuntimeError("缺少 LOVE_NOTE_DOC_TOKEN 或 LOVE_NOTE_WIKI_TOKEN")
+    return get_docx_raw_content(doc_token)
 
 
 def append_love_note(markdown_summary: str) -> dict:
@@ -138,6 +151,19 @@ def resolve_wiki_doc_token(wiki_token: str) -> str:
     if node.get("obj_type") != "docx":
         raise RuntimeError(f"Wiki 节点不是 docx: {node.get('obj_type')}")
     return node.get("obj_token", "")
+
+
+def get_docx_raw_content(doc_token: str) -> str:
+    token = _tenant_token()
+    resp = requests.get(
+        f"{FEISHU_OPEN_API}/docx/v1/documents/{doc_token}/raw_content",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"读取文档正文失败: {data.get('msg')}")
+    return data.get("data", {}).get("content", "")
 
 
 def get_docx_document(doc_token: str) -> dict:
@@ -245,17 +271,23 @@ def _text_run(text: str) -> dict:
     }
 
 
-def _today_messages(target_date: datetime) -> list[dict]:
-    start = datetime.combine(target_date.date(), dtime.min, tzinfo=_SHANGHAI)
-    end = start + timedelta(days=1)
-    start_ms = int(start.timestamp() * 1000)
-    end_ms = int(end.timestamp() * 1000)
-    messages = fetch_chat_messages(limit=LOVE_NOTE_MESSAGE_LIMIT)
-    filtered = [
-        m for m in messages
-        if start_ms <= int(m.get("timestamp") or 0) < end_ms
-    ]
-    return list(reversed(filtered))
+def _trim_document_source(document_text: str) -> str:
+    lines = []
+    skip_generated = False
+    for raw_line in (document_text or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("每日总结 "):
+            skip_generated = True
+            continue
+        if skip_generated and line.startswith("## "):
+            skip_generated = False
+        if skip_generated:
+            continue
+        lines.append(raw_line)
+    text = "\n".join(lines).strip()
+    if len(text) <= _MAX_DOCUMENT_SOURCE_CHARS:
+        return text
+    return text[-_MAX_DOCUMENT_SOURCE_CHARS:]
 
 
 def _tenant_token() -> str:

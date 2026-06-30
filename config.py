@@ -50,7 +50,6 @@ LOVE_NOTE_ENABLED = os.getenv("LOVE_NOTE_ENABLED", "false").lower() in ("true", 
 LOVE_NOTE_WIKI_TOKEN = os.getenv("LOVE_NOTE_WIKI_TOKEN", "")
 LOVE_NOTE_DOC_TOKEN = os.getenv("LOVE_NOTE_DOC_TOKEN", "")
 LOVE_NOTE_RUN_AT = os.getenv("LOVE_NOTE_RUN_AT", "23:55")
-LOVE_NOTE_MESSAGE_LIMIT = int(os.getenv("LOVE_NOTE_MESSAGE_LIMIT", "50"))
 
 # ---- GitHub ----
 GITHUB_USERNAME = os.getenv("GITHUB_USERNAME", "")

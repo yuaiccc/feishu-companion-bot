@@ -72,7 +72,7 @@ from local_apps import get_local_status_summary
 from call_notes import build_call_notes_context
 from external_search import answer_external_search, build_external_search_card
 from passive_assistant import PassiveAssistant
-from love_note import run_daily_love_note
+from love_note import preview_daily_love_note, run_daily_love_note
 
 
 # ---- 模拟数据（用于 --test 模式） ----
@@ -722,6 +722,14 @@ def run_daily_note_test_mode():
     print(result)
 
 
+def run_daily_note_preview_mode():
+    print("=" * 60)
+    print("  DAILY NOTE PREVIEW MODE - 只整理，不写入")
+    print("=" * 60)
+    result = preview_daily_love_note()
+    print(result)
+
+
 # ---- 主入口 ----
 
 def main():
@@ -736,6 +744,9 @@ def main():
         return
     if "--daily-note-test" in sys.argv:
         run_daily_note_test_mode()
+        return
+    if "--daily-note-preview" in sys.argv:
+        run_daily_note_preview_mode()
         return
 
     print("=" * 60)

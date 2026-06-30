@@ -205,6 +205,18 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(blocks[3]["block_type"], 2)
         assert_public_text_clean(blocks)
 
+    def test_love_note_source_trims_generated_summary_tail(self):
+        source = "\n".join([
+            "和舒舒的恋爱笔记",
+            "今天一起研究飞书。",
+            "每日总结 2026-07-01",
+            "文档里记录的小事",
+            "这段是机器人已经生成过的总结。",
+        ])
+        trimmed = love_note._trim_document_source(source)
+        self.assertIn("今天一起研究飞书", trimmed)
+        self.assertNotIn("机器人已经生成过", trimmed)
+
 
 if __name__ == "__main__":
     unittest.main()
