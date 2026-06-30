@@ -6,7 +6,9 @@ import call_notes
 import external_search
 import local_apps
 import notifier
+import passive_assistant
 import summarizer
+import state
 from main import _classify_tool_intent
 from text_safety import assert_public_text_clean, sanitize_card, sanitize_public_text
 
@@ -165,6 +167,32 @@ class BotRegressionTests(unittest.TestCase):
             return_value=20,
         ):
             self.assertIn("大概率不在电脑前", local_apps.get_presence_summary())
+
+    def test_passive_assistant_topic_detection_is_conservative(self):
+        self.assertFalse(passive_assistant._is_high_signal("哈哈哈哈"))
+        self.assertTrue(passive_assistant._is_high_signal("这番最后是BE了嘛？"))
+        self.assertEqual(
+            passive_assistant._query_for_content("这番最后是BE了嘛？"),
+            "这番最后是BE了嘛？ 背景 介绍 推荐",
+        )
+        self.assertEqual(
+            passive_assistant._query_for_content("最近B站有什么新番热门"),
+            "近期 B站 热门 新番 推荐",
+        )
+
+    def test_passive_state_cooldown_and_hourly_limit(self):
+        s = {
+            "passive_processed_message_ids": [],
+            "passive_topic_timestamps": {},
+            "passive_sent_timestamps": [],
+        }
+        self.assertFalse(state.is_passive_message_processed(s, "m1"))
+        with patch.object(state, "save_state"):
+            state.mark_passive_topic_sent(s, "topic-a", "m1", now=1000)
+        self.assertTrue(state.is_passive_message_processed(s, "m1"))
+        self.assertTrue(state.is_passive_topic_in_cooldown(s, "topic-a", 1800, now=1200))
+        self.assertFalse(state.is_passive_topic_in_cooldown(s, "topic-a", 1800, now=4000))
+        self.assertFalse(state.can_send_passive_now(s, 1, now=1200))
 
 
 if __name__ == "__main__":

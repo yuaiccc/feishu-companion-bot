@@ -194,6 +194,14 @@ https://open.feishu.cn/document/home/index
 
 这个能力只在本地长连接模式可用，GitHub Actions 兜底不能访问三哥电脑上的 OpenClaw。飞书开放平台有 Open Search/站内资源搜索类能力，但不要把它当成机器人公网搜索接口；维护飞书接口仍以官方文档为准：https://open.feishu.cn/document/home/index
 
+### 11c. 旁听辅助必须克制且幂等
+`passive_assistant.py` 处理未 @ 机器人的群聊消息。它只在三道阀门都满足时发背景卡片：
+- 最近时间窗口：只看 `PASSIVE_ASSIST_RECENT_WINDOW_SECONDS` 内的消息。
+- 聊天间隙：最后一条消息后至少静默 `PASSIVE_ASSIST_QUIET_SECONDS`。
+- 同话题冷却：`PASSIVE_ASSIST_TOPIC_COOLDOWN_SECONDS` 内同一 topic_key 不重复。
+
+幂等状态写在 `state.json`：`passive_processed_message_ids`、`passive_topic_timestamps`、`passive_sent_timestamps`。同一消息、同一话题、每小时超过上限都必须跳过。不要让旁听模式处理“哈哈/想你/晚安/摸头”等低信号情绪闲聊。
+
 ### 12. GitHub commit 卡片不生成 DeepSeek 总结
 GitHub commit 活动卡片不生成 DeepSeek 总结，只展示表格和统计，避免自动开场太腻。
 

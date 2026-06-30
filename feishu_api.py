@@ -679,9 +679,10 @@ def send_streaming_reply(full_text_generator, title: str = "回复", receive_id:
 
 # ---- 长连接事件订阅 ----
 
-def start_event_listener(on_message_received=None):
+def start_event_listener(on_message_received=None, on_passive_message=None):
     """启动长连接事件监听，实时接收群消息。
     on_message_received: 回调函数，参数为消息 dict {message_id, time, content, sender, is_shushu}
+    on_passive_message: 未 @ 机器人时的旁听回调，不直接回复。
     """
     from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
@@ -733,30 +734,6 @@ def start_event_listener(on_message_received=None):
             chat_id = msg.chat_id if hasattr(msg, "chat_id") else ""
             print(f"  [长连接][调试] sender_type={sender_type} chat_type={chat_type} chat_id={chat_id} sender_id={sender_id}", flush=True)
 
-            # 群聊消息：只有 @了机器人才回复；私聊（p2p）全部回复
-            is_mentioned = False
-            if chat_type == "p2p":
-                is_mentioned = True
-            else:
-                # 检查 mentions 里有没有机器人
-                mentions = msg.mentions if hasattr(msg, "mentions") and msg.mentions else []
-                is_mentioned = any(_is_bot_mention(m) for m in mentions)
-
-            if not is_mentioned:
-                if chat_type == "group":
-                    mention_debug = [
-                        {
-                            "key": _field(m, "key", ""),
-                            "mentioned_type": _field(m, "mentioned_type", ""),
-                            "open_id": _mention_open_id(m),
-                            "name": _field(m, "name", ""),
-                        }
-                        for m in (msg.mentions if hasattr(msg, "mentions") and msg.mentions else [])
-                    ]
-                    print(f"  [长连接][调试] mentions 未匹配当前机器人: {mention_debug}", flush=True)
-                print(f"  [长连接] 群聊消息未@机器人，跳过", flush=True)
-                return
-
             msg_type = msg.message_type
             content_raw = msg.content if msg.content else ""
             content = _extract_text(msg_type, content_raw)
@@ -781,6 +758,32 @@ def start_event_listener(on_message_received=None):
                 "chat_id": chat_id,
                 "chat_type": chat_type,
             }
+
+            # 群聊消息：只有 @了机器人才进入主动回复；私聊（p2p）全部回复
+            is_mentioned = False
+            if chat_type == "p2p":
+                is_mentioned = True
+            else:
+                # 检查 mentions 里有没有机器人
+                mentions = msg.mentions if hasattr(msg, "mentions") and msg.mentions else []
+                is_mentioned = any(_is_bot_mention(m) for m in mentions)
+
+            if not is_mentioned:
+                if chat_type == "group":
+                    mention_debug = [
+                        {
+                            "key": _field(m, "key", ""),
+                            "mentioned_type": _field(m, "mentioned_type", ""),
+                            "open_id": _mention_open_id(m),
+                            "name": _field(m, "name", ""),
+                        }
+                        for m in (msg.mentions if hasattr(msg, "mentions") and msg.mentions else [])
+                    ]
+                    print(f"  [长连接][调试] mentions 未匹配当前机器人: {mention_debug}", flush=True)
+                print(f"  [长连接] 群聊消息未@机器人，跳过", flush=True)
+                if chat_type == "group" and on_passive_message:
+                    on_passive_message(msg_data)
+                return
 
             print(f"\n  [长连接] 收到消息: [{time_str}] {msg_data['sender']}: {content[:50]}", flush=True)
 

@@ -69,6 +69,7 @@ from bitable_api import add_records as bitable_add_records
 from local_apps import get_local_status_summary
 from call_notes import build_call_notes_context
 from external_search import answer_external_search, build_external_search_card
+from passive_assistant import PassiveAssistant
 
 
 # ---- 模拟数据（用于 --test 模式） ----
@@ -113,6 +114,8 @@ _MOCK_EVENTS = [
         },
     },
 ]
+
+_PASSIVE_ASSISTANT = PassiveAssistant()
 
 
 def _get_chat_messages(chat_id: str = "") -> list[dict]:
@@ -728,7 +731,10 @@ def main():
     # 主线程：启动飞书长连接（阻塞）
     print("  启动飞书长连接事件监听...")
     try:
-        start_event_listener(on_message_received=on_message_received)
+        start_event_listener(
+            on_message_received=on_message_received,
+            on_passive_message=_PASSIVE_ASSISTANT.on_message,
+        )
     except Exception as e:
         print(f"  [致命] 飞书长连接退出: {e}", flush=True)
         _notify_status(f"飞书长连接退出：{e}", key="websocket_exit", force=True)
