@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -194,3 +195,150 @@ def summarize_search_results(query: str, results: list[dict]) -> str:
 def answer_external_search(query: str) -> str:
     results = search_web(query)
     return summarize_search_results(query, results)
+
+
+def summarize_search_intro(query: str, results: list[dict]) -> str:
+    """Generate a short one-paragraph intro for a search card."""
+    if not results:
+        return "小弟没搜到靠谱结果，换个关键词再试试。"
+
+    result_text = "\n".join(
+        f"{idx}. {item.get('title')} | {item.get('snippet')}"
+        for idx, item in enumerate(results[:5], 1)
+    )
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": """你是三哥的小弟，给搜索结果卡片写一句很短的开场。
+要求：
+- 只写 1-2 句，总共不超过 80 字
+- 不要列 bullet，不要 markdown
+- 说明这是小弟搜到的，不要当绝对事实
+- 群里称呼舒烨时只用舒舒或烨子
+- 不要使用“微里”这个名字""",
+            },
+            {"role": "user", "content": f"问题：{query}\n\n结果：\n{result_text}"},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 120,
+    }
+    try:
+        resp = requests.post(
+            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        return sanitize_public_text(resp.json()["choices"][0]["message"]["content"].strip())
+    except Exception:
+        return "小弟先搜到这些结果，热度和片单可能会变，舒舒可以挑感兴趣的点开看看。"
+
+
+def build_search_card(query: str, results: list[dict], intro: str = "") -> dict:
+    """Build a compact Feishu table card for web search results."""
+    intro = sanitize_public_text(intro or summarize_search_intro(query, results))
+    rows = []
+    links = []
+    for idx, item in enumerate(results[:5], 1):
+        title = _shorten(item.get("title") or "搜索结果", 42)
+        snippet = _shorten(item.get("snippet") or "打开来源看详情", 90)
+        url = item.get("url") or ""
+        host = _source_host(url)
+        rows.append({
+            "item": title,
+            "reason": snippet,
+            "source": host or f"来源{idx}",
+        })
+        if url:
+            safe_title = title.replace("[", "").replace("]", "")
+            links.append(f"{idx}. [{safe_title}]({url})")
+
+    elements = []
+    if intro:
+        elements.append({"tag": "markdown", "content": intro})
+    elements.append({
+        "tag": "table",
+        "columns": [
+            {
+                "data_type": "text",
+                "name": "item",
+                "display_name": "推荐",
+                "horizontal_align": "left",
+                "width": "30%",
+            },
+            {
+                "data_type": "text",
+                "name": "reason",
+                "display_name": "看点",
+                "horizontal_align": "left",
+                "width": "auto",
+            },
+            {
+                "data_type": "text",
+                "name": "source",
+                "display_name": "来源",
+                "horizontal_align": "center",
+                "width": "22%",
+            },
+        ],
+        "rows": rows or [{"item": "暂无", "reason": "没有搜到靠谱结果", "source": "-"}],
+        "row_height": "low",
+        "header_style": {
+            "background_style": "grey",
+            "bold": True,
+            "lines": 1,
+        },
+        "page_size": max(1, min(len(rows), 5)),
+        "margin": "0px 0px 0px 0px",
+    })
+    if links:
+        elements.append({
+            "tag": "markdown",
+            "content": "来源链接：\n" + "\n".join(links[:5]),
+        })
+
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "schema": "2.0",
+            "config": {"update_multi": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "小弟搜到的近期推荐"},
+                "template": "turquoise",
+                "padding": "12px 12px 12px 12px",
+            },
+            "body": {
+                "direction": "vertical",
+                "padding": "12px 12px 12px 12px",
+                "elements": elements,
+            },
+        },
+    }
+
+
+def build_external_search_card(query: str) -> dict:
+    results = search_web(query)
+    intro = summarize_search_intro(query, results)
+    return build_search_card(query, results, intro)
+
+
+def _shorten(text: str, limit: int) -> str:
+    text = re.sub(r"\s+", " ", sanitize_public_text(text or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _source_host(url: str) -> str:
+    try:
+        host = urlparse(url).netloc
+    except Exception:
+        return ""
+    return host.replace("www.", "").replace("m.", "")

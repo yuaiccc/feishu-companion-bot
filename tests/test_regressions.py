@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import actions_runner
 import call_notes
+import external_search
 import notifier
 import summarizer
 from main import _classify_tool_intent
@@ -120,6 +121,23 @@ class BotRegressionTests(unittest.TestCase):
         self.assertIn("主动找她", context)
         self.assertNotIn("这是一段很长", context)
         assert_public_text_clean(context)
+
+    def test_external_search_card_uses_table(self):
+        card = external_search.build_search_card(
+            "近期B站新番",
+            [
+                {
+                    "title": "七月新番导视",
+                    "snippet": "多部作品讨论度较高，建议以官方版权页为准。",
+                    "url": "https://search.bilibili.com/all?keyword=%E6%96%B0%E7%95%AA",
+                }
+            ],
+            intro="小弟搜到这些近期新番线索，先给舒舒列成表。",
+        )
+        elements = card["card"]["body"]["elements"]
+        self.assertEqual(elements[1]["tag"], "table")
+        self.assertEqual(elements[1]["columns"][0]["display_name"], "推荐")
+        assert_public_text_clean(card)
 
 
 if __name__ == "__main__":

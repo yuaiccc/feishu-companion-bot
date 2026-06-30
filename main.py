@@ -68,7 +68,7 @@ from memory import add_memories, search_memories, get_all_memories, format_for_d
 from bitable_api import add_records as bitable_add_records
 from local_apps import get_app_summary
 from call_notes import build_call_notes_context
-from external_search import answer_external_search
+from external_search import answer_external_search, build_external_search_card
 
 
 # ---- 模拟数据（用于 --test 模式） ----
@@ -501,11 +501,11 @@ def on_message_received(msg_data: dict):
         if tool_intent == "search":
             print("  [工具调用] 用户询问外部实时信息，调用 OpenClaw 搜索...", flush=True)
             try:
-                answer = answer_external_search(content)
+                card = build_external_search_card(content)
                 if message_id:
-                    reply_text(answer, message_id)
+                    reply_card(card, message_id)
                 else:
-                    send_text(answer, receive_id=chat_id)
+                    send_card(card, receive_id=chat_id)
             except FeishuMessageUnavailable as e:
                 print(f"  [跳过] 消息不可回复: {e}", flush=True)
                 if thinking_reaction_id and message_id:
@@ -513,7 +513,10 @@ def on_message_received(msg_data: dict):
                 return
             except Exception as e:
                 print(f"  [错误] 外部搜索失败: {e}", flush=True)
-                fallback = "小弟这边外部搜索暂时没接通，等三哥电脑上的 OpenClaw 稳一下再查。"
+                try:
+                    fallback = answer_external_search(content)
+                except Exception:
+                    fallback = "小弟这边外部搜索暂时没接通，等三哥电脑上的 OpenClaw 稳一下再查。"
                 if message_id:
                     try:
                         reply_text(fallback, message_id)

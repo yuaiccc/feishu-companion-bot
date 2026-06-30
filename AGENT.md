@@ -189,7 +189,7 @@ https://open.feishu.cn/document/home/index
 `main.py` 的 `_classify_tool_intent()` 返回 `status`、`github`、`search` 或 `none`。问"在干嘛/最近活动/最近怎么样"默认只走本地窗口状态；明确问 GitHub、提交、commit、代码、仓库、PR、issue 才推 GitHub 卡片。不要再把普通状态问题自动带到 GitHub。
 
 ### 11b. 外部搜索只走本机 OpenClaw
-`external_search.py` 通过 `openclaw infer web search --json` 调用本机 OpenClaw 的 `web.search` provider，再用 DeepSeek 做带来源的短整理。`main.py` 的 `_classify_tool_intent()` 现在可能返回 `search`：问"搜索/查一下/最近B站哪些新番热门/新闻/热榜/新番"走外部搜索；问"三哥最近活动/在干嘛"仍然走本地窗口状态。
+`external_search.py` 通过 `openclaw infer web search --json` 调用本机 OpenClaw 的 `web.search` provider，再用 DeepSeek 做"短结论 + 表格 + 来源链接"卡片。`main.py` 的 `_classify_tool_intent()` 现在可能返回 `search`：问"搜索/查一下/最近B站哪些新番热门/新闻/热榜/新番"走外部搜索；问"三哥最近活动/在干嘛"仍然走本地窗口状态。
 
 这个能力只在本地长连接模式可用，GitHub Actions 兜底不能访问三哥电脑上的 OpenClaw。飞书开放平台有 Open Search/站内资源搜索类能力，但不要把它当成机器人公网搜索接口；维护飞书接口仍以官方文档为准：https://open.feishu.cn/document/home/index
 
