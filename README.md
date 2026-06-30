@@ -6,6 +6,7 @@
 
 - 本地实时模式：`python3 main.py`，启动飞书长连接和 GitHub 轮询，适合电脑开机时使用。
 - GitHub Actions 兜底模式：`.github/workflows/bot.yml` 每 5 分钟运行 `actions_runner.py`，适合电脑关机、休眠或本地机器人不在线时使用。
+- macOS 常驻模式：`launchd/com.xujunshan.github-activity-bot.plist` 用 `caffeinate` 包住本地进程，登录后自动启动并阻止空闲睡眠。
 
 ## 人设边界
 
@@ -26,6 +27,18 @@ python3 main.py
 ```
 
 默认 `DRY_RUN=true` 不会真的发飞书消息。生产运行前把 `.env` 里的 `DRY_RUN=false`，并补齐 DeepSeek、飞书应用、GitHub token 等配置。
+
+本机长期在线推荐安装 LaunchAgent：
+
+```bash
+mkdir -p ~/Library/LaunchAgents
+cp launchd/com.xujunshan.github-activity-bot.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.xujunshan.github-activity-bot.plist
+launchctl kickstart -k gui/501/com.xujunshan.github-activity-bot
+tail -f bot.log
+```
+
+即时回复和私聊回复依赖本地长连接。GitHub Actions 兜底只读取 `FEISHU_CHAT_ID` 指向的群聊历史消息，不读取私聊。
 
 ## 云端兜底
 

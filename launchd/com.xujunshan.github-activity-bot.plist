@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xujunshan.github-activity-bot</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-dimsu</string>
+    <string>/Users/xujunshan/Code/github_activity_generator/.venv/bin/python</string>
+    <string>/Users/xujunshan/Code/github_activity_generator/main.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/xujunshan/Code/github_activity_generator</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/xujunshan/Code/github_activity_generator/bot.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/xujunshan/Code/github_activity_generator/bot.err.log</string>
+</dict>
+</plist>

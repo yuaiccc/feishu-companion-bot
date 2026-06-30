@@ -445,10 +445,11 @@ def on_message_received(msg_data: dict):
             print(f"  [警告] 读取消息失败: {e}", flush=True)
 
         memories = []
-        try:
-            memories = _search_relevant_memories(f"{sender_name}最近说了什么")
-        except Exception as e:
-            print(f"  [警告] 搜索记忆失败: {e}", flush=True)
+        if is_shushu:
+            try:
+                memories = _search_relevant_memories(f"{sender_name}最近说了什么")
+            except Exception as e:
+                print(f"  [警告] 搜索记忆失败: {e}", flush=True)
 
         call_notes_context = ""
         try:

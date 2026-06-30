@@ -25,6 +25,7 @@
 **两套运行模式：**
 - **本地模式**：`python main.py`，WebSocket 实时连接，秒级回复
 - **云端模式**：GitHub Actions cron 每 5 分钟轮询一次 REST API
+- **macOS 常驻模式**：`launchd/com.xujunshan.github-activity-bot.plist` 通过 `caffeinate -dimsu` 运行 `.venv/bin/python main.py`，用于电脑开机时保持本地长连接在线
 
 ## 项目位置
 
@@ -49,6 +50,7 @@ GitHub 仓库：`yuaiccc/project-history`（私有）
 ├── bitable_api.py       # 飞书多维表格写入
 ├── state.py             # 活动去重状态管理
 ├── actions_runner.py    # GitHub Actions 云端轮询脚本（无 WebSocket）
+├── launchd/             # macOS LaunchAgent 常驻配置
 ├── .github/workflows/
 │   └── bot.yml          # GitHub Actions workflow（5 分钟 cron）
 ├── .env                 # 本地密钥（gitignore，不提交）
@@ -173,6 +175,8 @@ workflow 里 `environment: feishu`，所以 Secrets 必须加到 Environment `fe
 
 注意：长连接事件里有 `mentioned_type == "app"`；但历史消息 REST API 的 `mentions[].id` 按官方文档是被 @ 用户或机器人的 open_id 字符串。因此 GitHub Actions 兜底必须配置 `FEISHU_BOT_OPEN_ID`，否则无法稳定区分“@机器人”和“@其他人”。
 
+私聊 `p2p` 只依赖本地长连接实时事件；Actions 兜底只拉 `FEISHU_CHAT_ID` 群聊历史消息，不扫私聊。飞书官方接收消息事件文档要求：单聊消息需要 `im:message.p2p_msg` 或 `im:message.p2p_msg:readonly`，群聊 @ 机器人需要 group_at 相关权限。
+
 维护飞书消息字段时以官方文档为准，不要凭猜测改字段结构：
 https://open.feishu.cn/document/home/index
 
@@ -213,8 +217,8 @@ GitHub Actions 运行时电脑可能休眠，`_generate_summary` 会根据当前
 
 ## 修改代码后
 
-1. 本地测试：`python3 main.py` 看日志
+1. 本地测试：`.venv/bin/python main.py` 看日志
 2. 语法检查：`python3 -c "import <模块名>"`
 3. Push 到 GitHub：`git add -A && git commit -m "xxx" && git push`
-4. 重启本地机器人：kill 旧进程 + `python3 main.py`
+4. 重启本地机器人：`launchctl kickstart -k gui/501/com.xujunshan.github-activity-bot`
 5. 如果改了 Actions 相关，手动触发一次：`gh workflow run bot.yml --repo yuaiccc/project-history`

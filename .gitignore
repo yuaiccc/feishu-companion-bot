@@ -3,6 +3,7 @@
 
 # Runtime state
 state.json
+*.log
 
 # Python
 __pycache__/
