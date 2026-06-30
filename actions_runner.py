@@ -40,6 +40,7 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 OPEN_API = "https://open.feishu.cn/open-apis"
 SHANGHAI = timezone(timedelta(hours=8))
+_RECALLED_TEXTS = {"This message was recalled", "消息已撤回"}
 
 # 状态文件：GitHub Actions 之间通过 actions/cache 恢复和保存
 STATE_FILE = "actions_state.json"
@@ -151,7 +152,7 @@ def fetch_chat_messages(limit: int = 20) -> list[dict]:
         body = item.get("body", {})
         content_raw = body.get("content", "") if body else ""
         content = _extract_text(msg_type, content_raw)
-        if not content:
+        if not content or content in _RECALLED_TEXTS:
             continue
 
         is_shushu = sender_id == FEISHU_SHUSHU_OPEN_ID
@@ -582,12 +583,12 @@ def build_commit_card(activities: list[dict]) -> dict:
             if repo not in star_repos:
                 star_repos.append(repo)
         elif atype == "PushEvent":
-            # 检查是否可以合并到已有分组（同一仓库 + 1小时内）
+            # 检查是否可以合并到已有分组（同一仓库 + 组内总跨度 1 小时内）
             group = current_push_group_by_repo.get(repo)
             if group:
-                last_time = _parse_time(group[-1].get("created_at", ""))
+                first_time = _parse_time(group[0].get("created_at", ""))
                 cur_time = _parse_time(a.get("created_at", ""))
-                if last_time and cur_time and abs((cur_time - last_time).total_seconds()) <= 3600:
+                if first_time and cur_time and abs((cur_time - first_time).total_seconds()) <= 3600:
                     group.append(a)
                     continue
 

@@ -25,6 +25,7 @@ FEISHU_BOT_OPEN_ID = os.getenv("FEISHU_BOT_OPEN_ID", "")
 FEISHU_CHAT_ID = os.getenv("FEISHU_CHAT_ID", "")
 FEISHU_STATUS_CHAT_ID = os.getenv("FEISHU_STATUS_CHAT_ID", "")
 FEISHU_READ_MESSAGES = os.getenv("FEISHU_READ_MESSAGES", "true").lower() in ("true", "1", "yes")
+FEISHU_EVENT_MAX_AGE_SECONDS = int(os.getenv("FEISHU_EVENT_MAX_AGE_SECONDS", "600"))
 
 # ---- 记忆模块 ----
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "true").lower() in ("true", "1", "yes")

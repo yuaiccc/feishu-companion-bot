@@ -62,6 +62,7 @@ from feishu_api import (
     start_event_listener,
     send_streaming_reply,
     format_for_deepseek,
+    FeishuMessageUnavailable,
 )
 from memory import add_memories, search_memories, get_all_memories, format_for_deepseek as format_memories
 from bitable_api import add_records as bitable_add_records
@@ -419,6 +420,9 @@ def on_message_received(msg_data: dict):
         if message_id:
             try:
                 thinking_reaction_id = react_to_message(message_id, "THINKING")
+            except FeishuMessageUnavailable as e:
+                print(f"  [跳过] 消息不可回复: {e}", flush=True)
+                return
             except Exception as e:
                 print(f"  [警告] 添加思考表情失败: {e}", flush=True)
 
@@ -432,7 +436,11 @@ def on_message_received(msg_data: dict):
                 if app_summary:
                     app_interpretation = _interpret_apps(app_summary)
                     if app_interpretation and message_id:
-                        reply_text(app_interpretation, message_id)
+                        try:
+                            reply_text(app_interpretation, message_id)
+                        except FeishuMessageUnavailable as e:
+                            print(f"  [跳过] 消息不可回复: {e}", flush=True)
+                            return
                         print(f"  [本地应用] 已发送解读: {app_interpretation[:50]}...", flush=True)
                     else:
                         print(f"  [本地应用] DeepSeek 解读失败", flush=True)
@@ -445,10 +453,19 @@ def on_message_received(msg_data: dict):
             print(f"  [工具调用] LLM 判断需要调用工具，拉取 GitHub 数据 + 生成总结...", flush=True)
             try:
                 check_github(receive_id=chat_id, force=True, with_summary=True, reply_to=message_id)
+            except FeishuMessageUnavailable as e:
+                print(f"  [跳过] 消息不可回复: {e}", flush=True)
+                if thinking_reaction_id and message_id:
+                    delete_reaction(message_id, thinking_reaction_id)
+                return
             except Exception as e:
                 print(f"  [错误] GitHub 查询失败: {e}", flush=True)
                 if message_id:
-                    reply_text("GitHub 数据拉取失败，稍后再试试", message_id)
+                    try:
+                        reply_text("GitHub 数据拉取失败，稍后再试试", message_id)
+                    except FeishuMessageUnavailable as unavailable:
+                        print(f"  [跳过] 消息不可回复: {unavailable}", flush=True)
+                        return
                 else:
                     send_text("GitHub 数据拉取失败，稍后再试试", receive_id=chat_id)
 
@@ -456,7 +473,10 @@ def on_message_received(msg_data: dict):
             if thinking_reaction_id and message_id:
                 delete_reaction(message_id, thinking_reaction_id)
             if message_id:
-                react_to_message(message_id, "DONE")
+                try:
+                    react_to_message(message_id, "DONE")
+                except FeishuMessageUnavailable:
+                    pass
             return
 
         # ---- 第2步：读对话上下文 + 搜索记忆 + 生成回复 ----
@@ -506,6 +526,11 @@ def on_message_received(msg_data: dict):
                     reply_text(reply, message_id)
                 else:
                     send_text(reply, receive_id=chat_id)
+            except FeishuMessageUnavailable as e:
+                print(f"  [跳过] 消息不可回复: {e}", flush=True)
+                if thinking_reaction_id and message_id:
+                    delete_reaction(message_id, thinking_reaction_id)
+                return
             except Exception as e:
                 print(f"  [错误] 发送消息失败: {e}", flush=True)
                 import traceback
@@ -522,6 +547,8 @@ def on_message_received(msg_data: dict):
             try:
                 emoji = pick_emoji(content, is_shushu=is_shushu)
                 react_to_message(message_id, emoji)
+            except FeishuMessageUnavailable:
+                pass
             except Exception as e:
                 print(f"  [警告] 添加内容表情失败: {e}", flush=True)
 

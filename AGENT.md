@@ -178,6 +178,8 @@ workflow 里 `environment: feishu`，所以 Secrets 必须加到 Environment `fe
 
 私聊 `p2p` 只依赖本地长连接实时事件；Actions 兜底只拉 `FEISHU_CHAT_ID` 群聊历史消息，不扫私聊。飞书官方接收消息事件文档要求：单聊消息需要 `im:message.p2p_msg` 或 `im:message.p2p_msg:readonly`，群聊 @ 机器人需要 group_at 相关权限。
 
+长连接可能补发旧事件。`FEISHU_EVENT_MAX_AGE_SECONDS` 默认 600 秒，超过就跳过，避免回复已撤回/过期消息。飞书错误码 `230011`（消息已撤回）和 `231003`（消息不存在/不可见）要短路，不要继续调用 DeepSeek 或补表情。
+
 维护飞书消息字段时以官方文档为准，不要凭猜测改字段结构：
 https://open.feishu.cn/document/home/index
 
@@ -188,7 +190,7 @@ https://open.feishu.cn/document/home/index
 GitHub Actions 运行时电脑可能休眠，`_generate_summary` 会根据当前时间给出不在线理由（凌晨可能睡了、午休可能在吃饭等）。
 
 ### 13. 同一项目 1 小时内提交合并
-`notifier.py` 和 `actions_runner.py` 的表格构建逻辑只合并同一仓库且连续活动时间差不超过 1 小时的 PushEvent。超过 1 小时必须新开一行，不能把同仓库所有提交无脑合并。
+`notifier.py` 和 `actions_runner.py` 的表格构建逻辑只合并同一仓库且组内首尾时间跨度不超过 1 小时的 PushEvent。超过 1 小时必须新开一行，不能把同仓库所有提交无脑合并，也不能按相邻时间链式合并到超过 1 小时。
 
 ### 13.5 本地服务状态推送
 `FEISHU_STATUS_CHAT_ID` 配成三哥和机器人的单聊 chat_id 后，`main.py` 会在本地服务启动/重启、GitHub 轮询异常、消息处理异常、飞书长连接退出时向单聊推送状态。进程崩溃后由 launchd 重启，新进程会发“已启动/重启”。电脑关机或系统睡死时本地进程无法主动推送，只能靠 GitHub Actions 兜底。

@@ -3,6 +3,8 @@
 - 长连接实时接收群消息事件
 """
 import json
+import re
+import time
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
     ListMessageRequest,
@@ -19,11 +21,25 @@ from lark_oapi.api.im.v1 import (
 from config import (
     FEISHU_APP_ID, FEISHU_APP_SECRET,
     FEISHU_CHAT_ID, FEISHU_SHUSHU_OPEN_ID, FEISHU_BOT_OPEN_ID, DRY_RUN,
+    FEISHU_EVENT_MAX_AGE_SECONDS,
 )
 
 # ---- SDK Client ----
 
 _client = None
+
+
+class FeishuMessageUnavailable(RuntimeError):
+    """The target message was recalled, expired, or is no longer visible."""
+
+    def __init__(self, action: str, code: int, msg: str):
+        super().__init__(f"{action}失败: code={code} msg={msg}")
+        self.code = code
+        self.msg = msg
+
+
+_MESSAGE_UNAVAILABLE_CODES = {230011, 231003}
+_RECALLED_TEXTS = {"This message was recalled", "消息已撤回"}
 
 
 def _field(obj, name: str, default=""):
@@ -46,6 +62,33 @@ def _is_bot_mention(mention) -> bool:
         return True
     open_id = _mention_open_id(mention)
     return bool(FEISHU_BOT_OPEN_ID and open_id == FEISHU_BOT_OPEN_ID)
+
+
+def _is_message_unavailable(code) -> bool:
+    try:
+        return int(code) in _MESSAGE_UNAVAILABLE_CODES
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_stale_create_time(create_time: str) -> tuple[bool, float]:
+    try:
+        ts = int(create_time) / 1000
+    except (TypeError, ValueError):
+        return False, 0
+    age = time.time() - ts
+    return age > FEISHU_EVENT_MAX_AGE_SECONDS, age
+
+
+def _clean_history_text(content: str) -> str:
+    """Clean text used only as conversation context."""
+    content = (content or "").strip()
+    if not content or content in _RECALLED_TEXTS:
+        return ""
+    content = re.sub(r'@_user_\d+', '', content).strip()
+    if not content or content in _RECALLED_TEXTS:
+        return ""
+    return content
 
 
 def _get_client() -> lark.Client:
@@ -102,6 +145,7 @@ def fetch_chat_messages(chat_id: str = "", limit: int = 20) -> list[dict]:
         msg_type = item.msg_type
         body_content = item.body.content if item.body else ""
         content = _extract_text(msg_type, body_content)
+        content = _clean_history_text(content)
         if not content:
             continue
 
@@ -179,6 +223,8 @@ def reply_text(text: str, message_id: str) -> bool:
     )
     resp = client.im.v1.message.reply(req)
     if not resp.success():
+        if _is_message_unavailable(resp.code):
+            raise FeishuMessageUnavailable("回复消息", resp.code, resp.msg)
         raise RuntimeError(f"回复消息失败: code={resp.code} msg={resp.msg}")
     return True
 
@@ -205,6 +251,8 @@ def reply_card(card: dict, message_id: str) -> bool:
     )
     resp = client.im.v1.message.reply(req)
     if not resp.success():
+        if _is_message_unavailable(resp.code):
+            raise FeishuMessageUnavailable("回复卡片", resp.code, resp.msg)
         raise RuntimeError(f"回复卡片失败: code={resp.code} msg={resp.msg}")
     return True
 
@@ -267,6 +315,8 @@ def react_to_message(message_id: str, emoji_type: str = "THUMBSUP") -> str | Non
         rid = resp.data.reaction_id
         print(f"  [表情回复] {emoji_type} -> reaction_id={rid}", flush=True)
         return rid
+    if _is_message_unavailable(resp.code):
+        raise FeishuMessageUnavailable("添加表情", resp.code, resp.msg)
     print(f"  [表情回复] 失败: code={resp.code} msg={resp.msg}", flush=True)
     return None
 
@@ -286,6 +336,8 @@ def delete_reaction(message_id: str, reaction_id: str) -> bool:
     if resp.success():
         print(f"  [表情删除] reaction_id={reaction_id}", flush=True)
         return True
+    if _is_message_unavailable(resp.code):
+        return False
     print(f"  [表情删除] 失败: code={resp.code} msg={resp.msg}", flush=True)
     return False
 
@@ -657,6 +709,14 @@ def start_event_listener(on_message_received=None):
 
             sender_id = sender_info.sender_id.open_id if sender_info and sender_info.sender_id else ""
             sender_type = sender_info.sender_type if sender_info else ""
+            create_time = msg.create_time if hasattr(msg, "create_time") else ""
+            is_stale, age_seconds = _is_stale_create_time(create_time)
+            if is_stale:
+                print(
+                    f"  [长连接] 跳过过旧事件: message_id={message_id} age={age_seconds:.0f}s max={FEISHU_EVENT_MAX_AGE_SECONDS}s",
+                    flush=True,
+                )
+                return
 
             # 只处理用户消息，跳过机器人自己的消息避免死循环
             if sender_type != "user":

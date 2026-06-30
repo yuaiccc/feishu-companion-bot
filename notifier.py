@@ -76,12 +76,12 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
                 star_repos.append(a["repo"])
         elif a.get("type") == "PushEvent":
             repo = a["repo"]
-            # 检查是否可以合并到已有分组（同一仓库 + 1小时内）
+            # 检查是否可以合并到已有分组（同一仓库 + 组内总跨度 1 小时内）
             group = current_push_group_by_repo.get(repo)
             if group:
-                last_time = _parse_time(group[-1]["created_at"])
+                first_time = _parse_time(group[0]["created_at"])
                 cur_time = _parse_time(a["created_at"])
-                if last_time and cur_time and abs((cur_time - last_time).total_seconds()) <= 3600:
+                if first_time and cur_time and abs((cur_time - first_time).total_seconds()) <= 3600:
                     group.append(a)
                     continue
 

@@ -42,6 +42,8 @@ tail -f bot.log
 
 如果配置了 `FEISHU_STATUS_CHAT_ID`，本地服务启动、重启、轮询异常、长连接退出时会向这个单聊推送状态。电脑关机或系统睡死时，本地进程无法主动推送，只能依赖 GitHub Actions 兜底。
 
+长连接补发的旧消息默认超过 10 分钟会跳过；已撤回、找不到或纯 @ 的历史消息不会进入聊天上下文。
+
 ## 云端兜底
 
 GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository secrets。变量名按 `AGENT.md` 配置，其中 GitHub 相关变量在 Actions 中使用 `GH_USERNAME`、`GH_TOKEN`、`GH_PRIVATE_REPOS`，避免 GitHub 保留名前缀。
@@ -53,4 +55,4 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 - 本地窗口状态：`local_apps.py` 通过 AppleScript 读取前台应用和窗口标题，只在本地模式可用。
 - 通话纪要：`call_notes.py` 通过飞书妙记官方接口读取已配置 `minute_token` 的文字记录，默认关闭。开启前要配置 `CALL_NOTES_ENABLED=true` 和 `FEISHU_MINUTE_TOKENS`，并确保应用具备妙记读取/导出权限。
 - GitHub 活动：用于兜底判断时间线，不应该盖过秋酿和微里的关系上下文。
-- 活动卡片只合并同仓库且连续时间差不超过 1 小时的提交；超过 1 小时必须分成多行。
+- 活动卡片只合并同仓库且组内首尾时间跨度不超过 1 小时的提交；超过 1 小时必须分成多行。
