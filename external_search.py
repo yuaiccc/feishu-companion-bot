@@ -156,7 +156,7 @@ def summarize_search_results(query: str, results: list[dict]) -> str:
 - 明确说这是小弟搜到的结果
 - 优先给结论，再列 2-4 个要点
 - 保留来源链接，链接数量不要超过 4 个
-- 群里称呼舒烨时只用舒舒或烨子
+- "舒舒"和"烨子"是同一个人的两个昵称；称呼她时二选一，不要把两个名字并列写出来
 - 不要使用“微里”这个名字
 - 不要编造搜索结果里没有的信息""",
             },
@@ -220,7 +220,7 @@ def summarize_search_intro(query: str, results: list[dict]) -> str:
 - 只写 1-2 句，总共不超过 80 字
 - 不要列 bullet，不要 markdown
 - 说明这是小弟搜到的，不要当绝对事实
-- 群里称呼舒烨时只用舒舒或烨子
+- "舒舒"和"烨子"是同一个人的两个昵称；称呼她时二选一，不要把两个名字并列写出来
 - 不要使用“微里”这个名字""",
             },
             {"role": "user", "content": f"问题：{query}\n\n结果：\n{result_text}"},

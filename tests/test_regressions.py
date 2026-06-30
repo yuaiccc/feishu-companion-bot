@@ -13,6 +13,7 @@ from text_safety import assert_public_text_clean, sanitize_card, sanitize_public
 class BotRegressionTests(unittest.TestCase):
     def test_public_text_sanitizer_replaces_disallowed_nickname(self):
         self.assertEqual(sanitize_public_text("\u5fae\u91cc宝贝"), "舒舒宝贝")
+        self.assertEqual(sanitize_public_text("舒舒和烨子都可以看看"), "舒舒都可以看看")
 
     def test_cards_are_sanitized_recursively(self):
         card = {
@@ -71,11 +72,22 @@ class BotRegressionTests(unittest.TestCase):
             summarizer.RELATIONSHIP_CONTEXT,
             summarizer.SYSTEM_PROMPT,
             summarizer.REPLY_PROMPT_SHUSHU,
+            external_search.summarize_search_results.__doc__ or "",
         ])
         self.assertIn("三哥的小弟", prompts)
         self.assertIn("大哥的老婆", prompts)
         self.assertNotIn("你是秋酿本人", prompts)
         self.assertNotIn("用第一人称跟舒舒说话", prompts)
+
+    def test_aliases_are_one_person_not_parallel_names(self):
+        prompts = "\n".join([
+            summarizer.RELATIONSHIP_CONTEXT,
+            summarizer.SYSTEM_PROMPT,
+            summarizer.REPLY_PROMPT_SHUSHU,
+        ])
+        self.assertIn("同一个人", prompts)
+        self.assertIn("不要把两个名字并列说出来", prompts)
+        self.assertNotIn("只用舒舒或烨子", prompts)
 
     def test_call_notes_fallback_extracts_relationship_context(self):
         transcript = "\n".join([
