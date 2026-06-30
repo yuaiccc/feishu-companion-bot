@@ -66,7 +66,7 @@ from feishu_api import (
 )
 from memory import add_memories, search_memories, get_all_memories, format_for_deepseek as format_memories
 from bitable_api import add_records as bitable_add_records
-from local_apps import get_app_summary
+from local_apps import get_local_status_summary
 from call_notes import build_call_notes_context
 from external_search import answer_external_search, build_external_search_card
 
@@ -336,7 +336,7 @@ NONE 例子：
 
 
 def _interpret_apps(app_summary: str) -> str:
-    """让 DeepSeek 根据本地应用列表，用小弟语气给舒舒一句状态。"""
+    """让 DeepSeek 根据本地状态列表，用小弟语气给舒舒一句状态。"""
     import requests as req
 
     try:
@@ -351,7 +351,7 @@ def _interpret_apps(app_summary: str) -> str:
                 "messages": [
                     {
                         "role": "system",
-                        "content": """你是三哥的小弟，根据三哥电脑当前打开的应用列表，跟舒舒（舒烨）说一句三哥大概在干什么。
+                        "content": """你是三哥的小弟，根据三哥电脑当前本地状态，跟舒舒（舒烨）说一句三哥大概在不在电脑前、可能在做什么。
 
 要求：
 - 你不是三哥本人，不要用三哥第一人称说话
@@ -359,7 +359,9 @@ def _interpret_apps(app_summary: str) -> str:
 - 语气轻松可爱，像日常聊天
 - 1-2句话就好，不要长篇大论
 - 把英文名翻译成通俗中文，不要出现英文 app 名
-- 根据前台应用和窗口标题推测秋酿可能在做什么，但不要把"写代码/做项目"当成默认重点
+- 根据键鼠空闲时间、锁屏状态、前台应用和窗口标题推测秋酿是否在电脑前；这只是推测，不要说得像确定事实
+- 如果状态显示键鼠刚刚有活动，可以说三哥大概率在电脑前；如果锁屏或空闲很久，可以说可能离开电脑了
+- 不要把"写代码/做项目"当成默认重点
 - 群里称呼她时在"舒舒"和"烨子"里任选一个，不要把两个名字并列说出来
 - 秋酿平时多数时间都在想舒舒；如果状态不明确，优先表达"刚刚在忙一下/在想你/马上来找你"，不要硬编技术内容
 - 偶尔可以带个 emoji
@@ -367,8 +369,11 @@ def _interpret_apps(app_summary: str) -> str:
 - 可以自然带一句三哥惦记舒舒、等会儿会来找舒舒；不要每次都用同一句
 
 例子：
-输入: 正在用 Terminal（main.py），旁边还开着: Claude, Feishu
+输入: 键鼠刚刚有活动（空闲约 12 秒），三哥大概率在电脑前；正在用 Terminal（main.py），旁边还开着: Claude, Feishu
 输出: 三哥刚刚在电脑前处理一点小事，不过小弟看得出来他还是惦记舒舒的，等会儿应该就来找你～
+
+输入: 键鼠很久没动（空闲约 41 分钟），三哥大概率不在电脑前；正在用 Feishu
+输出: 三哥这会儿可能不在电脑前，小弟先帮舒舒看着，等他回来就让他来找你～
 
 输入: 正在用 Feishu
 输出: 三哥像是在看消息，小弟帮你盯着，等他冒泡就让他来找烨子～
@@ -441,7 +446,7 @@ def on_message_received(msg_data: dict):
         if tool_intent == "status":
             app_interpretation = ""
             try:
-                app_summary = get_app_summary()
+                app_summary = get_local_status_summary()
                 if app_summary:
                     app_interpretation = _interpret_apps(app_summary)
                     if app_interpretation and message_id:

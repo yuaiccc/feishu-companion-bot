@@ -4,6 +4,7 @@ from unittest.mock import patch
 import actions_runner
 import call_notes
 import external_search
+import local_apps
 import notifier
 import summarizer
 from main import _classify_tool_intent
@@ -150,6 +151,20 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(elements[1]["tag"], "table")
         self.assertEqual(elements[1]["columns"][0]["display_name"], "推荐")
         assert_public_text_clean(card)
+
+    def test_presence_summary_uses_probability_language(self):
+        with patch.object(local_apps, "is_screen_locked", return_value=False), patch.object(
+            local_apps,
+            "get_idle_seconds",
+            return_value=20,
+        ):
+            self.assertIn("大概率在电脑前", local_apps.get_presence_summary())
+        with patch.object(local_apps, "is_screen_locked", return_value=True), patch.object(
+            local_apps,
+            "get_idle_seconds",
+            return_value=20,
+        ):
+            self.assertIn("大概率不在电脑前", local_apps.get_presence_summary())
 
 
 if __name__ == "__main__":

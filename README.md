@@ -54,7 +54,7 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 
 ## 信息源
 
-- 本地窗口状态：`local_apps.py` 通过 AppleScript 读取前台应用和窗口标题，只在本地模式可用。
+- 本地窗口/在席状态：`local_apps.py` 通过 AppleScript 读取前台应用和窗口标题，并通过 macOS `HIDIdleTime`/ConsoleUser 会话推测三哥是否在电脑前，只在本地模式可用。这个判断是概率推测，不要说成确定事实。
 - 通话纪要：`call_notes.py` 通过飞书妙记官方接口读取已配置 `minute_token` 的文字记录，默认关闭。开启前要配置 `CALL_NOTES_ENABLED=true` 和 `FEISHU_MINUTE_TOKENS`，并确保应用具备妙记读取/导出权限。读取后会先整理成短摘要并缓存，只给回复模型关系上下文，不把原文整段塞进去。
 - 外部搜索：`external_search.py` 通过本机 `openclaw infer web search` 搜索网页，再用 DeepSeek 整理为"短结论 + 表格 + 来源链接"卡片。它只在本地模式可用；Actions 兜底不能调用三哥电脑上的 OpenClaw。
 - GitHub 活动：用于兜底判断时间线，不应该盖过秋酿和舒舒的关系上下文。
