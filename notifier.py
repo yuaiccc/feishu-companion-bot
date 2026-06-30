@@ -1,5 +1,6 @@
 """飞书消息模块：使用飞书卡片原生 table 组件构建 commit 表格。"""
 from datetime import datetime, timezone, timedelta
+from commit_text import brief_commit_messages
 
 _SHANGHAI = timezone(timedelta(hours=8))
 
@@ -112,7 +113,7 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
             all_msgs = []
             for g in group:
                 all_msgs.extend(g["detail"].get("commit_messages", []))
-            brief = _brief_messages(all_msgs[:3])  # 只取前3条消息摘要
+            brief = brief_commit_messages(all_msgs, limit=3)
             content = f"提交 {total_commits} 次" + (f": {brief}" if brief else "")
             table_rows.append({
                 "time": first_time,
@@ -134,7 +135,7 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
 
     body_elements.append({
         "tag": "markdown",
-        "content": summary or "微里，秋酿这边刚刚有新动态。总结暂时没生成出来，但我先把时间线放下面给你看。",
+        "content": summary or "舒舒，秋酿这边刚刚有新动态。总结暂时没生成出来，但我先把时间线放下面给你看。",
     })
 
     # 原生 table 组件。手机端列宽很窄，保留两列让时间完整显示。
@@ -234,7 +235,7 @@ def _format_content(a: dict) -> str:
     if atype == "PushEvent":
         msgs = detail.get("commit_messages", [])
         count = detail.get("commit_count", len(msgs) if msgs else 1)
-        brief = _brief_messages(msgs)
+        brief = brief_commit_messages(msgs, limit=3)
         if brief:
             return f"提交 {count} 次: {brief}"
         branch = detail.get("branch", "")
@@ -261,18 +262,6 @@ def _format_content(a: dict) -> str:
     if atype == "ReleaseEvent":
         return f"发布版本 {detail.get('tag', '')}"
     return atype
-
-
-def _brief_messages(msgs: list[str]) -> str:
-    if not msgs:
-        return ""
-    cleaned = []
-    for m in msgs:
-        m = m.strip().split("\n")[0]
-        if len(m) > 40:
-            m = m[:37] + "..."
-        cleaned.append(m)
-    return "; ".join(cleaned)
 
 
 def _zh_action(action: str) -> str:

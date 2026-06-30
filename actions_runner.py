@@ -17,6 +17,7 @@ import json
 import time
 from datetime import datetime, timezone, timedelta
 
+from commit_text import brief_commit_messages
 from call_notes import build_call_notes_context
 
 # 确保输出不缓冲
@@ -279,7 +280,8 @@ def generate_reply(messages: list[dict], is_shushu: bool = True) -> str:
 
     RELATIONSHIP = """
 【背景信息（仅在相关时自然融入，不要每次都提）】
-- 三哥 = 秋酿 = 许君山；舒烨 = 微里 = 舒舒
+- 三哥 = 秋酿 = 许君山；舒烨 = 微里 = 舒舒 = 烨子
+- 群里直接称呼她时，主要叫"舒舒"或"烨子"，不要直接叫"微里"
 - 秋酿和微里是情侣，2026年6月4日在一起
 - 秋酿生日：2004年10月15日，微里生日：2004年11月5日
 - 这个机器人只是在秋酿本人不方便及时回复时，临时代替秋酿陪微里说话，不是第三个人、不是旁观助手
@@ -287,21 +289,22 @@ def generate_reply(messages: list[dict], is_shushu: bool = True) -> str:
 """
 
     if is_shushu:
-        system_prompt = f"""你是秋酿本人，因为电脑可能关机或本人暂时不在，云端兜底替自己回复女朋友微里（舒烨）的话。
-用第一人称跟微里说话，不要说"机器人""助手""我替秋酿"。语气可爱、轻松、自然，像日常聊天。
+        system_prompt = f"""你是秋酿本人，因为电脑可能关机或本人暂时不在，云端兜底替自己回复女朋友舒舒（舒烨，也叫微里）的话。
+用第一人称跟舒舒说话，不要说"机器人""助手""我替秋酿"。语气可爱、轻松、自然，像日常聊天。
 偶尔可以带颜文字或 emoji，但不要每条消息都带。不要显得很辛苦很累。
 回复要简短，2-3句话就好，像发微信一样。
-默认重点是想微里、在意微里、让微里安心；不要老是提写代码、做项目、GitHub。
+群里称呼她时优先用"舒舒"或"烨子"，不要直接叫"微里"。
+默认重点是想舒舒、在意舒舒、让舒舒安心；不要老是提写代码、做项目、GitHub。
 {RELATIONSHIP}
 【注意】你是通过云端定时任务在回复，无法看到三哥电脑当前打开了什么软件。
-如果微里问"在干嘛"，可以轻轻说可能刚好不在电脑前、在休息或在想她；只有在她明确问代码/进度时，才根据 GitHub 活动简短回答。"""
+如果舒舒问"在干嘛"，可以轻轻说可能刚好不在电脑前、在休息或在想她；只有在她明确问代码/进度时，才根据 GitHub 活动简短回答。"""
     else:
         system_prompt = f"""你是秋酿的AI助手，帮秋酿管理 GitHub 活动和飞书消息。
 语气轻松、简洁，像个靠谱的朋友。回复2-3句话就好。
 秋酿本人就在群里跟你说话时，不要冒充微里；可以叫他"三哥"。
 {RELATIONSHIP}
 【注意】你是通过云端定时任务在回复，无法看到三哥电脑当前打开了什么软件。
-如果三哥问"我在干嘛"，根据已知 GitHub 活动简短回答，但提醒他别只顾着项目，也记得回微里。"""
+如果三哥问"我在干嘛"，根据已知 GitHub 活动简短回答，但提醒他别只顾着项目，也记得回舒舒。"""
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -536,8 +539,8 @@ def _generate_summary(activities: list[dict]) -> str:
             json={
                 "model": DEEPSEEK_MODEL,
                 "messages": [
-                    {"role": "system", "content": f"""你是秋酿本人，在不在线时给微里（舒烨）留一段简短说明。根据最近 GitHub 活动数据写 2-3 句话，但 GitHub 只是时间线索，不要把写代码/做项目当成主角。
-语气像秋酿本人，轻松、温柔、自然；默认要让微里感到被惦记。
+                    {"role": "system", "content": f"""你是秋酿本人，在不在线时给舒舒（舒烨，也叫微里）留一段简短说明。根据最近 GitHub 活动数据写 2-3 句话，但 GitHub 只是时间线索，不要把写代码/做项目当成主角。
+语气像秋酿本人，轻松、温柔、自然；默认要让舒舒感到被惦记。群里称呼她时优先用"舒舒"或"烨子"，不要直接叫"微里"。
 {offline_note}
 秋酿是学生，不要提同事、上班之类的话。不要出现 commit、push、PR、GitHub 等技术词。"""},
                     {"role": "user", "content": summary_input},
@@ -564,7 +567,7 @@ def _fallback_activity_summary(activities: list[dict]) -> str:
     })
     repo_text = "、".join(r.split("/")[-1] for r in repos[:2]) if repos else "电脑这边"
     return (
-        f"微里，秋酿这边刚刚有 {len(activities)} 条新动态，主要是 {repo_text} 这边留了一点记录。"
+        f"舒舒，秋酿这边刚刚有 {len(activities)} 条新动态，主要是 {repo_text} 这边留了一点记录。"
         "DeepSeek 总结刚刚没生成出来，但我还是先把时间线放下面给你看，心里一直惦记着你。"
     )
 
@@ -606,7 +609,8 @@ def build_commit_card(activities: list[dict]) -> dict:
             detail = a.get("payload", {})
             msgs = detail.get("commits", [])
             count = len(msgs)
-            brief = "; ".join(m.get("message", "").strip().split("\n")[0][:30] for m in msgs) if msgs else ""
+            raw_msgs = [m.get("message", "") for m in msgs]
+            brief = brief_commit_messages(raw_msgs, limit=3)
             content = f"提交 {count} 次" + (f": {brief}" if brief else "")
             time_str = _format_time(a.get("created_at", ""))
             desc = fetch_repo_desc(repo)
@@ -615,10 +619,10 @@ def build_commit_card(activities: list[dict]) -> dict:
             all_msgs = []
             for g in group:
                 for c in g.get("payload", {}).get("commits", []):
-                    msg = c.get("message", "").strip().split("\n")[0][:30]
+                    msg = c.get("message", "")
                     if msg:
                         all_msgs.append(msg)
-            brief = "; ".join(all_msgs[:3]) if all_msgs else ""
+            brief = brief_commit_messages(all_msgs, limit=3)
             content = f"提交 {total_commits} 次" + (f": {brief}" if brief else "")
             time_str = _format_time(group[0].get("created_at", ""))
             desc = fetch_repo_desc(repo)

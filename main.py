@@ -268,7 +268,7 @@ def _fallback_activity_summary(activities: list[dict]) -> str:
     repos = sorted({a.get("repo", "") for a in activities if a.get("repo")})
     repo_text = "、".join(r.split("/")[-1] for r in repos[:2]) if repos else "电脑这边"
     return (
-        f"微里，秋酿这边刚刚有 {len(activities)} 条新动态，主要是 {repo_text} 这边留了一点记录。"
+        f"舒舒，秋酿这边刚刚有 {len(activities)} 条新动态，主要是 {repo_text} 这边留了一点记录。"
         "DeepSeek 总结刚刚没生成出来，但我还是先把时间线放下面给你看，心里一直惦记着你。"
     )
 
@@ -329,7 +329,7 @@ def _should_use_tools(content: str, sender: str = "") -> bool:
 
 
 def _interpret_apps(app_summary: str) -> str:
-    """让 DeepSeek 根据本地应用列表，用秋酿本人语气给微里一句状态。"""
+    """让 DeepSeek 根据本地应用列表，用秋酿本人语气给舒舒一句状态。"""
     import requests as req
 
     try:
@@ -344,24 +344,25 @@ def _interpret_apps(app_summary: str) -> str:
                 "messages": [
                     {
                         "role": "system",
-                        "content": """你是秋酿本人，根据电脑当前打开的应用列表，跟女朋友微里（舒烨）说一句你在干什么。
+                        "content": """你是秋酿本人，根据电脑当前打开的应用列表，跟女朋友舒舒（舒烨，也叫微里）说一句你在干什么。
 
 要求：
 - 用第一人称，语气轻松可爱，像日常聊天
 - 1-2句话就好，不要长篇大论
 - 把英文名翻译成通俗中文，不要出现英文 app 名
 - 根据前台应用和窗口标题推测秋酿可能在做什么，但不要把"写代码/做项目"当成默认重点
-- 秋酿平时多数时间都在想微里；如果状态不明确，优先表达"刚刚在忙一下/在想你/马上来找你"，不要硬编技术内容
+- 群里称呼她时优先用"舒舒"或"烨子"，不要直接叫"微里"
+- 秋酿平时多数时间都在想舒舒；如果状态不明确，优先表达"刚刚在忙一下/在想你/马上来找你"，不要硬编技术内容
 - 偶尔可以带个 emoji
 - 不要说"我推测你在"，直接说"我在XXX"
-- 可以自然带一句想微里、爱微里、等会儿来找微里；不要每次都用同一句
+- 可以自然带一句想舒舒、爱烨子、等会儿来找舒舒；不要每次都用同一句
 
 例子：
 输入: 正在用 Terminal（main.py），旁边还开着: Claude, Feishu
-输出: 刚刚在电脑前处理一点小事，但脑子里还是在想微里，等会儿来贴贴你～
+输出: 刚刚在电脑前处理一点小事，但脑子里还是在想舒舒，等会儿来贴贴你～
 
 输入: 正在用 Feishu
-输出: 在看消息呢，看看微里有没有找我～
+输出: 在看消息呢，看看烨子有没有找我～
 """,
                     },
                     {"role": "user", "content": f"应用状态: {app_summary}"},
