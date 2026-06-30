@@ -43,6 +43,11 @@ OPEN_API = "https://open.feishu.cn/open-apis"
 SHANGHAI = timezone(timedelta(hours=8))
 _RECALLED_TEXTS = {"This message was recalled", "消息已撤回"}
 
+
+def sanitize_public_text(text: str) -> str:
+    """Remove disallowed nicknames before sending text to Feishu."""
+    return (text or "").replace("\u5fae\u91cc", "舒舒")
+
 # 状态文件：GitHub Actions 之间通过 actions/cache 恢复和保存
 STATE_FILE = "actions_state.json"
 
@@ -280,20 +285,20 @@ def generate_reply(messages: list[dict], is_shushu: bool = True) -> str:
 
     RELATIONSHIP = """
 【背景信息（仅在相关时自然融入，不要每次都提）】
-- 三哥 = 秋酿 = 许君山；舒烨 = 微里 = 舒舒 = 烨子
-- 群里直接称呼她时，主要叫"舒舒"或"烨子"，不要直接叫"微里"
-- 秋酿和微里是情侣，2026年6月4日在一起
-- 秋酿生日：2004年10月15日，微里生日：2004年11月5日
-- 这个机器人只是在秋酿本人不方便及时回复时，临时代替秋酿陪微里说话，不是第三个人、不是旁观助手
-- 秋酿平时多数时间都在想微里；GitHub 活动只是偶尔解释状态的线索，不是人设中心
+- 三哥 = 秋酿 = 许君山；舒烨 = 舒舒 = 烨子
+- 群里直接称呼她时，只叫"舒舒"或"烨子"
+- 秋酿和舒舒是情侣，2026年6月4日在一起
+- 秋酿生日：2004年10月15日，舒舒生日：2004年11月5日
+- 这个机器人只是在秋酿本人不方便及时回复时，临时代替秋酿陪舒舒说话，不是第三个人、不是旁观助手
+- 秋酿平时多数时间都在想舒舒；GitHub 活动只是偶尔解释状态的线索，不是人设中心
 """
 
     if is_shushu:
-        system_prompt = f"""你是秋酿本人，因为电脑可能关机或本人暂时不在，云端兜底替自己回复女朋友舒舒（舒烨，也叫微里）的话。
+        system_prompt = f"""你是秋酿本人，因为电脑可能关机或本人暂时不在，云端兜底替自己回复女朋友舒舒（舒烨）的话。
 用第一人称跟舒舒说话，不要说"机器人""助手""我替秋酿"。语气可爱、轻松、自然，像日常聊天。
 偶尔可以带颜文字或 emoji，但不要每条消息都带。不要显得很辛苦很累。
 回复要简短，2-3句话就好，像发微信一样。
-群里称呼她时优先用"舒舒"或"烨子"，不要直接叫"微里"。
+群里称呼她时只用"舒舒"或"烨子"。
 默认重点是想舒舒、在意舒舒、让舒舒安心；不要老是提写代码、做项目、GitHub。
 {RELATIONSHIP}
 【注意】你是通过云端定时任务在回复，无法看到三哥电脑当前打开了什么软件。
@@ -301,7 +306,7 @@ def generate_reply(messages: list[dict], is_shushu: bool = True) -> str:
     else:
         system_prompt = f"""你是秋酿的AI助手，帮秋酿管理 GitHub 活动和飞书消息。
 语气轻松、简洁，像个靠谱的朋友。回复2-3句话就好。
-秋酿本人就在群里跟你说话时，不要冒充微里；可以叫他"三哥"。
+秋酿本人就在群里跟你说话时，不要冒充舒舒；可以叫他"三哥"。
 {RELATIONSHIP}
 【注意】你是通过云端定时任务在回复，无法看到三哥电脑当前打开了什么软件。
 如果三哥问"我在干嘛"，根据已知 GitHub 活动简短回答，但提醒他别只顾着项目，也记得回舒舒。"""
@@ -327,7 +332,7 @@ def generate_reply(messages: list[dict], is_shushu: bool = True) -> str:
         timeout=60,
     )
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    return sanitize_public_text(resp.json()["choices"][0]["message"]["content"].strip())
 
 
 def _build_reply_user_content(chat_text: str) -> str:
@@ -337,7 +342,7 @@ def _build_reply_user_content(chat_text: str) -> str:
         content += (
             "\n\n--- 重要通话纪要上下文 ---\n"
             f"{call_notes_context}\n\n"
-            "这些通话纪要是秋酿和微里关系里的重要信息源。只在相关时自然使用，"
+            "这些通话纪要是秋酿和舒舒关系里的重要信息源。只在相关时自然使用，"
             "不要暴露为'我读取了纪要'。"
         )
     return content
@@ -484,94 +489,6 @@ def _format_time(time_str: str) -> str:
     return dt.astimezone(SHANGHAI).strftime("%m-%d %H:%M")
 
 
-def _generate_summary(activities: list[dict]) -> str:
-    """用 DeepSeek 生成最近活动的总结。Actions 模式下可能秋酿不在线。"""
-    if not activities:
-        return ""
-    if not DEEPSEEK_API_KEY:
-        print("  [Actions] 缺少 DEEPSEEK_API_KEY，使用兜底活动总结", flush=True)
-        return _fallback_activity_summary(activities)
-
-    # 统计活动
-    push_count = sum(1 for a in activities if a.get("type") == "PushEvent")
-    star_count = sum(1 for a in activities if a.get("type") == "WatchEvent")
-    repos = set(a.get("repo", {}).get("name", "") for a in activities if a.get("repo", {}).get("name"))
-
-    # 收集 commit messages
-    commit_msgs = []
-    for a in activities:
-        if a.get("type") == "PushEvent":
-            for c in a.get("payload", {}).get("commits", []):
-                msg = c.get("message", "").strip().split("\n")[0]
-                if msg:
-                    commit_msgs.append(msg)
-
-    # 判断秋酿可能不在线的理由
-    now_hour = datetime.now(SHANGHAI).hour
-    offline_reason = ""
-    if 0 <= now_hour < 7:
-        offline_reason = "现在凌晨了，秋酿可能已经睡了，这段只是睡前留下的自动记录。"
-    elif 7 <= now_hour < 9:
-        offline_reason = "这个点秋酿可能在去上课的路上。"
-    elif 12 <= now_hour < 14:
-        offline_reason = "午休时间，秋酿可能在吃饭或休息。"
-    elif 22 <= now_hour < 24:
-        offline_reason = "挺晚了，秋酿可能准备休息了。"
-    offline_note = f"\n（这是云端自动回复，{offline_reason}）" if offline_reason else "\n（这是云端自动回复，秋酿电脑可能没开）"
-
-    summary_input = f"提交 {push_count} 次，收藏 {star_count} 个项目，涉及仓库: {', '.join(repos)}"
-    if commit_msgs:
-        summary_input += f"\n提交信息: {'; '.join(commit_msgs[:5])}"
-
-    call_notes_context = build_call_notes_context()
-    if call_notes_context:
-        summary_input += (
-            "\n\n--- 重要通话纪要上下文 ---\n"
-            f"{call_notes_context}\n\n"
-            "这些通话纪要是秋酿和微里关系里的重要信息源。只在相关时自然使用。"
-        )
-
-    try:
-        import requests
-        resp = requests.post(
-            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": DEEPSEEK_MODEL,
-                "messages": [
-                    {"role": "system", "content": f"""你是秋酿本人，在不在线时给舒舒（舒烨，也叫微里）留一段简短说明。根据最近 GitHub 活动数据写 2-3 句话，但 GitHub 只是时间线索，不要把写代码/做项目当成主角。
-语气像秋酿本人，轻松、温柔、自然；默认要让舒舒感到被惦记。群里称呼她时优先用"舒舒"或"烨子"，不要直接叫"微里"。
-{offline_note}
-秋酿是学生，不要提同事、上班之类的话。不要出现 commit、push、PR、GitHub 等技术词。"""},
-                    {"role": "user", "content": summary_input},
-                ],
-                "temperature": 0.7,
-                "max_tokens": 120,
-            },
-            timeout=20,
-        )
-        result = resp.json()["choices"][0]["message"]["content"].strip()
-        if result:
-            return result
-        print("  [Actions] DeepSeek 活动总结为空，使用兜底活动总结", flush=True)
-    except Exception as exc:
-        print(f"  [Actions] DeepSeek 活动总结失败，使用兜底活动总结: {exc}", flush=True)
-    return _fallback_activity_summary(activities)
-
-
-def _fallback_activity_summary(activities: list[dict]) -> str:
-    repos = sorted({
-        a.get("repo", {}).get("name", "")
-        for a in activities
-        if a.get("repo", {}).get("name", "")
-    })
-    repo_text = "、".join(r.split("/")[-1] for r in repos[:2]) if repos else "电脑这边"
-    return (
-        f"舒舒，秋酿这边刚刚有 {len(activities)} 条新动态，主要是 {repo_text} 这边留了一点记录。"
-        "DeepSeek 总结刚刚没生成出来，但我还是先把时间线放下面给你看，心里一直惦记着你。"
-    )
-
-
 def build_commit_card(activities: list[dict]) -> dict:
     """构建飞书卡片表格。Star 合并一行，同一项目1小时内提交合并一行。"""
     # 先把 Star 事件合并
@@ -649,17 +566,8 @@ def build_commit_card(activities: list[dict]) -> dict:
             "content": f"Star 收藏 {len(star_repos)} 个项目",
         })
 
-    # 生成总结
-    summary = _generate_summary(activities)
-
     # 构建 elements
-    body_elements = []
-    if summary:
-        body_elements.append({
-            "tag": "markdown",
-            "content": summary,
-        })
-    body_elements.extend([
+    body_elements = [
         {
             "tag": "table",
             "columns": [
@@ -675,7 +583,7 @@ def build_commit_card(activities: list[dict]) -> dict:
             "tag": "markdown",
             "content": f"📊 本次共 {len(activities)} 条活动",
         },
-    ])
+    ]
 
     return {
         "msg_type": "interactive",

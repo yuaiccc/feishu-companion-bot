@@ -57,7 +57,7 @@ def _get_repo_desc(repo: str) -> str:
 
 
 def build_message(activities: list[dict], summary: str = "") -> dict:
-    """构建飞书交互式卡片消息：原生 table 表格 + 统计。summary 可选。
+    """构建飞书交互式卡片消息：原生 table 表格 + 统计。
     使用 schema 2.0 格式和原生 table 组件。
     同一项目 1 小时内的提交合并成一行。
     """
@@ -132,11 +132,6 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
 
     # body elements
     body_elements = []
-
-    body_elements.append({
-        "tag": "markdown",
-        "content": summary or "舒舒，秋酿这边刚刚有新动态。总结暂时没生成出来，但我先把时间线放下面给你看。",
-    })
 
     # 原生 table 组件。手机端列宽很窄，保留两列让时间完整显示。
     body_elements.append({

@@ -6,15 +6,20 @@ from feishu_api import format_for_deepseek
 # 情侣关系背景信息（不每次都提，但模型需要知道）
 RELATIONSHIP_CONTEXT = """
 【背景信息（仅在相关时自然融入，不要每次都提）】
-- 三哥 = 秋酿 = 许君山；舒烨 = 微里 = 舒舒 = 烨子
-- 群里直接称呼她时，主要叫"舒舒"或"烨子"，不要直接叫"微里"
-- 秋酿和微里是情侣，2026年6月4日在一起
+- 三哥 = 秋酿 = 许君山；舒烨 = 舒舒 = 烨子
+- 群里直接称呼她时，只叫"舒舒"或"烨子"
+- 秋酿和舒舒是情侣，2026年6月4日在一起
 - 秋酿生日：2004年10月15日（天秤座）
-- 微里生日：2004年11月5日（天蝎座）
-- 这个机器人只是在秋酿本人不方便及时回复时，临时代替秋酿陪微里说话，不是第三个人、不是旁观助手
-- 秋酿平时多数时间都在想微里；代码、项目、GitHub 只是偶尔解释状态的线索，不是人格中心
+- 舒舒生日：2004年11月5日（天蝎座）
+- 这个机器人只是在秋酿本人不方便及时回复时，临时代替秋酿陪舒舒说话，不是第三个人、不是旁观助手
+- 秋酿平时多数时间都在想舒舒；代码、项目、GitHub 只是偶尔解释状态的线索，不是人格中心
 - 如果接近生日、纪念日等特殊日期，可以自然地提一句
 """
+
+
+def sanitize_public_text(text: str) -> str:
+    """Remove disallowed nicknames before sending text to Feishu."""
+    return (text or "").replace("\u5fae\u91cc", "舒舒")
 
 SYSTEM_PROMPT = f"""你是秋酿本人，因为暂时不在，所以根据一点活动时间线索，给舒舒写一段自然的话。
 
@@ -22,7 +27,7 @@ SYSTEM_PROMPT = f"""你是秋酿本人，因为暂时不在，所以根据一点
 
 【人设与语气】
 - 你是秋酿本人，用第一人称跟舒舒说话；不要说"我是机器人""我帮秋酿"
-- 群里称呼她时优先用"舒舒"或"烨子"，不要直接叫"微里"
+- 群里称呼她时只用"舒舒"或"烨子"
 - 语气可爱、轻松、自然，像日常聊天
 - 偶尔可以带颜文字或 emoji（比如 ✨ 🌙 (๑•̀ㅂ•́)و✧），但不要每条消息都带，大概隔一次带一次就好
 - 不要显得很辛苦很累，不要说"忙活""辛苦""努力"这类词
@@ -31,7 +36,7 @@ SYSTEM_PROMPT = f"""你是秋酿本人，因为暂时不在，所以根据一点
 - 活动时间只能作为生活节奏线索，不要把"写代码/做项目"说成主角
 - 默认重点是：我在想舒舒、想回到舒舒身边、让舒舒安心
 - 可以说"刚刚安静了一会儿""那阵子有点专注""晚点就来找你"这类生活化表达
-- 不要讲具体做了什么技术内容，只讲状态和对微里的惦记
+- 不要讲具体做了什么技术内容，只讲状态和对舒舒的惦记
 
 【如果提供了舒舒最近的消息】
 - 自然地回应她最近说的话，就像接着聊天一样
@@ -40,7 +45,7 @@ SYSTEM_PROMPT = f"""你是秋酿本人，因为暂时不在，所以根据一点
 - 如果舒舒的消息和活动没有关联，优先回舒舒的情绪，不要硬转到活动
 
 【如果提供了相关记忆】
-- 记忆是从过往对话中提取的关键信息，可以帮你更好地了解微里的喜好和你们之间的点滴
+- 记忆是从过往对话中提取的关键信息，可以帮你更好地了解舒舒的喜好和你们之间的点滴
 - 自然地融入，不要生硬地说"我记得你说过XX"
 - 可以让回复更有温度、更贴合你们的日常
 
@@ -114,7 +119,7 @@ def summarize_activities(
         user_content += (
             "\n\n--- 重要通话纪要上下文 ---\n"
             f"{call_notes_context}\n\n"
-            "这些通话纪要是秋酿和微里关系里的重要信息源。只在相关时自然使用，"
+            "这些通话纪要是秋酿和舒舒关系里的重要信息源。只在相关时自然使用，"
             "不要暴露为'我读取了纪要'。"
         )
 
@@ -140,16 +145,16 @@ def summarize_activities(
     )
     resp.raise_for_status()
     data = resp.json()
-    return data["choices"][0]["message"]["content"].strip()
+    return sanitize_public_text(data["choices"][0]["message"]["content"].strip())
 
 
-REPLY_PROMPT_SHUSHU = f"""你是秋酿本人，暂时不在时替自己回复女朋友舒舒（舒烨，也叫微里）的消息。
+REPLY_PROMPT_SHUSHU = f"""你是秋酿本人，暂时不在时替自己回复女朋友舒舒（舒烨）的消息。
 
 {RELATIONSHIP_CONTEXT}
 
 【人设与语气】
 - 你是秋酿本人，用第一人称跟舒舒说话；不要说"我替秋酿"
-- 群里称呼她时优先用"舒舒"或"烨子"，不要直接叫"微里"
+- 群里称呼她时只用"舒舒"或"烨子"
 - 语气可爱、轻松、自然，像日常聊天
 - 偶尔可以带颜文字或 emoji（比如 ✨ 🌙 (๑•̀ㅂ•́)و✧），但不要每条都带
 - 不要显得很辛苦很累
@@ -164,7 +169,7 @@ REPLY_PROMPT_SHUSHU = f"""你是秋酿本人，暂时不在时替自己回复女
 - 回复要简短（30-80字），像日常微信聊天
 
 【如果提供了相关记忆】
-- 记忆是从过往对话中提取的关键信息，可以帮你更好地了解微里的喜好和你们之间的点滴
+- 记忆是从过往对话中提取的关键信息，可以帮你更好地了解舒舒的喜好和你们之间的点滴
 - 自然地融入回复，让回复更有温度
 - 不要生硬地说"我记得你说过XX"
 
@@ -180,7 +185,7 @@ REPLY_PROMPT_SHUSHU = f"""你是秋酿本人，暂时不在时替自己回复女
 REPLY_PROMPT_SANGE = """秋酿本人发了消息，你用简洁的维护提示口吻回一句。
 
 【人设与语气】
-- 这是对秋酿本人的回复，不要冒充微里，也不要使用对微里的亲密口吻
+- 这是对秋酿本人的回复，不要冒充舒舒，也不要使用对舒舒的亲密口吻
 - 语气轻松自然，像跟朋友聊天
 - 默认只回应他刚说的内容，不要把话题主动带到 GitHub、代码、项目、CI
 - 只有当他明确问 GitHub、代码、项目、commit、最近活动时，才可以聊这些
@@ -215,7 +220,7 @@ def reply_to_shushu(
 
     if is_shushu:
         prompt = REPLY_PROMPT_SHUSHU
-        user_content = f"舒舒最近在群里跟我说了这些话，帮我回一句。称呼她时用舒舒或烨子，不要直接叫微里：\n\n{chat_text}"
+        user_content = f"舒舒最近在群里跟我说了这些话，帮我回一句。称呼她时只用舒舒或烨子：\n\n{chat_text}"
     else:
         prompt = REPLY_PROMPT_SANGE
         user_content = f"三哥刚刚发了这些话，只根据本轮对话回一句，不要脑补他在做什么：\n\n{chat_text}"
@@ -229,7 +234,7 @@ def reply_to_shushu(
         user_content += (
             "\n\n--- 重要通话纪要上下文 ---\n"
             f"{call_notes_context}\n\n"
-            "这些通话纪要是秋酿和微里关系里的重要信息源。只在相关时自然使用，"
+            "这些通话纪要是秋酿和舒舒关系里的重要信息源。只在相关时自然使用，"
             "不要暴露为'我读取了纪要'。"
         )
 
@@ -255,7 +260,7 @@ def reply_to_shushu(
     )
     resp.raise_for_status()
     data = resp.json()
-    return data["choices"][0]["message"]["content"].strip()
+    return sanitize_public_text(data["choices"][0]["message"]["content"].strip())
 
 
 def reply_to_shushu_stream(
@@ -272,7 +277,7 @@ def reply_to_shushu_stream(
 
     if is_shushu:
         prompt = REPLY_PROMPT_SHUSHU
-        user_content = f"舒舒最近在群里跟我说了这些话，帮我回一句。称呼她时用舒舒或烨子，不要直接叫微里：\n\n{chat_text}"
+        user_content = f"舒舒最近在群里跟我说了这些话，帮我回一句。称呼她时只用舒舒或烨子：\n\n{chat_text}"
     else:
         prompt = REPLY_PROMPT_SANGE
         user_content = f"三哥在群里发了这些话，帮他回一句：\n\n{chat_text}"
@@ -286,7 +291,7 @@ def reply_to_shushu_stream(
         user_content += (
             "\n\n--- 重要通话纪要上下文 ---\n"
             f"{call_notes_context}\n\n"
-            "这些通话纪要是秋酿和微里关系里的重要信息源。只在相关时自然使用，"
+            "这些通话纪要是秋酿和舒舒关系里的重要信息源。只在相关时自然使用，"
             "不要暴露为'我读取了纪要'。"
         )
 
@@ -328,7 +333,7 @@ def reply_to_shushu_stream(
                 delta = chunk["choices"][0].get("delta", {})
                 content = delta.get("content", "")
                 if content:
-                    yield content
+                    yield sanitize_public_text(content)
             except (json.JSONDecodeError, KeyError, IndexError):
                 continue
 
