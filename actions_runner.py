@@ -572,7 +572,8 @@ def build_commit_card(activities: list[dict]) -> dict:
     """构建飞书卡片表格。Star 合并一行，同一项目1小时内提交合并一行。"""
     # 先把 Star 事件合并
     star_repos = []
-    push_groups: dict[str, list[dict]] = {}  # repo -> [activities within 1h]
+    push_groups: list[tuple[str, list[dict]]] = []
+    current_push_group_by_repo: dict[str, list[dict]] = {}
     other_activities = []
     for a in activities:
         atype = a.get("type", "")
@@ -582,21 +583,23 @@ def build_commit_card(activities: list[dict]) -> dict:
                 star_repos.append(repo)
         elif atype == "PushEvent":
             # 检查是否可以合并到已有分组（同一仓库 + 1小时内）
-            merged = False
-            if repo in push_groups and push_groups[repo]:
-                last_time = _parse_time(push_groups[repo][-1].get("created_at", ""))
+            group = current_push_group_by_repo.get(repo)
+            if group:
+                last_time = _parse_time(group[-1].get("created_at", ""))
                 cur_time = _parse_time(a.get("created_at", ""))
                 if last_time and cur_time and abs((cur_time - last_time).total_seconds()) <= 3600:
-                    push_groups[repo].append(a)
-                    merged = True
-            if not merged:
-                push_groups.setdefault(repo, []).append(a)
+                    group.append(a)
+                    continue
+
+            group = [a]
+            push_groups.append((repo, group))
+            current_push_group_by_repo[repo] = group
         else:
             other_activities.append(a)
 
     table_rows = []
     # 合并后的 push 分组
-    for repo, group in push_groups.items():
+    for repo, group in push_groups:
         if len(group) == 1:
             a = group[0]
             detail = a.get("payload", {})

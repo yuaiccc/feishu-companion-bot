@@ -32,6 +32,8 @@ from config import (
     POLL_INTERVAL_SECONDS,
     DRY_RUN,
     FEISHU_READ_MESSAGES,
+    FEISHU_STATUS_CHAT_ID,
+    STATUS_NOTIFY_COOLDOWN_SECONDS,
     MEMORY_ENABLED,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
@@ -42,6 +44,7 @@ from summarizer import summarize_activities, reply_to_shushu, reply_to_shushu_st
 from notifier import build_message
 from state import (
     load_state,
+    save_state,
     filter_new_events,
     update_state,
     filter_new_shushu_messages,
@@ -148,6 +151,24 @@ def _search_relevant_memories(query: str) -> list[str]:
     else:
         print("  没有找到相关记忆")
     return memories
+
+
+def _notify_status(text: str, key: str = "status", force: bool = False) -> None:
+    """Push local service status to Sange's p2p chat when configured."""
+    if not FEISHU_STATUS_CHAT_ID:
+        return
+    try:
+        now = time.time()
+        state = load_state()
+        sent_at = state.setdefault("status_notifications", {})
+        last = float(sent_at.get(key, 0) or 0)
+        if not force and now - last < STATUS_NOTIFY_COOLDOWN_SECONDS:
+            return
+        send_text(f"本地机器人状态：{text}", receive_id=FEISHU_STATUS_CHAT_ID)
+        sent_at[key] = now
+        save_state(state)
+    except Exception as e:
+        print(f"  [状态推送] 失败: {e}", flush=True)
 
 
 # ---- GitHub 轮询逻辑 ----
@@ -364,6 +385,7 @@ def github_poll_loop():
             check_github()
         except Exception as e:
             print(f"  GitHub 轮询出错: {e}")
+            _notify_status(f"GitHub 轮询出错：{e}", key="github_poll_error")
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -507,6 +529,7 @@ def on_message_received(msg_data: dict):
         print(f"  [错误] on_message_received 整体异常: {e}", flush=True)
         import traceback
         traceback.print_exc()
+        _notify_status(f"处理飞书消息异常：{e}", key="message_handler_error")
 
 
 # ---- 测试模式 ----
@@ -602,6 +625,7 @@ def main():
     print(f"  读取消息: {'开启' if FEISHU_READ_MESSAGES else '关闭'}")
     print(f"  记忆模块: {'开启' if MEMORY_ENABLED else '关闭'}")
     print("=" * 60)
+    _notify_status("已启动/重启，本地长连接正在保持在线。", key="startup")
 
     # --once 模式：只检查一次 GitHub，不启动长连接
     if "--once" in sys.argv:
@@ -615,7 +639,12 @@ def main():
 
     # 主线程：启动飞书长连接（阻塞）
     print("  启动飞书长连接事件监听...")
-    start_event_listener(on_message_received=on_message_received)
+    try:
+        start_event_listener(on_message_received=on_message_received)
+    except Exception as e:
+        print(f"  [致命] 飞书长连接退出: {e}", flush=True)
+        _notify_status(f"飞书长连接退出：{e}", key="websocket_exit", force=True)
+        raise
 
 
 if __name__ == "__main__":

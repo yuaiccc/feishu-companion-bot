@@ -67,7 +67,8 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
     # ---- 合并同一项目 1 小时内的 PushEvent ----
     star_repos = []
     table_rows = []
-    push_groups: dict[str, list[dict]] = {}  # repo -> [activities within 1h]
+    push_groups: list[tuple[str, list[dict]]] = []
+    current_push_group_by_repo: dict[str, list[dict]] = {}
 
     for a in activities:
         if a.get("type") == "WatchEvent":
@@ -76,15 +77,17 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
         elif a.get("type") == "PushEvent":
             repo = a["repo"]
             # 检查是否可以合并到已有分组（同一仓库 + 1小时内）
-            merged = False
-            if repo in push_groups and push_groups[repo]:
-                last_time = _parse_time(push_groups[repo][-1]["created_at"])
+            group = current_push_group_by_repo.get(repo)
+            if group:
+                last_time = _parse_time(group[-1]["created_at"])
                 cur_time = _parse_time(a["created_at"])
                 if last_time and cur_time and abs((cur_time - last_time).total_seconds()) <= 3600:
-                    push_groups[repo].append(a)
-                    merged = True
-            if not merged:
-                push_groups.setdefault(repo, []).append(a)
+                    group.append(a)
+                    continue
+
+            group = [a]
+            push_groups.append((repo, group))
+            current_push_group_by_repo[repo] = group
         else:
             table_rows.append({
                 "time": _format_time(a["created_at"]),
@@ -93,7 +96,7 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
             })
 
     # 把合并后的 push 分组转成表格行
-    for repo, group in push_groups.items():
+    for repo, group in push_groups:
         if len(group) == 1:
             # 单条不合并
             a = group[0]

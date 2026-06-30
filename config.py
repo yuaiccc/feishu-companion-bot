@@ -23,6 +23,7 @@ FEISHU_OPEN_API = "https://open.feishu.cn/open-apis"
 FEISHU_SHUSHU_OPEN_ID = os.getenv("FEISHU_SHUSHU_OPEN_ID", "")
 FEISHU_BOT_OPEN_ID = os.getenv("FEISHU_BOT_OPEN_ID", "")
 FEISHU_CHAT_ID = os.getenv("FEISHU_CHAT_ID", "")
+FEISHU_STATUS_CHAT_ID = os.getenv("FEISHU_STATUS_CHAT_ID", "")
 FEISHU_READ_MESSAGES = os.getenv("FEISHU_READ_MESSAGES", "true").lower() in ("true", "1", "yes")
 
 # ---- 记忆模块 ----
@@ -40,6 +41,7 @@ GITHUB_PRIVATE_REPOS = [
 # ---- 运行配置 ----
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
+STATUS_NOTIFY_COOLDOWN_SECONDS = int(os.getenv("STATUS_NOTIFY_COOLDOWN_SECONDS", "300"))
 
 # ---- 状态文件 ----
 STATE_FILE = BASE_DIR / "state.json"

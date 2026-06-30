@@ -82,6 +82,7 @@ FEISHU_SHUSHU_OPEN_ID=ou_xxx    # 舒舒
 FEISHU_SANGE_OPEN_ID=ou_xxx     # 三哥
 FEISHU_BOT_OPEN_ID=ou_xxx       # 机器人 open_id，Actions 兜底判断 @ 需要
 FEISHU_CHAT_ID=oc_xxx           # 群聊 ID
+FEISHU_STATUS_CHAT_ID=oc_xxx    # 可选，三哥和机器人的单聊 ID，用于本地服务状态推送
 FEISHU_READ_MESSAGES=true
 
 # GitHub
@@ -187,7 +188,10 @@ https://open.feishu.cn/document/home/index
 GitHub Actions 运行时电脑可能休眠，`_generate_summary` 会根据当前时间给出不在线理由（凌晨可能睡了、午休可能在吃饭等）。
 
 ### 13. 同一项目 1 小时内提交合并
-`notifier.py` 和 `actions_runner.py` 的表格构建逻辑会把同一仓库 1 小时内的多次 PushEvent 合并成一行。
+`notifier.py` 和 `actions_runner.py` 的表格构建逻辑只合并同一仓库且连续活动时间差不超过 1 小时的 PushEvent。超过 1 小时必须新开一行，不能把同仓库所有提交无脑合并。
+
+### 13.5 本地服务状态推送
+`FEISHU_STATUS_CHAT_ID` 配成三哥和机器人的单聊 chat_id 后，`main.py` 会在本地服务启动/重启、GitHub 轮询异常、消息处理异常、飞书长连接退出时向单聊推送状态。进程崩溃后由 launchd 重启，新进程会发“已启动/重启”。电脑关机或系统睡死时本地进程无法主动推送，只能靠 GitHub Actions 兜底。
 
 ### 14. 通话纪要 / 妙记是重要信息源
 秋酿和微里的通话纪要是比 GitHub 更重要的关系上下文。当前项目通过 `call_notes.py` 按已知 `minute_token` 读取飞书妙记：
