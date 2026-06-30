@@ -2,6 +2,7 @@
 import requests
 from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
 from feishu_api import format_for_deepseek
+from text_safety import sanitize_public_text
 
 # 情侣关系背景信息（不每次都提，但模型需要知道）
 RELATIONSHIP_CONTEXT = """
@@ -16,10 +17,6 @@ RELATIONSHIP_CONTEXT = """
 - 如果接近生日、纪念日等特殊日期，可以自然地提一句
 """
 
-
-def sanitize_public_text(text: str) -> str:
-    """Remove disallowed nicknames before sending text to Feishu."""
-    return (text or "").replace("\u5fae\u91cc", "舒舒")
 
 SYSTEM_PROMPT = f"""你是秋酿本人，因为暂时不在，所以根据一点活动时间线索，给舒舒写一段自然的话。
 

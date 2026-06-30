@@ -248,15 +248,31 @@ def check_github(receive_id: str = "", force: bool = False, with_summary: bool =
 
 # ---- LLM 意图判断 ----
 
-def _should_use_tools(content: str, sender: str = "") -> bool:
-    """用 DeepSeek 判断这条消息是否需要调用工具（GitHub 数据 + 本地应用状态）。
-    返回 True 表示需要调用工具，False 表示纯聊天即可。
-    """
+_STATUS_KEYWORDS = (
+    "在干嘛", "在干啥", "干嘛", "干啥", "忙什么", "忙啥",
+    "在做什么", "在搞什么", "在弄什么", "最近怎么样", "最近忙不忙",
+    "你在干嘛", "他在干嘛", "三哥在干嘛", "最近活动", "最近在",
+    "最近进度", "电脑活动", "窗口",
+)
+_GITHUB_KEYWORDS = (
+    "github", "git hub", "提交", "commit", "代码", "项目进度", "最近提交",
+    "代码记录", "仓库", "push", "pr", "issue",
+)
+
+
+def _classify_tool_intent(content: str, sender: str = "") -> str:
+    """Return 'status', 'github', or 'none' for optional tool use."""
     import requests as req
 
     # 短消息快速跳过
     if len(content) <= 2:
-        return False
+        return "none"
+
+    lower = content.lower()
+    if any(keyword in lower for keyword in _GITHUB_KEYWORDS):
+        return "github"
+    if any(keyword in content for keyword in _STATUS_KEYWORDS):
+        return "status"
 
     try:
         resp = req.post(
@@ -270,35 +286,40 @@ def _should_use_tools(content: str, sender: str = "") -> bool:
                 "messages": [
                     {
                         "role": "system",
-                        "content": """判断用户消息是否在询问"某人最近在做什么""在干嘛""忙什么"等需要了解状态的问题。
+                        "content": """判断用户消息是否需要调用工具。只回复 STATUS、GITHUB 或 NONE。
 
-以下情况回复 YES（需要查工具）：
-- "在干嘛""在干什么""忙什么""最近在做什么"
-- "最近怎么样""最近忙不忙"
-- "看看代码""最近提交""commit""代码记录"
-- "最近活动""最近进度"
-- "你在干嘛""他在干嘛""三哥在干嘛"
+回复 STATUS：用户在问秋酿当前/最近状态、在干嘛、忙不忙、电脑活动、当前窗口。
+回复 GITHUB：用户明确问 GitHub、提交、commit、代码记录、仓库、PR、issue、项目进度。
+回复 NONE：普通聊天，不需要查工具。
 
-以下情况回复 NO（纯聊天，不需要工具）：
+注意：
+- "最近活动"如果没有代码/GitHub/提交语境，按 STATUS。
+- "在干嘛""最近怎么样"按 STATUS，不要按 GITHUB。
+- 只有明确出现代码/GitHub/提交/仓库相关含义才按 GITHUB。
+
+NONE 例子：
 - "你好""嗨""hi""早"
 - "谢谢""拜拜""晚安"
 - "想你""爱你""哈哈""好的"
 - "今天天气""吃什么"
-
-只回复 YES 或 NO。""",
+""",
                     },
                     {"role": "user", "content": f"用户消息: {content}"},
                 ],
                 "temperature": 0.0,
-                "max_tokens": 5,
+                "max_tokens": 8,
             },
             timeout=10,
         )
         result = resp.json()["choices"][0]["message"]["content"].strip().upper()
-        return "YES" in result
+        if "GITHUB" in result:
+            return "github"
+        if "STATUS" in result:
+            return "status"
+        return "none"
     except Exception as e:
         print(f"  [意图判断] 失败，默认不调用工具: {e}", flush=True)
-        return False
+        return "none"
 
 
 def _interpret_apps(app_summary: str) -> str:
@@ -400,10 +421,9 @@ def on_message_received(msg_data: dict):
             except Exception as e:
                 print(f"  [警告] 添加思考表情失败: {e}", flush=True)
 
-        # ---- 第1.5步：用 LLM 判断是否需要调用工具（GitHub 数据 + 本地应用状态）----
-        needs_tools = _should_use_tools(content, sender_name)
-        if needs_tools and not is_shushu:
-            # 先发本地应用解读（DeepSeek 推测三哥在干什么）
+        # ---- 第1.5步：判断是否需要调用状态/GitHub 工具 ----
+        tool_intent = _classify_tool_intent(content, sender_name)
+        if tool_intent == "status":
             app_interpretation = ""
             try:
                 app_summary = get_app_summary()
@@ -423,8 +443,18 @@ def on_message_received(msg_data: dict):
             except Exception as e:
                 print(f"  [警告] 获取本地应用失败: {e}", flush=True)
 
-            # 再拉 GitHub 数据 + 总结表格
-            print(f"  [工具调用] LLM 判断需要调用工具，拉取 GitHub 数据 + 生成总结...", flush=True)
+            if thinking_reaction_id and message_id:
+                delete_reaction(message_id, thinking_reaction_id)
+            if message_id:
+                try:
+                    react_to_message(message_id, "DONE")
+                except FeishuMessageUnavailable:
+                    pass
+            if app_interpretation:
+                return
+
+        if tool_intent == "github":
+            print("  [工具调用] 用户明确询问 GitHub/提交，拉取 GitHub 数据...", flush=True)
             try:
                 check_github(receive_id=chat_id, force=True, with_summary=True, reply_to=message_id)
             except FeishuMessageUnavailable as e:

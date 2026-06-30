@@ -19,6 +19,7 @@ from datetime import datetime, timezone, timedelta
 
 from commit_text import brief_commit_messages
 from call_notes import build_call_notes_context
+from text_safety import sanitize_card, sanitize_public_text
 
 # 确保输出不缓冲
 sys.stdout.reconfigure(line_buffering=True)
@@ -42,11 +43,6 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 OPEN_API = "https://open.feishu.cn/open-apis"
 SHANGHAI = timezone(timedelta(hours=8))
 _RECALLED_TEXTS = {"This message was recalled", "消息已撤回"}
-
-
-def sanitize_public_text(text: str) -> str:
-    """Remove disallowed nicknames before sending text to Feishu."""
-    return (text or "").replace("\u5fae\u91cc", "舒舒")
 
 # 状态文件：GitHub Actions 之间通过 actions/cache 恢复和保存
 STATE_FILE = "actions_state.json"
@@ -217,6 +213,7 @@ def _extract_text(msg_type: str, content_raw: str) -> str:
 
 def send_text(text: str, receive_id: str = "") -> bool:
     import requests
+    text = sanitize_public_text(text)
     token = _get_token()
     target = receive_id or FEISHU_CHAT_ID
     resp = requests.post(
@@ -239,6 +236,7 @@ def send_text(text: str, receive_id: str = "") -> bool:
 
 def reply_text(text: str, message_id: str) -> bool:
     import requests
+    text = sanitize_public_text(text)
     token = _get_token()
     resp = requests.post(
         f"{OPEN_API}/im/v1/messages/{message_id}/reply",
@@ -615,6 +613,7 @@ def _compact_rows(rows: list[dict]) -> list[dict]:
 
 def send_card(card: dict, receive_id: str = "") -> bool:
     import requests
+    card = sanitize_card(card)
     token = _get_token()
     target = receive_id or FEISHU_CHAT_ID
     resp = requests.post(

@@ -23,6 +23,7 @@ from config import (
     FEISHU_CHAT_ID, FEISHU_SHUSHU_OPEN_ID, FEISHU_BOT_OPEN_ID, DRY_RUN,
     FEISHU_EVENT_MAX_AGE_SECONDS,
 )
+from text_safety import sanitize_card, sanitize_public_text
 
 # ---- SDK Client ----
 
@@ -173,6 +174,7 @@ def fetch_shushu_messages(chat_id: str = "", limit: int = 20) -> list[dict]:
 
 def send_text(text: str, receive_id: str = "") -> bool:
     """通过 SDK 机器人发文本消息。dry_run 时只打印。"""
+    text = sanitize_public_text(text)
     target = receive_id or FEISHU_CHAT_ID
     if DRY_RUN:
         print("\n  " + "=" * 56)
@@ -204,6 +206,7 @@ def send_text(text: str, receive_id: str = "") -> bool:
 
 def reply_text(text: str, message_id: str) -> bool:
     """回复某条消息（引用回复，显示在原消息下方）。dry_run 时只打印。"""
+    text = sanitize_public_text(text)
     if DRY_RUN:
         print(f"\n  [回复消息] {text[:50]} -> {message_id[:20]}...", flush=True)
         return True
@@ -231,6 +234,7 @@ def reply_text(text: str, message_id: str) -> bool:
 
 def reply_card(card: dict, message_id: str) -> bool:
     """回复某条消息（卡片形式，引用回复）。dry_run 时只打印。"""
+    card = sanitize_card(card)
     target_card = card["card"]
     if DRY_RUN:
         print(f"\n  [回复卡片] -> {message_id[:20]}...", flush=True)
@@ -261,6 +265,7 @@ def send_card(card: dict, receive_id: str = "") -> bool:
     """通过 SDK 机器人发卡片消息。dry_run 时只打印。
     card 格式: {"msg_type": "interactive", "card": {...}}
     """
+    card = sanitize_card(card)
     target = receive_id or FEISHU_CHAT_ID
     if DRY_RUN:
         print("\n  " + "=" * 56)

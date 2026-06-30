@@ -56,5 +56,7 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 - 本地窗口状态：`local_apps.py` 通过 AppleScript 读取前台应用和窗口标题，只在本地模式可用。
 - 通话纪要：`call_notes.py` 通过飞书妙记官方接口读取已配置 `minute_token` 的文字记录，默认关闭。开启前要配置 `CALL_NOTES_ENABLED=true` 和 `FEISHU_MINUTE_TOKENS`，并确保应用具备妙记读取/导出权限。
 - GitHub 活动：用于兜底判断时间线，不应该盖过秋酿和舒舒的关系上下文。
+- 状态查询和 GitHub 查询分开处理：问"在干嘛/最近活动"默认只看本地窗口状态；明确问 GitHub、提交、代码、仓库时才推 GitHub 卡片。
 - 活动卡片只合并同仓库且组内首尾时间跨度不超过 1 小时的提交；超过 1 小时必须分成多行。
 - 活动卡片里的提交说明会强制改写成中文短句，避免舒舒看到英文 commit 标题看不懂。
+- 所有发往飞书的文本和卡片都会先经过 `text_safety.py` 统一清洗。
