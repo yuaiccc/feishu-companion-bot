@@ -1,4 +1,4 @@
-"""Daily love-note summary posted as a comment on an existing Feishu Docx/Wiki."""
+"""Daily love-note reaction posted as a comment on an existing Feishu Docx/Wiki."""
 from __future__ import annotations
 
 import html
@@ -27,7 +27,7 @@ _MAX_DOCUMENT_SOURCE_CHARS = 12000
 
 
 def run_daily_love_note(target_date: datetime | None = None, force: bool = False) -> str:
-    """Summarize the configured love-note document and comment on it."""
+    """React to the configured love-note document and comment on it."""
     target_date = target_date or datetime.now(_SHANGHAI)
     date_key = target_date.strftime("%Y-%m-%d")
 
@@ -37,26 +37,26 @@ def run_daily_love_note(target_date: datetime | None = None, force: bool = False
 
     source_text = fetch_love_note_content()
     if not source_text.strip():
-        return f"{date_key} 没有读到可总结的文档内容，跳过。"
+        return f"{date_key} 没有读到可评论的文档内容，跳过。"
 
-    summary = summarize_love_document(source_text, date_key)
-    add_love_note_comment(summary)
+    comment = generate_love_note_reaction(source_text, date_key)
+    add_love_note_comment(comment)
 
     state["last_love_note_date"] = date_key
     save_state(state)
-    return summary
+    return comment
 
 
 def preview_daily_love_note(target_date: datetime | None = None) -> str:
-    """Generate the daily love-note summary without writing the document or state."""
+    """Generate the daily love-note reaction without writing the document or state."""
     target_date = target_date or datetime.now(_SHANGHAI)
     source_text = fetch_love_note_content()
     if not source_text.strip():
-        return f"{target_date:%Y-%m-%d} 没有读到可总结的文档内容。"
-    return summarize_love_document(source_text, target_date.strftime("%Y-%m-%d"))
+        return f"{target_date:%Y-%m-%d} 没有读到可评论的文档内容。"
+    return generate_love_note_reaction(source_text, target_date.strftime("%Y-%m-%d"))
 
 
-def summarize_love_document(document_text: str, date_key: str) -> str:
+def generate_love_note_reaction(document_text: str, date_key: str) -> str:
     source_text = _trim_document_source(document_text)
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -67,18 +67,20 @@ def summarize_love_document(document_text: str, date_key: str) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": """你是三哥的小弟，负责把三哥和舒舒的飞书恋爱笔记整理成每日总结。
+                "content": """你是三哥的小弟，负责在三哥和舒舒的飞书恋爱笔记里留下旁观嗑糖短评。
 要求：
-- 输出 Markdown，不要代码块
-- 温柔、真实，不要过度腻
+- 只输出一条短评论，不要标题、不要分节、不要列表、不要 Markdown
+- 像读完内容后的自然评论：觉得甜、被可爱到、磕到了、提醒三哥珍惜
+- 语气可以轻松一点，但不要油腻，不要长篇总结
 - 舒舒和烨子是同一个人，称呼时二选一，不要并列
 - 不要冒充三哥本人
 - 输入是飞书文档正文，不是聊天消息列表
-- 只总结文档里已经写下来的内容，不要编造编辑时间、未出现的对话或当天事件
-- 可以保留文档里有画面感的一两句话，但必须来自原文
+- 只能根据文档里已经写下来的内容发感想，不要编造未出现的事件
+- 可以轻轻点到一个具体细节，但不要复述整篇
 - 文档正文通常没有作者元数据；如果无法从文字本身判断是谁说的，不要强行归到舒舒或三哥名下
 - 不要写“舒舒觉得/舒舒说/三哥说”这类归因，除非原文明确能支持；可以改写成“文档里写到”
-- 忽略已经生成过的“每日总结”章节，避免总结套总结""",
+- 评论长度控制在 60 到 120 个中文字符
+- 不要出现“每日总结”“文档里记录的小事”“三哥该记得”等总结模板词""",
             },
             {
                 "role": "user",
@@ -87,24 +89,11 @@ def summarize_love_document(document_text: str, date_key: str) -> str:
 恋爱笔记正文：
 {source_text}
 
-请按这个结构输出：
-## 每日总结 {date_key}
-
-### 文档里记录的小事
-- ...
-
-### 值得留住的话
-> ...
-
-### 三哥该记得
-- ...
-
-### 今天的总结
-...""",
+请写一条适合挂在飞书文档评论里的嗑糖短评。""",
             },
         ],
-        "temperature": 0.6,
-        "max_tokens": 900,
+        "temperature": 0.8,
+        "max_tokens": 220,
     }
     resp = requests.post(
         f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
@@ -123,12 +112,12 @@ def fetch_love_note_content() -> str:
     return get_docx_raw_content(doc_token)
 
 
-def add_love_note_comment(markdown_summary: str) -> dict:
+def add_love_note_comment(comment_text: str) -> dict:
     doc_token = LOVE_NOTE_DOC_TOKEN or resolve_wiki_doc_token(LOVE_NOTE_WIKI_TOKEN)
     if not doc_token:
         raise RuntimeError("缺少 LOVE_NOTE_DOC_TOKEN 或 LOVE_NOTE_WIKI_TOKEN")
     anchor_block_id = pick_love_note_comment_anchor(doc_token)
-    return create_docx_comment(doc_token, anchor_block_id, markdown_summary)
+    return create_docx_comment(doc_token, anchor_block_id, comment_text)
 
 
 def resolve_wiki_doc_token(wiki_token: str) -> str:

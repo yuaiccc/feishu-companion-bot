@@ -246,6 +246,13 @@ class BotRegressionTests(unittest.TestCase):
         self.assertIn("&lt;", joined)
         self.assertIn("&gt;", joined)
 
+    def test_love_note_prompt_is_reaction_not_structured_summary(self):
+        source = love_note.generate_love_note_reaction.__code__.co_consts
+        prompt_text = "\n".join(str(item) for item in source if isinstance(item, str))
+        self.assertIn("嗑糖短评", prompt_text)
+        self.assertIn("不要标题、不要分节、不要列表", prompt_text)
+        self.assertIn("不要出现“每日总结”", prompt_text)
+
 
 if __name__ == "__main__":
     unittest.main()

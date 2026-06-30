@@ -716,7 +716,7 @@ def run_mem_test_mode():
 
 def run_daily_note_test_mode():
     print("=" * 60)
-    print("  DAILY NOTE TEST MODE - 整理并创建今日恋爱笔记评论")
+    print("  DAILY NOTE TEST MODE - 生成并创建恋爱笔记短评")
     print("=" * 60)
     result = run_daily_love_note(force=True)
     print(result)
@@ -724,7 +724,7 @@ def run_daily_note_test_mode():
 
 def run_daily_note_preview_mode():
     print("=" * 60)
-    print("  DAILY NOTE PREVIEW MODE - 只整理，不写入")
+    print("  DAILY NOTE PREVIEW MODE - 只生成短评，不写入")
     print("=" * 60)
     result = preview_daily_love_note()
     print(result)
