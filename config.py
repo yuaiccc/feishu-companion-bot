@@ -21,6 +21,7 @@ FEISHU_OPEN_API = "https://open.feishu.cn/open-apis"
 
 # ---- Feishu 消息读取 ----
 FEISHU_SHUSHU_OPEN_ID = os.getenv("FEISHU_SHUSHU_OPEN_ID", "")
+FEISHU_BOT_OPEN_ID = os.getenv("FEISHU_BOT_OPEN_ID", "")
 FEISHU_CHAT_ID = os.getenv("FEISHU_CHAT_ID", "")
 FEISHU_READ_MESSAGES = os.getenv("FEISHU_READ_MESSAGES", "true").lower() in ("true", "1", "yes")
 

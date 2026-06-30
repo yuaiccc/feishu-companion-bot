@@ -82,7 +82,7 @@ def _is_bot_mention(mention: dict) -> bool:
         return False
 
     mentioned_type = str(mention.get("mentioned_type", "")).lower()
-    if mentioned_type == "app":
+    if mentioned_type in ("app", "bot"):
         return True
 
     mention_id = mention.get("id", "")

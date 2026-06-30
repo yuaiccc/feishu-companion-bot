@@ -171,9 +171,9 @@ workflow 里 `environment: feishu`，所以 Secrets 必须加到 Environment `fe
 飞书"至少发送一次"策略会在 3 秒内没收到 HTTP 200 时重发。必须用 `event_id`（事件唯一标识）+ `message_id`（消息唯一标识）做双重去重。`feishu_api.py` 的 `_handle_message` 里用 `nonlocal _processed_ids` 声明，否则重新赋值时报 `local variable referenced before assignment`。
 
 ### 10. 群聊 @机器人判断
-群聊消息只有 @机器人才回复，私聊全部回复。检查 `mentions` 里 `mentioned_type == "app"`。
+群聊消息只有 @机器人才回复，私聊全部回复。检查 `mentions` 里是否匹配当前机器人。
 
-注意：长连接事件里有 `mentioned_type == "app"`；但历史消息 REST API 的 `mentions[].id` 按官方文档是被 @ 用户或机器人的 open_id 字符串。因此 GitHub Actions 兜底必须配置 `FEISHU_BOT_OPEN_ID`，否则无法稳定区分“@机器人”和“@其他人”。
+注意：不同接口形态不完全一样。长连接事件可能给 `mentioned_type == "bot"` 或 `app`，也可能需要从 `mentions[].id.open_id` 判断；历史消息 REST API 的 `mentions[].id` 按官方文档和实测是被 @ 用户或机器人的 open_id 字符串。因此本地和 GitHub Actions 都必须配置 `FEISHU_BOT_OPEN_ID`，否则无法稳定区分“@机器人”和“@其他人”。
 
 私聊 `p2p` 只依赖本地长连接实时事件；Actions 兜底只拉 `FEISHU_CHAT_ID` 群聊历史消息，不扫私聊。飞书官方接收消息事件文档要求：单聊消息需要 `im:message.p2p_msg` 或 `im:message.p2p_msg:readonly`，群聊 @ 机器人需要 group_at 相关权限。
 

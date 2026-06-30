@@ -18,12 +18,34 @@ from lark_oapi.api.im.v1 import (
 
 from config import (
     FEISHU_APP_ID, FEISHU_APP_SECRET,
-    FEISHU_CHAT_ID, FEISHU_SHUSHU_OPEN_ID, DRY_RUN,
+    FEISHU_CHAT_ID, FEISHU_SHUSHU_OPEN_ID, FEISHU_BOT_OPEN_ID, DRY_RUN,
 )
 
 # ---- SDK Client ----
 
 _client = None
+
+
+def _field(obj, name: str, default=""):
+    """Read SDK object or dict field without assuming one shape."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _mention_open_id(mention) -> str:
+    mention_id = _field(mention, "id", "")
+    if isinstance(mention_id, str):
+        return mention_id
+    return _field(mention_id, "open_id", "") or _field(mention_id, "openId", "")
+
+
+def _is_bot_mention(mention) -> bool:
+    mentioned_type = str(_field(mention, "mentioned_type", "")).lower()
+    if mentioned_type in ("app", "bot"):
+        return True
+    open_id = _mention_open_id(mention)
+    return bool(FEISHU_BOT_OPEN_ID and open_id == FEISHU_BOT_OPEN_ID)
 
 
 def _get_client() -> lark.Client:
@@ -653,14 +675,20 @@ def start_event_listener(on_message_received=None):
             else:
                 # 检查 mentions 里有没有机器人
                 mentions = msg.mentions if hasattr(msg, "mentions") and msg.mentions else []
-                for m in mentions:
-                    mentioned_type = m.mentioned_type if hasattr(m, "mentioned_type") else ""
-                    # mentioned_type="app" 表示 @了机器人
-                    if mentioned_type == "app":
-                        is_mentioned = True
-                        break
+                is_mentioned = any(_is_bot_mention(m) for m in mentions)
 
             if not is_mentioned:
+                if chat_type == "group":
+                    mention_debug = [
+                        {
+                            "key": _field(m, "key", ""),
+                            "mentioned_type": _field(m, "mentioned_type", ""),
+                            "open_id": _mention_open_id(m),
+                            "name": _field(m, "name", ""),
+                        }
+                        for m in (msg.mentions if hasattr(msg, "mentions") and msg.mentions else [])
+                    ]
+                    print(f"  [长连接][调试] mentions 未匹配当前机器人: {mention_debug}", flush=True)
                 print(f"  [长连接] 群聊消息未@机器人，跳过", flush=True)
                 return
 
