@@ -201,44 +201,7 @@ def summarize_search_intro(query: str, results: list[dict]) -> str:
     """Generate a short one-paragraph intro for a search card."""
     if not results:
         return "小弟没搜到靠谱结果，换个关键词再试试。"
-
-    result_text = "\n".join(
-        f"{idx}. {item.get('title')} | {item.get('snippet')}"
-        for idx, item in enumerate(results[:5], 1)
-    )
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": """你是三哥的小弟，给搜索结果卡片写一句很短的开场。
-要求：
-- 只写 1-2 句，总共不超过 80 字
-- 不要列 bullet，不要 markdown
-- 说明这是小弟搜到的，不要当绝对事实
-- "舒舒"和"烨子"是同一个人的两个昵称；称呼她时二选一，不要把两个名字并列写出来
-- 不要使用“微里”这个名字""",
-            },
-            {"role": "user", "content": f"问题：{query}\n\n结果：\n{result_text}"},
-        ],
-        "temperature": 0.3,
-        "max_tokens": 120,
-    }
-    try:
-        resp = requests.post(
-            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=20,
-        )
-        resp.raise_for_status()
-        return sanitize_public_text(resp.json()["choices"][0]["message"]["content"].strip())
-    except Exception:
-        return "小弟先搜到这些结果，热度和片单可能会变，舒舒可以挑感兴趣的点开看看。"
+    return "小弟搜到这些相关结果，热度和片单可能会变，先按来源列成表给你看。"
 
 
 def build_search_card(query: str, results: list[dict], intro: str = "") -> dict:
