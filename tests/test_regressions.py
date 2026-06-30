@@ -1,7 +1,10 @@
 import unittest
+from unittest.mock import patch
 
 import actions_runner
+import call_notes
 import notifier
+import summarizer
 from main import _classify_tool_intent
 from text_safety import assert_public_text_clean, sanitize_card, sanitize_public_text
 
@@ -59,6 +62,61 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(_classify_tool_intent("三哥最近活动", "舒舒"), "status")
         self.assertEqual(_classify_tool_intent("三哥最近提交了什么", "舒舒"), "github")
         self.assertEqual(_classify_tool_intent("想你了", "舒舒"), "none")
+
+    def test_persona_is_helper_not_sange_persona(self):
+        prompts = "\n".join([
+            summarizer.RELATIONSHIP_CONTEXT,
+            summarizer.SYSTEM_PROMPT,
+            summarizer.REPLY_PROMPT_SHUSHU,
+        ])
+        self.assertIn("三哥的小弟", prompts)
+        self.assertNotIn("你是秋酿本人", prompts)
+        self.assertNotIn("用第一人称跟舒舒说话", prompts)
+
+    def test_call_notes_fallback_extracts_relationship_context(self):
+        transcript = "\n".join([
+            "随便聊一点普通事情",
+            "舒舒说晚上记得早点来打电话，想听你说晚安",
+            "秋酿答应散步回来就找她",
+        ])
+        summary = call_notes._fallback_summarize_transcript(transcript)
+        self.assertIn("记得早点来打电话", summary)
+        self.assertIn("散步回来就找她", summary)
+        assert_public_text_clean(summary)
+
+    def test_call_notes_context_uses_summary_cache_shape(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "CALL_NOTES_ENABLED": "true",
+                "FEISHU_MINUTE_TOKENS": "minute_a",
+                "CALL_NOTES_MAX_CHARS": "500",
+            },
+        ), patch.object(call_notes, "_get_tenant_token", return_value="token"), patch.object(
+            call_notes,
+            "fetch_minute_info",
+            return_value={"title": "电话", "create_time": "1782806400000"},
+        ), patch.object(
+            call_notes,
+            "fetch_minute_transcript",
+            return_value="舒舒说记得晚上来电话。\n这是一段很长但不该原文全塞的纪要。",
+        ), patch.object(
+            call_notes,
+            "_load_cache",
+            return_value={},
+        ), patch.object(
+            call_notes,
+            "_save_cache",
+        ), patch.object(
+            call_notes,
+            "_summarize_transcript_with_deepseek",
+            return_value="舒舒在意晚上能不能好好通电话；秋酿要记得主动找她。",
+        ):
+            context = call_notes.build_call_notes_context()
+        self.assertIn("通话摘要", context)
+        self.assertIn("主动找她", context)
+        self.assertNotIn("这是一段很长", context)
+        assert_public_text_clean(context)
 
 
 if __name__ == "__main__":

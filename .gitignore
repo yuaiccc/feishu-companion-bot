@@ -3,6 +3,7 @@
 
 # Runtime state
 state.json
+call_notes_cache.json
 *.log
 
 # Python
