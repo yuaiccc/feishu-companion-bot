@@ -202,12 +202,12 @@ https://open.feishu.cn/document/home/index
 
 幂等状态写在 `state.json`：`passive_processed_message_ids`、`passive_topic_timestamps`、`passive_sent_timestamps`。同一消息、同一话题、每小时超过上限都必须跳过。不要让旁听模式处理“哈哈/想你/晚安/摸头”等低信号情绪闲聊。
 
-### 11d. 每日恋爱笔记只追加，不覆盖
-`love_note.py` 负责每天读取已有 Wiki/Docx 恋爱笔记正文，把文档内容整理成每日总结 Markdown，再转换为 docx block 追加到同一个恋爱笔记末尾。它不是总结群聊消息。当前文档：
+### 11d. 每日恋爱笔记用局部评论，不污染正文
+`love_note.py` 负责每天读取已有 Wiki/Docx 恋爱笔记正文，把文档内容整理成每日总结 Markdown，再通过飞书 Drive 评论 API 挂到最后一段非空正文的局部评论上。它不是总结群聊消息，也不要再把总结追加成正文块。当前文档：
 - Wiki token: `IwfGwwGBBiQ4t3k9MW1cjJuDnab`
 - Docx token: `TjKadw7I8oqQT4xyCC0c2WhEnPe`
 
-写入必须使用追加 children 的方式：先读根 block 的 `children` 数量作为插入 `index`，不要用超大 index，也不要 overwrite。`state.json.last_love_note_date` 用于保证每天只写一次；`--daily-note-preview` 只预览不写入，`--daily-note-test` 会 `force=True` 并真实写入，只在人工测试时使用。生成标题使用 `每日总结 YYYY-MM-DD`，后续再次读取文档时要跳过这类已生成总结，避免总结套总结。
+写入必须使用 `POST /open-apis/drive/v1/files/{doc_token}/new_comments` 创建局部评论，`file_type=docx`，`anchor.block_id` 取最后一段非空正文 block。不要 overwrite，不要 append children。`state.json.last_love_note_date` 用于保证每天只写一次；`--daily-note-preview` 只预览不写入，`--daily-note-test` 会 `force=True` 并真实创建评论，只在人工测试时使用。生成标题使用 `每日总结 YYYY-MM-DD`。
 
 ### 12. GitHub commit 卡片不生成 DeepSeek 总结
 GitHub commit 活动卡片不生成 DeepSeek 总结，只展示表格和统计，避免自动开场太腻。

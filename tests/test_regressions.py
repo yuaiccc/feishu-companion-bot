@@ -217,6 +217,35 @@ class BotRegressionTests(unittest.TestCase):
         self.assertIn("今天一起研究飞书", trimmed)
         self.assertNotIn("机器人已经生成过", trimmed)
 
+    def test_love_note_comment_anchor_uses_last_non_empty_text_block(self):
+        blocks = [
+            {"block_id": "root", "page": {"elements": []}},
+            {
+                "block_id": "a",
+                "text": {"elements": [{"text_run": {"content": "第一段"}}]},
+            },
+            {"block_id": "image", "image": {"token": "img"}},
+            {
+                "block_id": "blank",
+                "text": {"elements": [{"text_run": {"content": ""}}]},
+            },
+            {
+                "block_id": "b",
+                "text": {"elements": [{"text_run": {"content": "最后一段"}}]},
+            },
+        ]
+        with patch.object(love_note, "get_docx_blocks", return_value=blocks):
+            self.assertEqual(love_note.pick_love_note_comment_anchor("doc"), "b")
+
+    def test_love_note_comment_elements_escape_and_chunk_text(self):
+        elements = love_note._comment_text_elements("<" + "a" * 1200 + ">")
+        self.assertGreater(len(elements), 1)
+        self.assertTrue(all(item["type"] == "text" for item in elements))
+        self.assertTrue(all(len(item["text"]) <= 900 for item in elements))
+        joined = "".join(item["text"] for item in elements)
+        self.assertIn("&lt;", joined)
+        self.assertIn("&gt;", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

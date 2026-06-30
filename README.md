@@ -58,7 +58,7 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 - 通话纪要：`call_notes.py` 通过飞书妙记官方接口读取已配置 `minute_token` 的文字记录，默认关闭。开启前要配置 `CALL_NOTES_ENABLED=true` 和 `FEISHU_MINUTE_TOKENS`，并确保应用具备妙记读取/导出权限。读取后会先整理成短摘要并缓存，只给回复模型关系上下文，不把原文整段塞进去。
 - 外部搜索：`external_search.py` 通过本机 `openclaw infer web search` 搜索网页，再用 DeepSeek 整理为"短结论 + 表格 + 来源链接"卡片。它只在本地模式可用；Actions 兜底不能调用三哥电脑上的 OpenClaw。
 - 旁听辅助：`passive_assistant.py` 接收未 @ 机器人的群聊消息，只在最近时间窗口内出现资料型话题、群里静默一段时间、同话题不在冷却中时，才用 OpenClaw 补一张背景资料卡片。已处理消息和话题冷却写入 `state.json`，避免同一个问题重复回答。
-- 每日恋爱笔记：`love_note.py` 每天按 `LOVE_NOTE_RUN_AT` 读取已有飞书 Wiki/Docx 恋爱笔记正文，用 DeepSeek 整理为文档每日总结，并追加到文档末尾。通过 `state.json` 的 `last_love_note_date` 保证每天只写一次；预览用 `python main.py --daily-note-preview`，手动写入测试用 `python main.py --daily-note-test`。
+- 每日恋爱笔记：`love_note.py` 每天按 `LOVE_NOTE_RUN_AT` 读取已有飞书 Wiki/Docx 恋爱笔记正文，用 DeepSeek 整理为文档每日总结，并以局部评论挂到文档最后一段非空正文上，不向正文追加内容。通过 `state.json` 的 `last_love_note_date` 保证每天只写一次；预览用 `python main.py --daily-note-preview`，手动写入测试用 `python main.py --daily-note-test`。
 - GitHub 活动：用于兜底判断时间线，不应该盖过秋酿和舒舒的关系上下文。
 - 状态查询和 GitHub 查询分开处理：问"在干嘛/最近活动"默认只看本地窗口状态；明确问 GitHub、提交、代码、仓库时才推 GitHub 卡片。
 - 外部搜索和近期活动分开处理：问"最近B站哪些新番热门/查一下/搜索"走 OpenClaw；问"三哥最近活动/在干嘛"仍走电脑活动。
@@ -81,7 +81,7 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 
 ## 每日恋爱笔记
 
-默认关闭，打开 `LOVE_NOTE_ENABLED=true` 后，本地长连接进程会启动每日总结线程。它读取现有恋爱笔记正文，只追加总结到文档末尾，不覆盖原文。
+默认关闭，打开 `LOVE_NOTE_ENABLED=true` 后，本地长连接进程会启动每日总结线程。它读取现有恋爱笔记正文，把总结作为飞书局部评论挂在文档最后一段非空正文上，不覆盖原文，也不向正文追加噪声。
 
 配置项：
 
@@ -92,4 +92,4 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 手动命令：
 
 - `python main.py --daily-note-preview`：只生成预览，不写入文档、不更新状态。
-- `python main.py --daily-note-test`：强制生成并写入今天的总结，会绕过当天幂等检查。
+- `python main.py --daily-note-test`：强制生成并创建今天的文档评论，会绕过当天幂等检查。

@@ -716,7 +716,7 @@ def run_mem_test_mode():
 
 def run_daily_note_test_mode():
     print("=" * 60)
-    print("  DAILY NOTE TEST MODE - 整理并写入今日恋爱笔记")
+    print("  DAILY NOTE TEST MODE - 整理并创建今日恋爱笔记评论")
     print("=" * 60)
     result = run_daily_love_note(force=True)
     print(result)

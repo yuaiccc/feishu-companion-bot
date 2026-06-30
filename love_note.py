@@ -1,4 +1,4 @@
-"""Daily love-note summary appended to an existing Feishu Docx/Wiki document."""
+"""Daily love-note summary posted as a comment on an existing Feishu Docx/Wiki."""
 from __future__ import annotations
 
 import html
@@ -27,7 +27,7 @@ _MAX_DOCUMENT_SOURCE_CHARS = 12000
 
 
 def run_daily_love_note(target_date: datetime | None = None, force: bool = False) -> str:
-    """Summarize the configured love-note document and append the daily note."""
+    """Summarize the configured love-note document and comment on it."""
     target_date = target_date or datetime.now(_SHANGHAI)
     date_key = target_date.strftime("%Y-%m-%d")
 
@@ -40,7 +40,7 @@ def run_daily_love_note(target_date: datetime | None = None, force: bool = False
         return f"{date_key} 没有读到可总结的文档内容，跳过。"
 
     summary = summarize_love_document(source_text, date_key)
-    append_love_note(summary)
+    add_love_note_comment(summary)
 
     state["last_love_note_date"] = date_key
     save_state(state)
@@ -123,15 +123,12 @@ def fetch_love_note_content() -> str:
     return get_docx_raw_content(doc_token)
 
 
-def append_love_note(markdown_summary: str) -> dict:
+def add_love_note_comment(markdown_summary: str) -> dict:
     doc_token = LOVE_NOTE_DOC_TOKEN or resolve_wiki_doc_token(LOVE_NOTE_WIKI_TOKEN)
     if not doc_token:
         raise RuntimeError("缺少 LOVE_NOTE_DOC_TOKEN 或 LOVE_NOTE_WIKI_TOKEN")
-    document = get_docx_document(doc_token)
-    revision_id = int(document.get("revision_id", -1))
-    append_index = get_docx_root_child_count(doc_token)
-    blocks = markdown_to_docx_blocks(markdown_summary)
-    return create_docx_children(doc_token, doc_token, blocks, revision_id=revision_id, index=append_index)
+    anchor_block_id = pick_love_note_comment_anchor(doc_token)
+    return create_docx_comment(doc_token, anchor_block_id, markdown_summary)
 
 
 def resolve_wiki_doc_token(wiki_token: str) -> str:
@@ -164,6 +161,47 @@ def get_docx_raw_content(doc_token: str) -> str:
     if data.get("code") != 0:
         raise RuntimeError(f"读取文档正文失败: {data.get('msg')}")
     return data.get("data", {}).get("content", "")
+
+
+def get_docx_blocks(doc_token: str) -> list[dict]:
+    token = _tenant_token()
+    resp = requests.get(
+        f"{FEISHU_OPEN_API}/docx/v1/documents/{doc_token}/blocks",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"读取文档块失败: {data.get('msg')}")
+    return data.get("data", {}).get("items", [])
+
+
+def pick_love_note_comment_anchor(doc_token: str) -> str:
+    """Pick the last non-empty text block so the daily comment stays contextual."""
+    for block in reversed(get_docx_blocks(doc_token)):
+        if _block_plain_text(block).strip():
+            return block.get("block_id", "")
+    raise RuntimeError("没有找到可挂评论的正文块")
+
+
+def create_docx_comment(doc_token: str, block_id: str, markdown_summary: str) -> dict:
+    if not block_id:
+        raise RuntimeError("缺少评论锚点 block_id")
+    token = _tenant_token()
+    resp = requests.post(
+        f"{FEISHU_OPEN_API}/drive/v1/files/{doc_token}/new_comments",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={
+            "file_type": "docx",
+            "anchor": {"block_id": block_id},
+            "reply_elements": _comment_text_elements(markdown_summary),
+        },
+        timeout=30,
+    )
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"创建文档评论失败: {data.get('msg')} {data.get('error')}")
+    return data
 
 
 def get_docx_document(doc_token: str) -> dict:
@@ -269,6 +307,23 @@ def _text_run(text: str) -> dict:
             "text_element_style": {},
         }
     }
+
+
+def _block_plain_text(block: dict) -> str:
+    text = block.get("text") or block.get("heading1") or block.get("heading2") or {}
+    pieces = []
+    for element in text.get("elements") or []:
+        run = element.get("text_run") or {}
+        pieces.append(run.get("content") or "")
+    return "".join(pieces)
+
+
+def _comment_text_elements(text: str) -> list[dict]:
+    cleaned = sanitize_public_text(text or "").replace("<", "&lt;").replace(">", "&gt;").strip()
+    if not cleaned:
+        cleaned = "今天没有生成有效总结。"
+    chunks = [cleaned[i:i + 900] for i in range(0, min(len(cleaned), 9000), 900)]
+    return [{"type": "text", "text": chunk} for chunk in chunks]
 
 
 def _trim_document_source(document_text: str) -> str:
