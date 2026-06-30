@@ -31,6 +31,13 @@ FEISHU_EVENT_MAX_AGE_SECONDS = int(os.getenv("FEISHU_EVENT_MAX_AGE_SECONDS", "60
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "true").lower() in ("true", "1", "yes")
 MEMORY_DIR = BASE_DIR / os.getenv("MEMORY_DIR", "memory_data")
 
+# ---- 外部搜索（本地 OpenClaw）----
+EXTERNAL_SEARCH_ENABLED = os.getenv("EXTERNAL_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")
+OPENCLAW_CLI = os.getenv("OPENCLAW_CLI", "openclaw")
+OPENCLAW_SEARCH_PROVIDER = os.getenv("OPENCLAW_SEARCH_PROVIDER", "").strip()
+OPENCLAW_SEARCH_LIMIT = int(os.getenv("OPENCLAW_SEARCH_LIMIT", "5"))
+OPENCLAW_SEARCH_TIMEOUT_SECONDS = int(os.getenv("OPENCLAW_SEARCH_TIMEOUT_SECONDS", "45"))
+
 # ---- GitHub ----
 GITHUB_USERNAME = os.getenv("GITHUB_USERNAME", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")

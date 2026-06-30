@@ -3,6 +3,7 @@
 """
 import json
 import os
+import re
 from datetime import datetime
 
 from config import (
@@ -13,6 +14,13 @@ from config import (
 import requests
 
 _MEMORY_FILE = None
+_MAX_MEMORIES = int(os.getenv("MEMORY_MAX_ITEMS", "200"))
+_CATEGORY_KEYWORDS = {
+    "person": ("生日", "学校", "大学", "本科", "家住", "地址", "家里", "姓名", "小名"),
+    "relationship": ("想你", "爱你", "在一起", "舒舒", "烨子", "秋酿", "三哥", "电话", "晚安", "抱抱"),
+    "preference": ("喜欢", "不喜欢", "偏好", "爱喝", "不加糖", "吃", "喝", "散步"),
+    "schedule": ("晚上", "早上", "明天", "今天", "最近", "待在", "回家", "学校"),
+}
 
 
 def _get_memory_file():
@@ -41,6 +49,54 @@ def _save_all(memories: list[dict]):
     path = _get_memory_file()
     with open(path, "w", encoding="utf-8") as f:
         json.dump(memories, f, ensure_ascii=False, indent=2)
+
+
+def _normalize_text(text: str) -> str:
+    text = re.sub(r"\s+", "", (text or "").lower())
+    text = re.sub(r"[，。！？、,.!?；;：:（）()【】\[\]\"'“”‘’]", "", text)
+    return text
+
+
+def _categorize(text: str) -> str:
+    for category, keywords in _CATEGORY_KEYWORDS.items():
+        if any(keyword in text for keyword in keywords):
+            return category
+    return "note"
+
+
+def _importance(text: str, category: str) -> int:
+    score = 2
+    if category in ("person", "relationship"):
+        score += 2
+    if category == "preference":
+        score += 1
+    if any(word in text for word in ("生日", "学校", "家住", "电话", "不加糖", "在一起")):
+        score += 1
+    return min(score, 5)
+
+
+def _merge_memory(existing: dict, fact: str, now: str, messages: list[dict]):
+    existing["content"] = fact if len(fact) > len(existing.get("content", "")) else existing.get("content", fact)
+    existing["last_seen"] = now
+    existing["seen_count"] = int(existing.get("seen_count", 1)) + 1
+    existing["category"] = existing.get("category") or _categorize(existing.get("content", ""))
+    existing["importance"] = max(int(existing.get("importance", 1)), _importance(existing.get("content", ""), existing["category"]))
+    existing["source_messages"] = [
+        {"sender": m["sender"], "content": m["content"][:50], "time": m["time"]}
+        for m in messages
+    ]
+
+
+def _prune_memories(memories: list[dict]) -> list[dict]:
+    if len(memories) <= _MAX_MEMORIES:
+        return memories
+    def key(mem: dict):
+        return (
+            int(mem.get("importance", 1)),
+            int(mem.get("seen_count", 1)),
+            mem.get("last_seen") or mem.get("time") or "",
+        )
+    return sorted(memories, key=key, reverse=True)[:_MAX_MEMORIES]
 
 
 def _extract_facts(messages: list[dict]) -> list[str]:
@@ -117,12 +173,34 @@ def add_memories(messages: list[dict], user_id: str = "shushu_chat") -> list:
     all_memories = _load_all()
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     new_entries = []
+    normalized_index = {
+        _normalize_text(m.get("content", "")): m
+        for m in all_memories
+        if m.get("content")
+    }
 
     for fact in facts:
+        normalized = _normalize_text(fact)
+        if not normalized:
+            continue
+        existing = normalized_index.get(normalized)
+        if not existing:
+            for key, mem in normalized_index.items():
+                if normalized in key or key in normalized:
+                    existing = mem
+                    break
+        if existing:
+            _merge_memory(existing, fact, now, messages)
+            continue
+        category = _categorize(fact)
         entry = {
             "id": f"mem_{len(all_memories) + len(new_entries) + 1}",
             "content": fact,
+            "category": category,
+            "importance": _importance(fact, category),
             "time": now,
+            "last_seen": now,
+            "seen_count": 1,
             "source_messages": [
                 {"sender": m["sender"], "content": m["content"][:50], "time": m["time"]}
                 for m in messages
@@ -130,7 +208,9 @@ def add_memories(messages: list[dict], user_id: str = "shushu_chat") -> list:
         }
         new_entries.append(entry)
         all_memories.append(entry)
+        normalized_index[normalized] = entry
 
+    all_memories = _prune_memories(all_memories)
     _save_all(all_memories)
 
     if new_entries:
@@ -158,6 +238,8 @@ def search_memories(query: str, user_id: str = "shushu_chat", top_k: int = 5) ->
         for sm in mem.get("source_messages", []):
             score += _keyword_score(query, sm.get("content", "")) * 0.5
         if score > 0:
+            score += int(mem.get("importance", 1)) * 0.2
+            score += min(int(mem.get("seen_count", 1)), 5) * 0.1
             scored.append((score, text))
 
     scored.sort(key=lambda x: x[0], reverse=True)

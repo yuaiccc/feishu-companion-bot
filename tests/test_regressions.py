@@ -61,6 +61,8 @@ class BotRegressionTests(unittest.TestCase):
     def test_tool_intent_separates_status_from_github(self):
         self.assertEqual(_classify_tool_intent("三哥最近活动", "舒舒"), "status")
         self.assertEqual(_classify_tool_intent("三哥最近提交了什么", "舒舒"), "github")
+        self.assertEqual(_classify_tool_intent("最近B站哪些新番热门", "舒舒"), "search")
+        self.assertEqual(_classify_tool_intent("帮我查一下最近新闻", "舒舒"), "search")
         self.assertEqual(_classify_tool_intent("想你了", "舒舒"), "none")
 
     def test_persona_is_helper_not_sange_persona(self):
@@ -70,6 +72,7 @@ class BotRegressionTests(unittest.TestCase):
             summarizer.REPLY_PROMPT_SHUSHU,
         ])
         self.assertIn("三哥的小弟", prompts)
+        self.assertIn("大哥的老婆", prompts)
         self.assertNotIn("你是秋酿本人", prompts)
         self.assertNotIn("用第一人称跟舒舒说话", prompts)
 

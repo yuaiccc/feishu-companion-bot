@@ -68,6 +68,7 @@ from memory import add_memories, search_memories, get_all_memories, format_for_d
 from bitable_api import add_records as bitable_add_records
 from local_apps import get_app_summary
 from call_notes import build_call_notes_context
+from external_search import answer_external_search
 
 
 # ---- 模拟数据（用于 --test 模式） ----
@@ -258,10 +259,15 @@ _GITHUB_KEYWORDS = (
     "github", "git hub", "提交", "commit", "代码", "项目进度", "最近提交",
     "代码记录", "仓库", "push", "pr", "issue",
 )
+_SEARCH_KEYWORDS = (
+    "搜索", "搜一下", "查一下", "查查", "帮我查", "网上", "外部",
+    "最新", "热门", "热榜", "排行", "排行榜", "新闻", "资讯",
+    "b站", "B站", "哔哩", "bilibili", "新番", "番剧", "动漫",
+)
 
 
 def _classify_tool_intent(content: str, sender: str = "") -> str:
-    """Return 'status', 'github', or 'none' for optional tool use."""
+    """Return 'status', 'github', 'search', or 'none' for optional tool use."""
     import requests as req
 
     # 短消息快速跳过
@@ -271,6 +277,9 @@ def _classify_tool_intent(content: str, sender: str = "") -> str:
     lower = content.lower()
     if any(keyword in lower for keyword in _GITHUB_KEYWORDS):
         return "github"
+    if any(keyword in content for keyword in _SEARCH_KEYWORDS) or any(keyword in lower for keyword in _SEARCH_KEYWORDS):
+        if "最近活动" not in content and "电脑活动" not in content:
+            return "search"
     if any(keyword in content for keyword in _STATUS_KEYWORDS):
         return "status"
 
@@ -286,16 +295,18 @@ def _classify_tool_intent(content: str, sender: str = "") -> str:
                 "messages": [
                     {
                         "role": "system",
-                        "content": """判断用户消息是否需要调用工具。只回复 STATUS、GITHUB 或 NONE。
+                        "content": """判断用户消息是否需要调用工具。只回复 STATUS、GITHUB、SEARCH 或 NONE。
 
 回复 STATUS：用户在问秋酿当前/最近状态、在干嘛、忙不忙、电脑活动、当前窗口。
 回复 GITHUB：用户明确问 GitHub、提交、commit、代码记录、仓库、PR、issue、项目进度。
+回复 SEARCH：用户要查外部实时信息、网上资料、热榜、B站、新番、新闻、最近热门内容。
 回复 NONE：普通聊天，不需要查工具。
 
 注意：
 - "最近活动"如果没有代码/GitHub/提交语境，按 STATUS。
 - "在干嘛""最近怎么样"按 STATUS，不要按 GITHUB。
 - 只有明确出现代码/GitHub/提交/仓库相关含义才按 GITHUB。
+- "最近B站哪些新番热门""查一下新闻""搜索资料"按 SEARCH。
 
 NONE 例子：
 - "你好""嗨""hi""早"
@@ -314,6 +325,8 @@ NONE 例子：
         result = resp.json()["choices"][0]["message"]["content"].strip().upper()
         if "GITHUB" in result:
             return "github"
+        if "SEARCH" in result:
+            return "search"
         if "STATUS" in result:
             return "status"
         return "none"
@@ -476,6 +489,40 @@ def on_message_received(msg_data: dict):
                     send_text("GitHub 数据拉取失败，稍后再试试", receive_id=chat_id)
 
             # 删掉思考表情，加 OK 表情
+            if thinking_reaction_id and message_id:
+                delete_reaction(message_id, thinking_reaction_id)
+            if message_id:
+                try:
+                    react_to_message(message_id, "DONE")
+                except FeishuMessageUnavailable:
+                    pass
+            return
+
+        if tool_intent == "search":
+            print("  [工具调用] 用户询问外部实时信息，调用 OpenClaw 搜索...", flush=True)
+            try:
+                answer = answer_external_search(content)
+                if message_id:
+                    reply_text(answer, message_id)
+                else:
+                    send_text(answer, receive_id=chat_id)
+            except FeishuMessageUnavailable as e:
+                print(f"  [跳过] 消息不可回复: {e}", flush=True)
+                if thinking_reaction_id and message_id:
+                    delete_reaction(message_id, thinking_reaction_id)
+                return
+            except Exception as e:
+                print(f"  [错误] 外部搜索失败: {e}", flush=True)
+                fallback = "小弟这边外部搜索暂时没接通，等三哥电脑上的 OpenClaw 稳一下再查。"
+                if message_id:
+                    try:
+                        reply_text(fallback, message_id)
+                    except FeishuMessageUnavailable as unavailable:
+                        print(f"  [跳过] 消息不可回复: {unavailable}", flush=True)
+                        return
+                else:
+                    send_text(fallback, receive_id=chat_id)
+
             if thinking_reaction_id and message_id:
                 delete_reaction(message_id, thinking_reaction_id)
             if message_id:
