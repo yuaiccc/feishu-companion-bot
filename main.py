@@ -35,6 +35,8 @@ from config import (
     FEISHU_STATUS_CHAT_ID,
     STATUS_NOTIFY_COOLDOWN_SECONDS,
     MEMORY_ENABLED,
+    LOVE_NOTE_ENABLED,
+    LOVE_NOTE_RUN_AT,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
@@ -70,6 +72,7 @@ from local_apps import get_local_status_summary
 from call_notes import build_call_notes_context
 from external_search import answer_external_search, build_external_search_card
 from passive_assistant import PassiveAssistant
+from love_note import run_daily_love_note
 
 
 # ---- 模拟数据（用于 --test 模式） ----
@@ -408,6 +411,24 @@ def github_poll_loop():
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
+def love_note_loop():
+    """每日把当天内容整理后追加到恋爱笔记。"""
+    last_checked_minute = ""
+    while True:
+        try:
+            now = datetime.now()
+            minute_key = now.strftime("%Y-%m-%d %H:%M")
+            if minute_key != last_checked_minute and now.strftime("%H:%M") == LOVE_NOTE_RUN_AT:
+                last_checked_minute = minute_key
+                print(f"\n  [{now.strftime('%H:%M:%S')}] 开始整理每日恋爱笔记...", flush=True)
+                result = run_daily_love_note()
+                print(f"  [恋爱笔记] {result[:200]}", flush=True)
+        except Exception as e:
+            print(f"  [恋爱笔记] 整理失败: {e}", flush=True)
+            _notify_status(f"每日恋爱笔记整理失败：{e}", key="love_note_error")
+        time.sleep(20)
+
+
 # ---- 长连接消息处理 ----
 
 def on_message_received(msg_data: dict):
@@ -693,6 +714,14 @@ def run_mem_test_mode():
     print(f"\n  总计 {len(all_mems)} 条记忆")
 
 
+def run_daily_note_test_mode():
+    print("=" * 60)
+    print("  DAILY NOTE TEST MODE - 整理并写入今日恋爱笔记")
+    print("=" * 60)
+    result = run_daily_love_note(force=True)
+    print(result)
+
+
 # ---- 主入口 ----
 
 def main():
@@ -705,6 +734,9 @@ def main():
     if "--mem-test" in sys.argv:
         run_mem_test_mode()
         return
+    if "--daily-note-test" in sys.argv:
+        run_daily_note_test_mode()
+        return
 
     print("=" * 60)
     print("  GitHub Activity Reporter")
@@ -715,6 +747,7 @@ def main():
     print(f"  长连接: 开启")
     print(f"  读取消息: {'开启' if FEISHU_READ_MESSAGES else '关闭'}")
     print(f"  记忆模块: {'开启' if MEMORY_ENABLED else '关闭'}")
+    print(f"  每日恋爱笔记: {'开启' if LOVE_NOTE_ENABLED else '关闭'}")
     print("=" * 60)
     _notify_status("已启动/重启，本地长连接正在保持在线。", key="startup")
 
@@ -727,6 +760,11 @@ def main():
     poll_thread = threading.Thread(target=github_poll_loop, daemon=True)
     poll_thread.start()
     print("  GitHub 轮询线程已启动")
+
+    if LOVE_NOTE_ENABLED:
+        note_thread = threading.Thread(target=love_note_loop, daemon=True)
+        note_thread.start()
+        print(f"  每日恋爱笔记线程已启动: {LOVE_NOTE_RUN_AT}")
 
     # 主线程：启动飞书长连接（阻塞）
     print("  启动飞书长连接事件监听...")

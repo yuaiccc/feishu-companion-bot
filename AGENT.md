@@ -202,6 +202,13 @@ https://open.feishu.cn/document/home/index
 
 幂等状态写在 `state.json`：`passive_processed_message_ids`、`passive_topic_timestamps`、`passive_sent_timestamps`。同一消息、同一话题、每小时超过上限都必须跳过。不要让旁听模式处理“哈哈/想你/晚安/摸头”等低信号情绪闲聊。
 
+### 11d. 每日恋爱笔记只追加，不覆盖
+`love_note.py` 负责每天把当天群聊整理成 Markdown，再转换为 docx block 追加到已有 Wiki/Docx 恋爱笔记末尾。当前文档：
+- Wiki token: `IwfGwwGBBiQ4t3k9MW1cjJuDnab`
+- Docx token: `TjKadw7I8oqQT4xyCC0c2WhEnPe`
+
+写入必须使用追加 children 的方式：先读根 block 的 `children` 数量作为插入 `index`，不要用超大 index，也不要 overwrite。`state.json.last_love_note_date` 用于保证每天只写一次；`--daily-note-test` 会 `force=True`，只在人工测试时使用。
+
 ### 12. GitHub commit 卡片不生成 DeepSeek 总结
 GitHub commit 活动卡片不生成 DeepSeek 总结，只展示表格和统计，避免自动开场太腻。
 

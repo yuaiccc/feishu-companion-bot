@@ -156,6 +156,7 @@ def fetch_chat_messages(chat_id: str = "", limit: int = 20) -> list[dict]:
         messages.append({
             "message_id": item.message_id,
             "time": time_str,
+            "timestamp": int(item.create_time) if item.create_time else 0,
             "content": content,
             "sender": "舒舒" if is_shushu else "三哥",
             "is_shushu": is_shushu,

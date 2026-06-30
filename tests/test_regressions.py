@@ -5,6 +5,7 @@ import actions_runner
 import call_notes
 import external_search
 import local_apps
+import love_note
 import notifier
 import passive_assistant
 import summarizer
@@ -193,6 +194,16 @@ class BotRegressionTests(unittest.TestCase):
         self.assertTrue(state.is_passive_topic_in_cooldown(s, "topic-a", 1800, now=1200))
         self.assertFalse(state.is_passive_topic_in_cooldown(s, "topic-a", 1800, now=4000))
         self.assertFalse(state.can_send_passive_now(s, 1, now=1200))
+
+    def test_love_note_markdown_to_docx_blocks(self):
+        blocks = love_note.markdown_to_docx_blocks(
+            "## 2026-07-01\n\n### 今天的小事\n- 舒舒说下雨像云雾。\n> 想坐你旁边看你敲电脑"
+        )
+        self.assertEqual(blocks[0]["block_type"], 3)
+        self.assertEqual(blocks[1]["block_type"], 4)
+        self.assertEqual(blocks[2]["block_type"], 12)
+        self.assertEqual(blocks[3]["block_type"], 2)
+        assert_public_text_clean(blocks)
 
 
 if __name__ == "__main__":
