@@ -207,6 +207,9 @@ https://open.feishu.cn/document/home/index
 
 幂等状态写在 `state.json`：`passive_processed_message_ids`、`passive_topic_timestamps`、`passive_sent_timestamps`。同一消息、同一话题、每小时超过上限都必须跳过。不要让旁听模式处理“哈哈/想你/晚安/摸头”等低信号情绪闲聊。
 
+### 11c-2. 主动话题只能冷场时每天一次
+`proactive_topic.py` 负责机器人主动开话题。它不是旁听回答问题，而是冷场后轻轻 @ 两个人聊一句。必须同时满足：当天未超过 `PROACTIVE_TOPIC_MAX_PER_DAY`、当前时间在活跃窗口内、最近群聊消息距离现在至少 `PROACTIVE_TOPIC_QUIET_SECONDS`、能读到群聊最近消息。热聊时不要插嘴；读消息失败时不要把空列表当冷场。飞书文本消息 @ 用户使用官方格式 `<at user_id="ou_xxx">名字</at>`，不要混用卡片 `<at id=...>` 语法。
+
 ### 11d. 每日恋爱笔记用局部短评，不污染正文
 `love_note.py` 负责每天读取已有 Wiki/Docx 恋爱笔记正文，只对新增正文生成“嗑到了 / 这也太甜了 / 小弟被可爱到了”风格的短评，再通过飞书 Drive 评论 API 挂到最适合这条短评的正文段落上。它不是总结群聊消息，也不是结构化日报总结，不要再把总结追加成正文块。当前文档：
 - Wiki token: `IwfGwwGBBiQ4t3k9MW1cjJuDnab`
@@ -249,6 +252,8 @@ GitHub 活动卡片不要生成顶部大段 DeepSeek 总结，只展示表格和
 `memory.py` 继续使用本地 JSON，不要引入重型向量库或第三方记忆 SaaS 作为默认依赖。记忆文件按 profile 隔离：`memory_data/<PROFILE_ID>/memories.json`；首次迁移时可从旧的 `memory_data/memories.json` 自动复制。新增记忆要先走 agentic write 策略，判断 `create/update/ignore/delete/confirm` 后再落库；低价值内容忽略，已有事实更新，低置信或敏感边界不清的事实不要自动写入。记忆要包含 `category`、`importance`、`last_seen`、`seen_count`、`visibility`、`confidence`、`embedding`，同义或包含关系的重复事实应该合并，避免一问一答把同一件事刷成几十条。`MEMORY_MAX_ITEMS` 默认 200，裁剪时优先保留重要度高、重复出现、最近出现的记忆。
 
 记忆检索是 privacy-first hybrid / agentic RAG：embedding + 关键词先召回，再按受众过滤，最后才允许 DeepSeek 在候选里 rerank。默认开源配置用本地哈希 embedding；当前本机部署可以用 Ollama `qwen3-embedding:0.6b`，仍然只调用 `127.0.0.1`。`visibility=public_to_target` 可以给舒舒/目标用户上下文；`owner_only` 只能给 owner；`private` 永不注入任何回复 prompt。不要把 `memory_data/`、源消息原文、token、住址等敏感数据提交或发送给第三方 embedding 服务。
+
+`memory_audit.py` 提供飞书“记忆审计 / 记忆面板 / 记忆检查”卡片，展示可见性分布、低置信、疑似噪声和疑似重复。群聊里即使是三哥触发，也不能展示 `private` 记忆原文；只有 owner 私聊场景才可以按 owner 视角展示。
 
 ### 20. Profile 是开源复用边界
 `profiles/default.json` 是通用模板，`profiles/sange-shushu.json` 是当前项目配置。新增关系、人设、称呼、记忆关键词时优先改 profile，不要把真实姓名、昵称或关系写死进 `summarizer.py` / `memory.py`。prompt 里需要用 `profile.py` 暴露的 `owner_name()`、`target_name()`、`bot_role()`、`relationship_context()` 等函数。

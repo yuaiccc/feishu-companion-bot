@@ -17,6 +17,7 @@ def load_state() -> dict:
         "passive_processed_message_ids": [],
         "passive_topic_timestamps": {},
         "passive_sent_timestamps": [],
+        "proactive_topic_sent_dates": {},
     }
 
 
@@ -137,4 +138,28 @@ def mark_passive_topic_sent(state: dict, topic_key: str, message_id: str, now: f
     sent = [float(ts) for ts in state.get("passive_sent_timestamps", []) if now - float(ts) < 3600]
     sent.append(now)
     state["passive_sent_timestamps"] = sent[-20:]
+    save_state(state)
+
+
+# ---- 主动话题去重 / 每日上限 ----
+
+def proactive_sent_count(state: dict, date_key: str) -> int:
+    sent = state.get("proactive_topic_sent_dates", {}) or {}
+    return int(sent.get(date_key, 0) or 0)
+
+
+def can_send_proactive_today(state: dict, date_key: str, max_per_day: int) -> bool:
+    return proactive_sent_count(state, date_key) < max_per_day
+
+
+def mark_proactive_sent(state: dict, date_key: str, now: float | None = None) -> None:
+    now = now or time.time()
+    sent = dict(state.get("proactive_topic_sent_dates", {}) or {})
+    sent[date_key] = int(sent.get(date_key, 0) or 0) + 1
+    # Keep roughly one month of daily counters.
+    state["proactive_topic_sent_dates"] = {
+        key: count for key, count in sent.items()
+        if key >= time.strftime("%Y-%m-%d", time.localtime(now - 31 * 24 * 3600))
+    }
+    state["proactive_topic_last_sent_at"] = now
     save_state(state)

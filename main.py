@@ -30,6 +30,8 @@ from config import (
     GITHUB_TOKEN,
     GITHUB_PRIVATE_REPOS,
     POLL_INTERVAL_SECONDS,
+    PROACTIVE_TOPIC_CHECK_INTERVAL_SECONDS,
+    PROACTIVE_TOPIC_ENABLED,
     DRY_RUN,
     FEISHU_READ_MESSAGES,
     FEISHU_STATUS_CHAT_ID,
@@ -86,6 +88,8 @@ from external_search import (
 from passive_assistant import PassiveAssistant
 from love_note import preview_daily_love_note, run_daily_love_note
 from health import build_health_card
+from memory_audit import build_memory_audit_card
+from proactive_topic import maybe_send_proactive_topic
 
 
 # ---- 模拟数据（用于 --test 模式） ----
@@ -287,10 +291,13 @@ _HEALTH_KEYWORDS = (
     "健康检查", "服务状态", "自检", "机器人状态", "状态面板",
     "ollama状态", "openclaw状态", "deepseek状态",
 )
+_MEMORY_AUDIT_KEYWORDS = (
+    "记忆审计", "记忆面板", "记忆状态", "记忆检查", "审计记忆",
+)
 
 
 def _classify_tool_intent(content: str, sender: str = "") -> str:
-    """Return 'status', 'github', 'search', or 'none' for optional tool use."""
+    """Return a tool intent for optional tool use."""
     import requests as req
 
     # 短消息快速跳过
@@ -298,6 +305,8 @@ def _classify_tool_intent(content: str, sender: str = "") -> str:
         return "none"
 
     lower = content.lower()
+    if any(keyword in content for keyword in _MEMORY_AUDIT_KEYWORDS):
+        return "memory_audit"
     if any(keyword in content for keyword in _HEALTH_KEYWORDS) or any(keyword in lower for keyword in _HEALTH_KEYWORDS):
         return "health"
     if any(keyword in lower for keyword in _GITHUB_KEYWORDS):
@@ -320,8 +329,9 @@ def _classify_tool_intent(content: str, sender: str = "") -> str:
                 "messages": [
                     {
                         "role": "system",
-                        "content": """判断用户消息是否需要调用工具。只回复 STATUS、GITHUB、SEARCH、HEALTH 或 NONE。
+                        "content": """判断用户消息是否需要调用工具。只回复 STATUS、GITHUB、SEARCH、HEALTH、MEMORY_AUDIT 或 NONE。
 
+回复 MEMORY_AUDIT：用户要看记忆审计、记忆面板、记忆状态、记忆检查。
 回复 HEALTH：用户要看机器人服务状态、健康检查、自检、状态面板、Ollama/OpenClaw/DeepSeek/飞书连接状态。
 回复 STATUS：用户在问秋酿当前/最近状态、在干嘛、忙不忙、电脑活动、当前窗口。
 回复 GITHUB：用户明确问 GitHub、提交、commit、代码记录、仓库、PR、issue、项目进度。
@@ -349,6 +359,8 @@ NONE 例子：
             timeout=10,
         )
         result = resp.json()["choices"][0]["message"]["content"].strip().upper()
+        if "MEMORY_AUDIT" in result:
+            return "memory_audit"
         if "GITHUB" in result:
             return "github"
         if "HEALTH" in result:
@@ -449,6 +461,19 @@ def love_note_loop():
             print(f"  [恋爱笔记] 整理失败: {e}", flush=True)
             _notify_status(f"每日恋爱笔记整理失败：{e}", key="love_note_error")
         time.sleep(20)
+
+
+def proactive_topic_loop():
+    """主动话题子线程：每天最多一次，只在群聊冷场时 @ 两个人。"""
+    while True:
+        try:
+            result = maybe_send_proactive_topic()
+            if result == "sent":
+                print("  [主动话题] 已在冷场时发起话题", flush=True)
+        except Exception as e:
+            print(f"  [主动话题] 检查失败: {e}", flush=True)
+            _notify_status(f"主动话题检查失败：{e}", key="proactive_topic_error")
+        time.sleep(PROACTIVE_TOPIC_CHECK_INTERVAL_SECONDS)
 
 
 # ---- 长连接消息处理 ----
@@ -567,6 +592,36 @@ def on_message_received(msg_data: dict):
                 if message_id:
                     try:
                         reply_text(f"健康检查失败：{e}", message_id)
+                    except FeishuMessageUnavailable:
+                        return
+            if thinking_reaction_id and message_id:
+                delete_reaction(message_id, thinking_reaction_id)
+            if message_id:
+                try:
+                    react_to_message(message_id, "DONE")
+                except FeishuMessageUnavailable:
+                    pass
+            return
+
+        if tool_intent == "memory_audit":
+            print("  [工具调用] 用户请求记忆审计面板...", flush=True)
+            try:
+                audience = "owner" if (not is_shushu and chat_type != "group") else "target"
+                card = build_memory_audit_card(audience=audience)
+                if message_id:
+                    reply_card(card, message_id)
+                else:
+                    send_card(card, receive_id=chat_id)
+            except FeishuMessageUnavailable as e:
+                print(f"  [跳过] 消息不可回复: {e}", flush=True)
+                if thinking_reaction_id and message_id:
+                    delete_reaction(message_id, thinking_reaction_id)
+                return
+            except Exception as e:
+                print(f"  [错误] 记忆审计失败: {e}", flush=True)
+                if message_id:
+                    try:
+                        reply_text(f"记忆审计失败：{e}", message_id)
                     except FeishuMessageUnavailable:
                         return
             if thinking_reaction_id and message_id:
@@ -800,6 +855,14 @@ def run_daily_note_preview_mode():
     print(result)
 
 
+def run_proactive_topic_test_mode():
+    print("=" * 60)
+    print("  PROACTIVE TOPIC TEST MODE")
+    print("=" * 60)
+    result = maybe_send_proactive_topic()
+    print(result)
+
+
 # ---- 主入口 ----
 
 def main():
@@ -824,6 +887,9 @@ def main():
     if "--daily-note-preview" in sys.argv:
         run_daily_note_preview_mode()
         return
+    if "--proactive-topic-test" in sys.argv:
+        run_proactive_topic_test_mode()
+        return
 
     print("=" * 60)
     print("  GitHub Activity Reporter")
@@ -835,6 +901,7 @@ def main():
     print(f"  读取消息: {'开启' if FEISHU_READ_MESSAGES else '关闭'}")
     print(f"  记忆模块: {'开启' if MEMORY_ENABLED else '关闭'}")
     print(f"  每日恋爱笔记: {'开启' if LOVE_NOTE_ENABLED else '关闭'}")
+    print(f"  主动话题: {'开启' if PROACTIVE_TOPIC_ENABLED else '关闭'}")
     print("=" * 60)
     _notify_status("已启动/重启，本地长连接正在保持在线。", key="startup")
 
@@ -852,6 +919,11 @@ def main():
         note_thread = threading.Thread(target=love_note_loop, daemon=True)
         note_thread.start()
         print(f"  每日恋爱笔记线程已启动: {LOVE_NOTE_RUN_AT}")
+
+    if PROACTIVE_TOPIC_ENABLED:
+        proactive_thread = threading.Thread(target=proactive_topic_loop, daemon=True)
+        proactive_thread.start()
+        print("  主动话题线程已启动")
 
     # 主线程：启动飞书长连接（阻塞）
     print("  启动飞书长连接事件监听...")

@@ -75,6 +75,7 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 - 外部搜索：`external_search.py` 通过本机 `openclaw infer web search` 搜索网页，再用 DeepSeek 整理为"短结论 + 表格 + 来源链接"卡片。它只在本地模式可用；Actions 兜底不能调用三哥电脑上的 OpenClaw。
 - 搜索记忆联动：成功搜索后只记录“谁对什么主题感兴趣”和少量来源标题，不把搜索结果全文写进长期记忆。
 - 旁听辅助：`passive_assistant.py` 接收未 @ 机器人的群聊消息，只在最近时间窗口内出现资料型话题、群里静默一段时间、同话题不在冷却中时，才用 OpenClaw 补一张背景资料卡片。已处理消息和话题冷却写入 `state.json`，避免同一个问题重复回答。
+- 主动话题：`proactive_topic.py` 默认每天最多主动发起 1 次，只在群聊冷场超过配置时间后 @ 三哥和舒舒，抛一个轻量话题让两个人接话；热聊时不会插嘴。
 - 健康自检：在飞书里问“机器人健康检查 / 服务状态 / 自检”，会返回飞书配置、DeepSeek、Ollama、OpenClaw、记忆库、本机状态的表格。
 - 每日恋爱笔记：`love_note.py` 每天按 `LOVE_NOTE_RUN_AT` 读取已有飞书 Wiki/Docx 恋爱笔记正文，只对新增正文生成嗑糖短评，每天最多 2 条，并以局部评论挂到匹配短评的正文段落上，不向正文追加内容。预览用 `python main.py --daily-note-preview`，手动写入测试用 `python main.py --daily-note-test`。
 - GitHub 活动：用于兜底判断时间线，不应该盖过秋酿和舒舒的关系上下文。
@@ -95,6 +96,8 @@ python main.py --mem-clean-preview  # 只看清洗统计
 python main.py --mem-clean          # 删除低价值记忆并合并重复项
 ```
 
+在飞书里问“记忆审计 / 记忆面板 / 记忆检查”会返回审计面板，展示总量、可见性分布、低置信、疑似噪声和疑似重复。群聊里会隐藏 `private` 记忆原文，避免把私密资料发给目标用户。
+
 记忆检索是隐私优先的 hybrid / agentic RAG：
 
 - embedding 默认使用本地哈希向量，不调用第三方 embedding API；本机部署可以设置 `MEMORY_EMBEDDING_PROVIDER=ollama` 并使用 `qwen3-embedding:0.6b`。
@@ -112,6 +115,10 @@ python main.py --mem-clean          # 删除低价值记忆并合并重复项
 - `PASSIVE_ASSIST_RECENT_WINDOW_SECONDS=480`：只看最近 8 分钟消息。
 - `PASSIVE_ASSIST_TOPIC_COOLDOWN_SECONDS=1800`：同话题 30 分钟内不重复。
 - `PASSIVE_ASSIST_MAX_PER_HOUR=2`：每小时最多补 2 次。
+
+## 主动话题
+
+默认开启但每天最多一次。它会定期读取群聊最近消息，只有最后一条用户消息距离现在超过 `PROACTIVE_TOPIC_QUIET_SECONDS`，且当前时间在 `PROACTIVE_TOPIC_ACTIVE_START` 到 `PROACTIVE_TOPIC_ACTIVE_END` 之间，才会用 DeepSeek 生成一句轻量开场，并用飞书文本消息 @ 三哥和舒舒。状态写入 `state.json.proactive_topic_sent_dates`，防止一天多次触发。
 
 ## 每日恋爱笔记
 

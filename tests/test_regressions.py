@@ -8,9 +8,11 @@ import external_search
 import health
 import local_apps
 import love_note
+import memory_audit
 import memory
 import notifier
 import passive_assistant
+import proactive_topic
 import profile as bot_profile
 import summarizer
 import state
@@ -110,6 +112,7 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(_classify_tool_intent("最近B站哪些新番热门", "舒舒"), "search")
         self.assertEqual(_classify_tool_intent("帮我查一下最近新闻", "舒舒"), "search")
         self.assertEqual(_classify_tool_intent("机器人健康检查", "三哥"), "health")
+        self.assertEqual(_classify_tool_intent("打开记忆审计面板", "三哥"), "memory_audit")
         self.assertEqual(_classify_tool_intent("想你了", "舒舒"), "none")
 
     def test_persona_is_helper_not_sange_persona(self):
@@ -350,6 +353,28 @@ class BotRegressionTests(unittest.TestCase):
         self.assertIn("舒舒对", fact)
         self.assertIn("CLANNAD", fact)
 
+    def test_memory_audit_hides_private_content_for_group_audience(self):
+        memories = [
+            {
+                "id": "public",
+                "content": "舒舒喜欢不加糖的东方树叶。",
+                "visibility": "public_to_target",
+                "confidence": 0.9,
+            },
+            {
+                "id": "private",
+                "content": "三哥家住某某小区 71 栋 3 单元。",
+                "visibility": "private",
+                "confidence": 0.8,
+            },
+        ]
+        with patch.object(memory_audit, "_load_all", return_value=memories):
+            target_card = memory_audit.build_memory_audit_card(audience="target")
+            owner_card = memory_audit.build_memory_audit_card(audience="owner")
+        self.assertNotIn("71 栋", str(target_card))
+        self.assertIn("[私密记忆已隐藏]", str(target_card))
+        self.assertIn("71 栋", str(owner_card))
+
     def test_health_card_uses_table(self):
         with patch.object(health, "_config_check", return_value={"item": "飞书配置", "status": "正常", "detail": "ok"}), patch.object(
             health,
@@ -466,6 +491,29 @@ class BotRegressionTests(unittest.TestCase):
         self.assertTrue(state.is_passive_topic_in_cooldown(s, "topic-a", 1800, now=1200))
         self.assertFalse(state.is_passive_topic_in_cooldown(s, "topic-a", 1800, now=4000))
         self.assertFalse(state.can_send_passive_now(s, 1, now=1200))
+
+    def test_proactive_topic_respects_quiet_window(self):
+        now = proactive_topic.datetime(2026, 7, 2, 12, 0, tzinfo=proactive_topic._SHANGHAI)
+        quiet_messages = [{"timestamp": int((now.timestamp() - 1900) * 1000), "content": "刚刚聊完"}]
+        active_messages = [{"timestamp": int((now.timestamp() - 100) * 1000), "content": "还在聊"}]
+        with patch.object(proactive_topic, "PROACTIVE_TOPIC_QUIET_SECONDS", 1800):
+            self.assertTrue(proactive_topic._is_group_quiet(quiet_messages, now))
+            self.assertFalse(proactive_topic._is_group_quiet(active_messages, now))
+
+    def test_proactive_topic_mentions_both_people(self):
+        with patch.object(proactive_topic, "FEISHU_SANGE_OPEN_ID", "ou_sange"), patch.object(
+            proactive_topic,
+            "FEISHU_SHUSHU_OPEN_ID",
+            "ou_shushu",
+        ):
+            text = proactive_topic._with_mentions("小弟来开个话题。")
+        self.assertIn('<at user_id="ou_sange">三哥</at>', text)
+        self.assertIn('<at user_id="ou_shushu">舒舒</at>', text)
+
+    def test_proactive_state_daily_limit(self):
+        s = {"proactive_topic_sent_dates": {"2026-07-02": 1}}
+        self.assertFalse(state.can_send_proactive_today(s, "2026-07-02", 1))
+        self.assertTrue(state.can_send_proactive_today(s, "2026-07-02", 2))
 
     def test_love_note_markdown_to_docx_blocks(self):
         blocks = love_note.markdown_to_docx_blocks(
