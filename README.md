@@ -35,6 +35,7 @@ python3 main.py
 项目支持用 `PROFILE_ID` 切换人设和关系背景，不需要直接改 prompt 源码。
 
 - `profiles/default.json`：通用陪伴机器人模板。
+- `profiles/example-couple.json`：情侣陪伴机器人模板，适合开源用户复制后改名改称呼。
 - `profiles/sange-shushu.json`：当前“三哥和舒舒”这套人设示例。
 
 开源复用时复制一份 profile JSON，然后在 `.env` 里设置：
@@ -72,7 +73,9 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 - 本地窗口/在席状态：`local_apps.py` 通过 AppleScript 读取前台应用和窗口标题，并通过 macOS `HIDIdleTime`/ConsoleUser 会话推测三哥是否在电脑前，只在本地模式可用。这个判断是概率推测，不要说成确定事实。
 - 通话纪要：`call_notes.py` 通过飞书妙记官方接口读取已配置 `minute_token` 的文字记录，默认关闭。开启前要配置 `CALL_NOTES_ENABLED=true` 和 `FEISHU_MINUTE_TOKENS`，并确保应用具备妙记读取/导出权限。读取后会先整理成短摘要并缓存，只给回复模型关系上下文，不把原文整段塞进去。
 - 外部搜索：`external_search.py` 通过本机 `openclaw infer web search` 搜索网页，再用 DeepSeek 整理为"短结论 + 表格 + 来源链接"卡片。它只在本地模式可用；Actions 兜底不能调用三哥电脑上的 OpenClaw。
+- 搜索记忆联动：成功搜索后只记录“谁对什么主题感兴趣”和少量来源标题，不把搜索结果全文写进长期记忆。
 - 旁听辅助：`passive_assistant.py` 接收未 @ 机器人的群聊消息，只在最近时间窗口内出现资料型话题、群里静默一段时间、同话题不在冷却中时，才用 OpenClaw 补一张背景资料卡片。已处理消息和话题冷却写入 `state.json`，避免同一个问题重复回答。
+- 健康自检：在飞书里问“机器人健康检查 / 服务状态 / 自检”，会返回飞书配置、DeepSeek、Ollama、OpenClaw、记忆库、本机状态的表格。
 - 每日恋爱笔记：`love_note.py` 每天按 `LOVE_NOTE_RUN_AT` 读取已有飞书 Wiki/Docx 恋爱笔记正文，只对新增正文生成嗑糖短评，每天最多 2 条，并以局部评论挂到匹配短评的正文段落上，不向正文追加内容。预览用 `python main.py --daily-note-preview`，手动写入测试用 `python main.py --daily-note-test`。
 - GitHub 活动：用于兜底判断时间线，不应该盖过秋酿和舒舒的关系上下文。
 - 状态查询和 GitHub 查询分开处理：问"在干嘛/最近活动"默认只看本地窗口状态；明确问 GitHub、提交、代码、仓库时才推 GitHub 卡片。
@@ -84,6 +87,13 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 ## 记忆管理
 
 `memory.py` 仍然使用本地 JSON，默认写入 `memory_data/<PROFILE_ID>/memories.json`。新增记忆会先用 DeepSeek 抽取事实，再做归类、重要度评分、可见性判断、去重和本地 embedding；重复事实只更新 `last_seen`/`seen_count`，不会无限堆叠。默认最多保留 200 条，可用 `MEMORY_MAX_ITEMS` 调整。
+
+本地维护命令：
+
+```bash
+python main.py --mem-clean-preview  # 只看清洗统计
+python main.py --mem-clean          # 删除低价值记忆并合并重复项
+```
 
 记忆检索是隐私优先的 hybrid / agentic RAG：
 

@@ -292,6 +292,37 @@ def build_external_search_card(query: str) -> dict:
     return build_search_card(query, results, intro)
 
 
+def remember_search_interaction(query: str, results: list[dict], actor: str = "用户") -> None:
+    """Store a compact interest memory from a successful search."""
+    try:
+        from memory import add_manual_memory
+    except Exception:
+        return
+    topic = _search_topic(query)
+    if not topic:
+        return
+    titles = []
+    for item in results[:3]:
+        title = _clean_external_text(item.get("title", ""))
+        if title:
+            titles.append(title[:30])
+    suffix = f"；相关来源包括：{'、'.join(titles)}" if titles else ""
+    fact = f"{actor}对“{topic}”感兴趣，曾让机器人搜索过这个主题{suffix}。"
+    try:
+        add_manual_memory(fact, category="preference", visibility="public_to_target", source_type="external_search")
+    except Exception as e:
+        print(f"  [search-memory] 写入搜索记忆失败: {e}", flush=True)
+
+
+def _search_topic(query: str) -> str:
+    text = sanitize_public_text(re.sub(r"\s+", " ", query or "").strip())
+    text = re.sub(r"^(帮我|给我|你)?(搜索|搜一下|查一下|查查|找一下)", "", text)
+    text = re.sub(r"(吗|呢|吧|？|\\?)$", "", text).strip()
+    if len(text) < 3:
+        return ""
+    return _shorten(text, 36)
+
+
 def _shorten(text: str, limit: int) -> str:
     text = re.sub(r"\s+", " ", sanitize_public_text(text or "")).strip()
     if len(text) <= limit:

@@ -66,13 +66,26 @@ from feishu_api import (
     format_for_deepseek,
     FeishuMessageUnavailable,
 )
-from memory import add_memories, search_memories, get_all_memories, format_for_deepseek as format_memories
+from memory import (
+    add_memories,
+    clean_memory_store,
+    search_memories,
+    get_all_memories,
+    format_for_deepseek as format_memories,
+)
 from bitable_api import add_records as bitable_add_records
 from local_apps import get_local_status_summary
 from call_notes import build_call_notes_context
-from external_search import answer_external_search, build_external_search_card
+from external_search import (
+    answer_external_search,
+    build_search_card,
+    remember_search_interaction,
+    search_web,
+    summarize_search_intro,
+)
 from passive_assistant import PassiveAssistant
 from love_note import preview_daily_love_note, run_daily_love_note
+from health import build_health_card
 
 
 # ---- 模拟数据（用于 --test 模式） ----
@@ -270,6 +283,10 @@ _SEARCH_KEYWORDS = (
     "最新", "热门", "热榜", "排行", "排行榜", "新闻", "资讯",
     "b站", "B站", "哔哩", "bilibili", "新番", "番剧", "动漫",
 )
+_HEALTH_KEYWORDS = (
+    "健康检查", "服务状态", "自检", "机器人状态", "状态面板",
+    "ollama状态", "openclaw状态", "deepseek状态",
+)
 
 
 def _classify_tool_intent(content: str, sender: str = "") -> str:
@@ -281,6 +298,8 @@ def _classify_tool_intent(content: str, sender: str = "") -> str:
         return "none"
 
     lower = content.lower()
+    if any(keyword in content for keyword in _HEALTH_KEYWORDS) or any(keyword in lower for keyword in _HEALTH_KEYWORDS):
+        return "health"
     if any(keyword in lower for keyword in _GITHUB_KEYWORDS):
         return "github"
     if any(keyword in content for keyword in _SEARCH_KEYWORDS) or any(keyword in lower for keyword in _SEARCH_KEYWORDS):
@@ -301,8 +320,9 @@ def _classify_tool_intent(content: str, sender: str = "") -> str:
                 "messages": [
                     {
                         "role": "system",
-                        "content": """判断用户消息是否需要调用工具。只回复 STATUS、GITHUB、SEARCH 或 NONE。
+                        "content": """判断用户消息是否需要调用工具。只回复 STATUS、GITHUB、SEARCH、HEALTH 或 NONE。
 
+回复 HEALTH：用户要看机器人服务状态、健康检查、自检、状态面板、Ollama/OpenClaw/DeepSeek/飞书连接状态。
 回复 STATUS：用户在问秋酿当前/最近状态、在干嘛、忙不忙、电脑活动、当前窗口。
 回复 GITHUB：用户明确问 GitHub、提交、commit、代码记录、仓库、PR、issue、项目进度。
 回复 SEARCH：用户要查外部实时信息、网上资料、热榜、B站、新番、新闻、最近热门内容。
@@ -331,6 +351,8 @@ NONE 例子：
         result = resp.json()["choices"][0]["message"]["content"].strip().upper()
         if "GITHUB" in result:
             return "github"
+        if "HEALTH" in result:
+            return "health"
         if "SEARCH" in result:
             return "search"
         if "STATUS" in result:
@@ -527,14 +549,45 @@ def on_message_received(msg_data: dict):
                     pass
             return
 
-        if tool_intent == "search":
-            print("  [工具调用] 用户询问外部实时信息，调用 OpenClaw 搜索...", flush=True)
+        if tool_intent == "health":
+            print("  [工具调用] 用户请求机器人健康自检...", flush=True)
             try:
-                card = build_external_search_card(content)
+                card = build_health_card()
                 if message_id:
                     reply_card(card, message_id)
                 else:
                     send_card(card, receive_id=chat_id)
+            except FeishuMessageUnavailable as e:
+                print(f"  [跳过] 消息不可回复: {e}", flush=True)
+                if thinking_reaction_id and message_id:
+                    delete_reaction(message_id, thinking_reaction_id)
+                return
+            except Exception as e:
+                print(f"  [错误] 健康检查失败: {e}", flush=True)
+                if message_id:
+                    try:
+                        reply_text(f"健康检查失败：{e}", message_id)
+                    except FeishuMessageUnavailable:
+                        return
+            if thinking_reaction_id and message_id:
+                delete_reaction(message_id, thinking_reaction_id)
+            if message_id:
+                try:
+                    react_to_message(message_id, "DONE")
+                except FeishuMessageUnavailable:
+                    pass
+            return
+
+        if tool_intent == "search":
+            print("  [工具调用] 用户询问外部实时信息，调用 OpenClaw 搜索...", flush=True)
+            try:
+                results = search_web(content)
+                card = build_search_card(content, results, summarize_search_intro(content, results))
+                if message_id:
+                    reply_card(card, message_id)
+                else:
+                    send_card(card, receive_id=chat_id)
+                remember_search_interaction(content, results, actor=sender_name)
             except FeishuMessageUnavailable as e:
                 print(f"  [跳过] 消息不可回复: {e}", flush=True)
                 if thinking_reaction_id and message_id:
@@ -715,6 +768,22 @@ def run_mem_test_mode():
     print(f"\n  总计 {len(all_mems)} 条记忆")
 
 
+def run_mem_clean_mode(dry_run: bool = True):
+    print("=" * 60)
+    print("  MEMORY CLEAN MODE - 记忆清洗")
+    print("=" * 60)
+    result = clean_memory_store(dry_run=dry_run)
+    print(f"  dry_run: {result['dry_run']}")
+    print(f"  before: {result['before']}")
+    print(f"  after: {result['after']}")
+    print(f"  removed: {result['removed']}")
+    print(f"  merged: {result['merged']}")
+    if result.get("sample_removed"):
+        print("  sample_removed:")
+        for item in result["sample_removed"]:
+            print(f"    - {item[:80]}")
+
+
 def run_daily_note_test_mode():
     print("=" * 60)
     print("  DAILY NOTE TEST MODE - 生成并创建恋爱笔记短评")
@@ -742,6 +811,12 @@ def main():
         return
     if "--mem-test" in sys.argv:
         run_mem_test_mode()
+        return
+    if "--mem-clean-preview" in sys.argv:
+        run_mem_clean_mode(dry_run=True)
+        return
+    if "--mem-clean" in sys.argv:
+        run_mem_clean_mode(dry_run=False)
         return
     if "--daily-note-test" in sys.argv:
         run_daily_note_test_mode()

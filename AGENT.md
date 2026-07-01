@@ -45,7 +45,7 @@ GitHub 仓库：`yuaiccc/project-history`（私有）
 ├── main.py              # 入口：启动 WebSocket + GitHub 轮询线程
 ├── config.py            # 配置加载（从 .env 读）
 ├── profile.py           # profile 加载：人设、称呼、记忆关键词
-├── profiles/            # 可开源复用的人设配置
+├── profiles/            # 可开源复用的人设配置（default / example-couple / 当前部署示例）
 ├── feishu_api.py        # 飞书 API 封装（发消息、读消息、表情、卡片、WebSocket）
 ├── github_client.py     # GitHub Events API + 私有仓库 commits 拉取
 ├── summarizer.py        # DeepSeek 总结/回复生成（含所有 prompt）

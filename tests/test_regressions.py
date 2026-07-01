@@ -5,6 +5,7 @@ import actions_runner
 import call_notes
 import commit_text
 import external_search
+import health
 import local_apps
 import love_note
 import memory
@@ -108,6 +109,7 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(_classify_tool_intent("三哥最近提交了什么", "舒舒"), "github")
         self.assertEqual(_classify_tool_intent("最近B站哪些新番热门", "舒舒"), "search")
         self.assertEqual(_classify_tool_intent("帮我查一下最近新闻", "舒舒"), "search")
+        self.assertEqual(_classify_tool_intent("机器人健康检查", "三哥"), "health")
         self.assertEqual(_classify_tool_intent("想你了", "舒舒"), "none")
 
     def test_persona_is_helper_not_sange_persona(self):
@@ -213,6 +215,61 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(entry["embedding_model"], "local-hash-ngram-v1")
         self.assertEqual(len(entry["embedding"]), memory.MEMORY_EMBEDDING_DIM)
         self.assertEqual(private_entry["visibility"], "private")
+
+    def test_memory_clean_store_removes_noise_and_dedupes(self):
+        memories = [
+            {"id": "1", "content": "你好"},
+            {"id": "2", "content": "舒舒喜欢不加糖的东方树叶。"},
+            {"id": "3", "content": "舒舒喜欢不加糖的东方树叶。"},
+        ]
+        with patch.object(memory, "_load_all", return_value=memories), patch.object(
+            memory,
+            "_save_all",
+        ) as save_mock, patch.object(memory, "MEMORY_EMBEDDING_PROVIDER", "local_hash"):
+            result = memory.clean_memory_store(dry_run=False)
+        self.assertEqual(result["before"], 3)
+        self.assertEqual(result["after"], 1)
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(result["merged"], 1)
+        save_mock.assert_called_once()
+
+    def test_search_interaction_writes_compact_interest_memory(self):
+        with patch.object(memory, "add_manual_memory") as add_mock:
+            external_search.remember_search_interaction(
+                "查一下 CLANNAD 古河渚",
+                [{"title": "CLANNAD 角色介绍", "snippet": "古河渚是作品角色", "url": "https://example.com"}],
+                actor="舒舒",
+            )
+        add_mock.assert_called_once()
+        fact = add_mock.call_args.args[0]
+        self.assertIn("舒舒对", fact)
+        self.assertIn("CLANNAD", fact)
+
+    def test_health_card_uses_table(self):
+        with patch.object(health, "_config_check", return_value={"item": "飞书配置", "status": "正常", "detail": "ok"}), patch.object(
+            health,
+            "_deepseek_check",
+            return_value={"item": "DeepSeek", "status": "正常", "detail": "ok"},
+        ), patch.object(
+            health,
+            "_ollama_check",
+            return_value={"item": "Ollama 向量", "status": "正常", "detail": "ok"},
+        ), patch.object(
+            health,
+            "_openclaw_check",
+            return_value={"item": "OpenClaw", "status": "正常", "detail": "ok"},
+        ), patch.object(
+            health,
+            "_memory_check",
+            return_value={"item": "记忆库", "status": "正常", "detail": "ok"},
+        ), patch.object(
+            health,
+            "_local_status_check",
+            return_value={"item": "本机状态", "status": "正常", "detail": "ok"},
+        ):
+            card = health.build_health_card()
+        self.assertEqual(card["card"]["body"]["elements"][0]["tag"], "table")
+        assert_public_text_clean(card)
 
     def test_call_notes_context_uses_summary_cache_shape(self):
         with patch.dict(

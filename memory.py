@@ -50,6 +50,12 @@ _QUERY_STOP_TERMS = {
     "什么", "怎么", "哪里", "在哪", "最近", "一下", "这个", "那个",
     "她的", "他的", "是不是", "有没有", "可以", "需要",
 }
+_LOW_VALUE_MEMORY_PATTERNS = (
+    re.compile(r"^(你好|hi|hello|在吗|出来|好的|ok|嗯|啊|哈哈哈*)[。！？!,.，]*$",
+               re.IGNORECASE),
+    re.compile(r"^(用户|三哥|舒舒)?(询问|问)(是否)?(认识|在不在|是什么|内容是什么).{0,12}$"),
+    re.compile(r"^三哥(在)?(0?\d[:：]\d{2}|凌晨|早上|中午|下午|晚上).{0,20}(询问|发送|出现).{0,20}$"),
+)
 
 
 def _get_memory_file():
@@ -99,10 +105,111 @@ def _save_all(memories: list[dict]):
         json.dump(memories, f, ensure_ascii=False, indent=2)
 
 
+def clean_memory_store(dry_run: bool = False) -> dict:
+    """Normalize, deduplicate, and remove low-value memories."""
+    original = _load_all()
+    cleaned = []
+    seen = []
+    removed = []
+    merged = 0
+    for idx, mem in enumerate(original, start=1):
+        normalized = _normalize_memory_entry(dict(mem), idx)
+        content = normalized.get("content", "")
+        key = _normalize_text(content)
+        if not key or _is_low_value_memory(content):
+            removed.append(content)
+            continue
+        duplicate = None
+        for existing_key, existing in seen:
+            if key == existing_key or key in existing_key or existing_key in key:
+                duplicate = existing
+                break
+        if duplicate:
+            duplicate["seen_count"] = max(int(duplicate.get("seen_count", 1)), int(normalized.get("seen_count", 1))) + 1
+            duplicate["importance"] = max(int(duplicate.get("importance", 1)), int(normalized.get("importance", 1)))
+            duplicate["visibility"] = _most_restrictive_visibility(
+                duplicate.get("visibility"),
+                normalized.get("visibility"),
+            )
+            merged += 1
+            continue
+        cleaned.append(normalized)
+        seen.append((key, normalized))
+
+    cleaned = _prune_memories(cleaned)
+    if not dry_run:
+        _save_all(cleaned)
+    return {
+        "before": len(original),
+        "after": len(cleaned),
+        "removed": len(removed),
+        "merged": merged,
+        "dry_run": dry_run,
+        "sample_removed": removed[:10],
+    }
+
+
+def add_manual_memory(
+    content: str,
+    category: str = "",
+    visibility: str = _VISIBILITY_PUBLIC,
+    source_type: str = "manual",
+) -> dict | None:
+    """Add or merge a manually curated memory without sending it to DeepSeek."""
+    content = (content or "").strip()
+    if not content or _is_low_value_memory(content):
+        return None
+    memories = _load_all()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    category = category or _categorize(content)
+    visibility = _most_restrictive_visibility(visibility, _infer_visibility(content, category))
+    normalized = _normalize_text(content)
+    for mem in memories:
+        key = _normalize_text(mem.get("content", ""))
+        if normalized == key or normalized in key or key in normalized:
+            mem["content"] = content if len(content) > len(mem.get("content", "")) else mem.get("content", content)
+            mem["last_seen"] = now
+            mem["seen_count"] = int(mem.get("seen_count", 1)) + 1
+            mem["category"] = mem.get("category") or category
+            mem["visibility"] = _most_restrictive_visibility(mem.get("visibility"), visibility)
+            mem["importance"] = max(int(mem.get("importance", 1)), _importance(content, category))
+            mem["confidence"] = max(float(mem.get("confidence", 0.8)), 0.85)
+            if MEMORY_EMBEDDING_ENABLED:
+                mem["embedding"] = _embed_text(mem.get("content", ""))
+                mem["embedding_model"] = _last_embedding_model()
+            _save_all(_prune_memories(memories))
+            return mem
+    entry = {
+        "id": f"mem_{len(memories) + 1}",
+        "content": content,
+        "category": category,
+        "importance": _importance(content, category),
+        "visibility": visibility,
+        "confidence": 0.85,
+        "time": now,
+        "last_seen": now,
+        "seen_count": 1,
+        "source_type": source_type,
+        "embedding": _embed_text(content) if MEMORY_EMBEDDING_ENABLED else [],
+        "embedding_model": _last_embedding_model() if MEMORY_EMBEDDING_ENABLED else "",
+        "source_messages": [],
+    }
+    memories.append(entry)
+    _save_all(_prune_memories(memories))
+    return entry
+
+
 def _normalize_text(text: str) -> str:
     text = re.sub(r"\s+", "", (text or "").lower())
     text = re.sub(r"[，。！？、,.!?；;：:（）()【】\[\]\"'“”‘’]", "", text)
     return text
+
+
+def _is_low_value_memory(text: str) -> bool:
+    text = (text or "").strip()
+    if len(text) <= 1:
+        return True
+    return any(pattern.search(text) for pattern in _LOW_VALUE_MEMORY_PATTERNS)
 
 
 def _normalize_memory_entry(mem: dict, idx: int = 0) -> dict:
