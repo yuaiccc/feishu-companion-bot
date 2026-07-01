@@ -43,6 +43,10 @@ class BotRegressionTests(unittest.TestCase):
         assert_public_text_clean(sanitized)
         self.assertIn("舒舒", sanitized["card"]["body"]["elements"][0]["content"])
 
+    def test_withdrawn_message_error_is_treated_as_unavailable(self):
+        self.assertTrue(feishu_api._is_message_unavailable("230011", "The message was withdrawn."))
+        self.assertTrue(feishu_api._is_message_unavailable("0", "The message was withdrawn."))
+
     def test_local_activity_card_starts_with_table_not_summary(self):
         notifier._get_repo_desc = lambda repo: "和舒舒的聊天机器人"
         activities = [

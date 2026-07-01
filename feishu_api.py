@@ -45,7 +45,8 @@ class FeishuMessageUnavailable(RuntimeError):
 
 
 _MESSAGE_UNAVAILABLE_CODES = {230011, 231003}
-_RECALLED_TEXTS = {"This message was recalled", "消息已撤回"}
+_RECALLED_TEXTS = {"This message was recalled", "The message was withdrawn.", "消息已撤回"}
+_MESSAGE_UNAVAILABLE_MARKERS = ("recalled", "withdrawn", "撤回", "不可见")
 
 
 def _field(obj, name: str, default=""):
@@ -70,11 +71,14 @@ def _is_bot_mention(mention) -> bool:
     return bool(FEISHU_BOT_OPEN_ID and open_id == FEISHU_BOT_OPEN_ID)
 
 
-def _is_message_unavailable(code) -> bool:
+def _is_message_unavailable(code, msg: str = "") -> bool:
     try:
-        return int(code) in _MESSAGE_UNAVAILABLE_CODES
+        if int(code) in _MESSAGE_UNAVAILABLE_CODES:
+            return True
     except (TypeError, ValueError):
-        return False
+        pass
+    normalized = (msg or "").lower()
+    return any(marker in normalized for marker in _MESSAGE_UNAVAILABLE_MARKERS)
 
 
 def _is_stale_create_time(create_time: str) -> tuple[bool, float]:
@@ -232,7 +236,7 @@ def reply_text(text: str, message_id: str) -> bool:
     )
     resp = client.im.v1.message.reply(req)
     if not resp.success():
-        if _is_message_unavailable(resp.code):
+        if _is_message_unavailable(resp.code, resp.msg):
             raise FeishuMessageUnavailable("回复消息", resp.code, resp.msg)
         raise RuntimeError(f"回复消息失败: code={resp.code} msg={resp.msg}")
     return True
@@ -261,7 +265,7 @@ def reply_card(card: dict, message_id: str) -> bool:
     )
     resp = client.im.v1.message.reply(req)
     if not resp.success():
-        if _is_message_unavailable(resp.code):
+        if _is_message_unavailable(resp.code, resp.msg):
             raise FeishuMessageUnavailable("回复卡片", resp.code, resp.msg)
         raise RuntimeError(f"回复卡片失败: code={resp.code} msg={resp.msg}")
     return True
@@ -326,7 +330,7 @@ def react_to_message(message_id: str, emoji_type: str = "THUMBSUP") -> str | Non
         rid = resp.data.reaction_id
         print(f"  [表情回复] {emoji_type} -> reaction_id={rid}", flush=True)
         return rid
-    if _is_message_unavailable(resp.code):
+    if _is_message_unavailable(resp.code, resp.msg):
         raise FeishuMessageUnavailable("添加表情", resp.code, resp.msg)
     print(f"  [表情回复] 失败: code={resp.code} msg={resp.msg}", flush=True)
     return None
@@ -347,7 +351,7 @@ def delete_reaction(message_id: str, reaction_id: str) -> bool:
     if resp.success():
         print(f"  [表情删除] reaction_id={reaction_id}", flush=True)
         return True
-    if _is_message_unavailable(resp.code):
+    if _is_message_unavailable(resp.code, resp.msg):
         return False
     print(f"  [表情删除] 失败: code={resp.code} msg={resp.msg}", flush=True)
     return False
