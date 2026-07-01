@@ -1,38 +1,39 @@
-# Feishu Companion Bot
+# 飞书陪伴机器人
 
-A self-hosted Feishu/Lark companion bot for small private groups. It can reply in real time, keep lightweight long-term memory, summarize activity signals, search external sources through a local tool, and publish compact interactive cards.
+一个自托管的飞书/Lark 陪伴机器人，适合小群、私聊和长期关系场景。它可以实时回复、维护本地记忆、汇总 GitHub 动态、调用本地搜索工具，并用飞书交互卡片提供按钮操作。
 
-The project is designed for personal or relationship-aware assistants, but the default profile is generic. A bot should help when a real person is away; it should not pretend to be that person.
+项目默认配置是通用版本。机器人应该在“真实的人暂时不在”时提供帮助，不应该伪装成那个人本人。
 
-## Features
+## 功能
 
-- Real-time Feishu long-connection listener for group mentions and p2p chats.
-- GitHub Actions fallback that polls every few minutes when the local machine is offline.
-- Streaming Feishu CardKit replies with buttons: `换个说法`, `继续展开`, `记住这点`, `不要记这个`.
-- Local latency traces for each reply: message read, memory search, call-note context, first token, final send.
-- Privacy-first memory: JSON storage, profile isolation, local embedding by default, visibility filtering, and agentic write/rerank.
-- Optional local signals: foreground app status through AppleScript, DeerFlow/OpenClaw web search, Feishu Minutes/call-note summaries, daily document comments.
-- Health check card for Feishu, DeepSeek, memory, Ollama, local search, and local status.
+- 飞书长连接监听：群里被 @ 时回复，私聊可直接回复。
+- GitHub Actions 兜底：本机离线时可定时轮询并推送状态。
+- 流式飞书卡片回复：支持 `换个说法`、`继续展开`、`记住这点`、`不要记这个`。
+- 本地延迟日志：记录读消息、检索记忆、通话纪要、首 token、最终发送等阶段耗时。
+- 隐私优先的记忆系统：按 profile 隔离，默认本地 JSON 存储，支持本地向量和可见性过滤。
+- 本地信号源：AppleScript 前台窗口、DeerFlow/OpenClaw 搜索、飞书妙记/通话纪要摘要。
+- 服务自检卡片：检查飞书、DeepSeek、记忆库、Ollama、本地搜索和本机状态。
+- 本地私有每日任务扩展：公开仓库只保留加载器，具体私有实现不要提交。
 
-## Architecture
+## 架构
 
 ```mermaid
 flowchart LR
-  A["Feishu event"] --> B["main.py"]
-  B --> C["intent router"]
+  A["飞书事件"] --> B["main.py"]
+  B --> C["意图路由"]
   C --> D["context_manager.py"]
   D --> E["DeepSeek"]
-  E --> F["streaming CardKit reply"]
-  F --> G["card buttons"]
+  E --> F["流式卡片回复"]
+  F --> G["卡片按钮"]
   G --> B
   B --> H["memory.py"]
-  B --> I["DeerFlow/OpenClaw search"]
+  B --> I["DeerFlow/OpenClaw 搜索"]
   B --> J["call_notes.py"]
   K["GitHub Actions"] --> L["actions_runner.py"]
   L --> A
 ```
 
-## Quick Start
+## 快速开始
 
 ```bash
 python3 -m venv .venv
@@ -42,32 +43,32 @@ cp .env.example .env
 python main.py
 ```
 
-`DRY_RUN=true` is the default for local testing. Set `DRY_RUN=false` only after Feishu, DeepSeek, and GitHub credentials are configured.
+默认 `DRY_RUN=true`，只打印不真正发飞书消息。配置好飞书、DeepSeek、GitHub 后再改成 `DRY_RUN=false`。
 
-## Profiles
+## Profile
 
-Profiles live in `profiles/` and keep persona, names, aliases, relationship boundaries, and memory keywords out of prompt source code.
+人设、称呼、关系边界、记忆关键词都放在 `profiles/`：
 
-- `profiles/default.json`: generic companion bot.
-- `profiles/example-couple.json`: relationship assistant template.
+- `profiles/default.json`：通用陪伴机器人。
+- `profiles/example-couple.json`：亲密关系助手模板。
 
-Create your own profile:
+创建自己的 profile：
 
 ```bash
 cp profiles/example-couple.json profiles/my-profile.json
 ```
 
-Then set:
+然后在 `.env` 设置：
 
 ```env
 PROFILE_ID=my-profile
 ```
 
-Runtime memory is stored under `memory_data/<PROFILE_ID>/` and is ignored by Git.
+运行时记忆会写入 `memory_data/<PROFILE_ID>/`，该目录不会提交到 Git。
 
-## Feishu Setup
+## 飞书配置
 
-Create a Feishu/Lark custom app with Bot enabled, add it to the target chat, and configure:
+创建飞书/Lark 自建应用，启用机器人，把机器人加入目标群聊，然后配置：
 
 ```env
 FEISHU_APP_ID=cli_xxx
@@ -77,21 +78,19 @@ FEISHU_BOT_OPEN_ID=ou_xxx
 FEISHU_READ_MESSAGES=true
 ```
 
-Common permissions:
+常用权限：
 
 - `im:message`
 - `im:message:send_as_bot`
 - `im:resource`
 - `im:message.reactions:write`
-- `im:message:readonly` for card action callbacks and message reads
+- `im:message:readonly`
 
-For card buttons, enable the `card.action.trigger` event in the Feishu Developer Console under Events & Callbacks. Button callbacks are delivered through the same long connection.
+卡片按钮需要在飞书开发者后台的事件订阅里开启 `card.action.trigger`。飞书接口字段要以官方文档为准：https://open.feishu.cn/document/home/index
 
-Feishu API details should be checked against the official docs: https://open.feishu.cn/document/home/index
+## 本机常驻
 
-## Local Always-On Mode
-
-The included LaunchAgent keeps the bot running after macOS login and wraps it with `caffeinate`:
+仓库里提供了 LaunchAgent 模板，用 `caffeinate` 保持进程运行：
 
 ```bash
 mkdir -p ~/Library/LaunchAgents
@@ -101,64 +100,67 @@ launchctl kickstart -k gui/$(id -u)/com.example.feishu-companion-bot
 tail -f bot.log
 ```
 
-Customize the plist path and label before publishing a packaged deployment.
+真正部署前要把 plist 里的路径和 label 改成自己的。
 
-## GitHub Actions Fallback
+## GitHub Actions 兜底
 
-`.github/workflows/bot.yml` runs `actions_runner.py` on a schedule. It can post GitHub activity cards and fallback responses when the local long connection is unavailable.
+`.github/workflows/bot.yml` 会定时运行 `actions_runner.py`。它能在本机不在线时推送 GitHub 动态卡片，并处理少量兜底回复。
 
-Use Environment secrets, not repository secrets, when the workflow has `environment: feishu`.
+建议把密钥放在 GitHub Environment secrets。Actions 里使用 `GH_USERNAME`、`GH_TOKEN`、`GH_PRIVATE_REPOS`，避免和 GitHub 预留变量混淆。
 
-GitHub-related environment names use `GH_USERNAME`, `GH_TOKEN`, and `GH_PRIVATE_REPOS` in Actions to avoid reserved `GITHUB_` names.
+GitHub 动态做了两层幂等：
 
-## Memory
+- event id 去重。
+- PushEvent 按 head sha 做跨来源指纹去重，避免公开 Events API 和 private repo 轮询同时报同一个 commit。
 
-`memory.py` stores structured memories locally:
+## 记忆系统
 
-- default path: `memory_data/<PROFILE_ID>/memories.json`
-- default embedding: local hash vectors
-- optional embedding: local Ollama with `qwen3-embedding:0.6b`
-- `private` memories are never injected into reply prompts
-- `owner_only` memories are only available when replying to the owner
-- `public_to_target` memories may be used for the target user
+`memory.py` 使用本地结构化记忆：
 
-Maintenance:
+- 默认路径：`memory_data/<PROFILE_ID>/memories.json`
+- 默认向量：本地 hash 向量
+- 可选向量：本地 Ollama，例如 `qwen3-embedding:0.6b`
+- `private` 不进入回复 prompt
+- `owner_only` 只在回复 owner 时可用
+- `public_to_target` 可在回复目标用户时使用
+
+维护命令：
 
 ```bash
 python main.py --mem-clean-preview
 python main.py --mem-clean
 ```
 
-In Feishu, ask for a memory audit panel to inspect low-confidence, duplicate, or sensitive entries.
+也可以在飞书里让机器人打开记忆审计面板。
 
-## Context Management
+## 上下文管理
 
-Every LLM reply goes through `context_manager.py`. The context is bounded by source:
+普通 LLM 回复会经过 `context_manager.py`，按来源限制上下文大小：
 
-- recent chat messages
-- retrieved memories
-- summarized call notes
+- 最近聊天消息
+- 检索出的相关记忆
+- 已摘要的通话纪要
 
-Each call logs which sections were injected and how many characters were used. This keeps prompt growth predictable and makes debugging easier.
+每次调用会记录注入了哪些 section 和字符数，避免 prompt 无限膨胀。
 
-## Latency Tracing
+## 延迟日志
 
-The bot logs local traces similar in spirit to LangSmith spans, without sending data to any external observability service:
+机器人会打印本地 span 风格的耗时日志，不上传到外部观测平台：
 
 ```text
 [延迟] chat_reply: total=2430ms read_messages=220ms search_memory=80ms call_notes=5ms deepseek_first_token_at=910ms reply_sent_at=2380ms
 ```
 
-Use these logs to decide whether optimization should target Feishu reads, memory retrieval, call-note loading, model first token latency, or card updates.
+用它判断瓶颈在飞书读消息、记忆检索、通话纪要、模型首 token，还是卡片更新。
 
-## External Search
+## 外部搜索
 
-`external_search.py` supports two local search backends:
+`external_search.py` 支持两种本地搜索后端：
 
-- `deerflow`: runs the local DeerFlow embedded Python client and asks it to perform a web-aware research pass. This is the default because it can synthesize the search process into a short conclusion.
-- `openclaw`: calls `openclaw infer web search` and summarizes the returned source list.
+- `deerflow`：调用本机 DeerFlow embedded Python client 做联网调研，默认推荐。
+- `openclaw`：调用 `openclaw infer web search`，再汇总来源。
 
-Typical local configuration:
+常见配置：
 
 ```env
 EXTERNAL_SEARCH_ENABLED=true
@@ -169,26 +171,40 @@ DEERFLOW_PYTHON=/Users/you/Code/deer-flow/backend/.venv/bin/python
 OPENCLAW_CLI=openclaw
 ```
 
-Use `EXTERNAL_SEARCH_BACKEND=auto` if you want DeerFlow first and OpenClaw fallback regardless of DeerFlow-specific failures. GitHub Actions cannot access your local DeerFlow or OpenClaw process, so scheduled cloud runs should not rely on local search.
+GitHub Actions 无法访问你的本机 DeerFlow/OpenClaw，所以云端兜底不要依赖本地搜索。
 
-## Optional Integrations
+## 本地私有扩展
 
-- `local_apps.py`: reads the active macOS app/window via AppleScript.
-- `external_search.py`: calls local DeerFlow or OpenClaw web search, then summarizes sources into a Feishu table card.
-- `call_notes.py`: reads configured Feishu Minutes transcripts and caches short relationship-safe summaries.
-- `love_note.py`: comments on new blocks in a configured Feishu Docx/Wiki document instead of editing the document body.
+不适合公开的个人工作流不要提交到仓库。可以放在本地未跟踪文件里，然后通过环境变量启用：
 
-## Safety Notes
+```env
+LOCAL_DAILY_JOB_MODULE=local_daily_job
+LOCAL_DAILY_JOB_RUN_AT=23:55
+```
 
-- Never commit `.env`, `state.json`, logs, `memory_data/`, call-note caches, or generated QR codes.
-- Do not put real addresses, tokens, or private relationship notes in tracked profiles.
-- Keep private deployments in untracked local profile files.
-- The bot is an assistant, not a replacement for the real person.
+扩展模块需要提供：
 
-## Tests
+```python
+def run_daily_job(force: bool = False) -> str:
+    ...
+
+def preview_daily_job() -> str:
+    ...
+```
+
+`local_daily_job.py` 已在 `.gitignore` 中，适合放私有逻辑。
+
+## 安全注意
+
+- 不要提交 `.env`、`state.json`、日志、`memory_data/`、通话缓存、二维码。
+- 不要把真实地址、私密关系记录、真实 token 写进 tracked profile。
+- 私有部署内容放在未跟踪 profile、未跟踪扩展文件或本地数据目录。
+- 机器人是助手，不是真人的替代品。
+
+## 测试
 
 ```bash
-.venv/bin/python -m py_compile config.py context_manager.py feishu_api.py main.py memory.py summarizer.py tests/test_regressions.py
+.venv/bin/python -m py_compile main.py actions_runner.py feishu_companion/*.py tests/test_regressions.py
 .venv/bin/python -m unittest tests.test_regressions
 git diff --check
 ```

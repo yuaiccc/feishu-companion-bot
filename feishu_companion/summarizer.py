@@ -1,9 +1,9 @@
 """DeepSeek reply generation for the configured companion-bot profile."""
 import requests
-from context_manager import build_reply_context, log_context_stats
-from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
-from profile import bot_role, owner_name, relationship_context, target_addressing_instruction, target_name
-from text_safety import sanitize_public_text
+from feishu_companion.context_manager import build_reply_context, log_context_stats
+from feishu_companion.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+from feishu_companion.profile import bot_role, owner_name, relationship_context, target_addressing_instruction, target_name
+from feishu_companion.text_safety import sanitize_public_text
 
 # 情侣关系背景信息（不每次都提，但模型需要知道）
 RELATIONSHIP_CONTEXT = relationship_context()

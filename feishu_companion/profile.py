@@ -5,7 +5,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-from config import BASE_DIR, PROFILE_ID
+from feishu_companion.config import BASE_DIR, PROFILE_ID
 
 
 _PROFILE_DIR = BASE_DIR / "profiles"

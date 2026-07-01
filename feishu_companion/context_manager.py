@@ -5,13 +5,13 @@ It keeps the prompt construction explicit, bounded, and auditable.
 """
 from dataclasses import dataclass
 
-from config import (
+from feishu_companion.config import (
     CONTEXT_CALL_NOTES_MAX_CHARS,
     CONTEXT_CHAT_MAX_CHARS,
     CONTEXT_MAX_CHARS,
     CONTEXT_MEMORY_MAX_CHARS,
 )
-from text_safety import sanitize_public_text
+from feishu_companion.text_safety import sanitize_public_text
 
 
 @dataclass

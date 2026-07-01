@@ -16,6 +16,7 @@ GitHub Activity Reporter — 主入口
 import sys
 import threading
 import time
+import importlib
 from datetime import datetime
 
 # 关键：子进程运行时 stdout 默认块缓冲，print 看不到
@@ -25,7 +26,7 @@ try:
 except Exception:
     pass
 
-from config import (
+from feishu_companion.config import (
     GITHUB_USERNAME,
     GITHUB_TOKEN,
     GITHUB_PRIVATE_REPOS,
@@ -39,18 +40,18 @@ from config import (
     FEISHU_STATUS_CHAT_ID,
     STATUS_NOTIFY_COOLDOWN_SECONDS,
     MEMORY_ENABLED,
-    LOVE_NOTE_ENABLED,
-    LOVE_NOTE_RUN_AT,
+    LOCAL_DAILY_JOB_MODULE,
+    LOCAL_DAILY_JOB_RUN_AT,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
 )
-from github_client import fetch_github_events, fetch_private_repo_commits, parse_events
-from latency import LatencyTrace
-from summarizer import reply_to_shushu, reply_to_shushu_stream, sanitize_public_text
-from notifier import build_message
-from profile import bot_role, owner_name, target_addressing_instruction, target_name
-from state import (
+from feishu_companion.github_client import dedupe_events, fetch_github_events, fetch_private_repo_commits, parse_events
+from feishu_companion.latency import LatencyTrace
+from feishu_companion.summarizer import reply_to_shushu, reply_to_shushu_stream, sanitize_public_text
+from feishu_companion.notifier import build_message
+from feishu_companion.profile import bot_role, owner_name, target_addressing_instruction, target_name
+from feishu_companion.state import (
     load_state,
     save_state,
     filter_new_events,
@@ -62,7 +63,7 @@ from state import (
     is_streaming_callback_processed,
     mark_streaming_callback_processed,
 )
-from feishu_api import (
+from feishu_companion.feishu_api import (
     fetch_chat_messages,
     send_text,
     send_card,
@@ -76,7 +77,7 @@ from feishu_api import (
     format_for_deepseek,
     FeishuMessageUnavailable,
 )
-from memory import (
+from feishu_companion.memory import (
     add_memories,
     add_manual_memory,
     clean_memory_store,
@@ -85,21 +86,20 @@ from memory import (
     get_all_memories,
     format_for_deepseek as format_memories,
 )
-from bitable_api import add_records as bitable_add_records
-from local_apps import get_local_status_summary
-from call_notes import build_call_notes_context
-from external_search import (
+from feishu_companion.bitable_api import add_records as bitable_add_records
+from feishu_companion.local_apps import get_local_status_summary
+from feishu_companion.call_notes import build_call_notes_context
+from feishu_companion.external_search import (
     answer_external_search,
     build_search_card,
     remember_search_interaction,
     search_web,
     summarize_search_intro,
 )
-from passive_assistant import PassiveAssistant
-from love_note import preview_daily_love_note, run_daily_love_note
-from health import build_health_card
-from memory_audit import build_memory_audit_card
-from proactive_topic import maybe_send_proactive_topic
+from feishu_companion.passive_assistant import PassiveAssistant
+from feishu_companion.health import build_health_card
+from feishu_companion.memory_audit import build_memory_audit_card
+from feishu_companion.proactive_topic import maybe_send_proactive_topic
 
 
 # ---- 模拟数据（用于 --test 模式） ----
@@ -235,6 +235,7 @@ def check_github(receive_id: str = "", force: bool = False, with_summary: bool =
             print(f"  拉取 private 仓库 {repo} 失败: {e}")
 
     raw_events.sort(key=lambda e: e.get("created_at", ""), reverse=True)
+    raw_events = dedupe_events(raw_events)
 
     if force:
         # 强制模式：跳过去重，直接取最近的发
@@ -458,21 +459,53 @@ def github_poll_loop():
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
-def love_note_loop():
-    """每日把当天内容整理后追加到恋爱笔记。"""
+def _load_local_daily_job():
+    """Load a private local daily extension module when configured."""
+    if not LOCAL_DAILY_JOB_MODULE:
+        return None
+    try:
+        return importlib.import_module(LOCAL_DAILY_JOB_MODULE)
+    except Exception as e:
+        print(f"  [本地每日扩展] 加载失败: {e}", flush=True)
+        _notify_status(f"本地每日扩展加载失败：{e}", key="local_daily_job_import_error")
+        return None
+
+
+def _run_local_daily_job(force: bool = False) -> str:
+    module = _load_local_daily_job()
+    if not module:
+        return "未配置本地每日扩展。"
+    runner = getattr(module, "run_daily_job", None)
+    if not callable(runner):
+        raise RuntimeError("本地每日扩展缺少 run_daily_job(force=False) 函数")
+    return runner(force=force)
+
+
+def _preview_local_daily_job() -> str:
+    module = _load_local_daily_job()
+    if not module:
+        return "未配置本地每日扩展。"
+    previewer = getattr(module, "preview_daily_job", None)
+    if not callable(previewer):
+        raise RuntimeError("本地每日扩展缺少 preview_daily_job() 函数")
+    return previewer()
+
+
+def local_daily_job_loop():
+    """Run a private local daily extension without committing its implementation."""
     last_checked_minute = ""
     while True:
         try:
             now = datetime.now()
             minute_key = now.strftime("%Y-%m-%d %H:%M")
-            if minute_key != last_checked_minute and now.strftime("%H:%M") == LOVE_NOTE_RUN_AT:
+            if minute_key != last_checked_minute and now.strftime("%H:%M") == LOCAL_DAILY_JOB_RUN_AT:
                 last_checked_minute = minute_key
-                print(f"\n  [{now.strftime('%H:%M:%S')}] 开始整理每日恋爱笔记...", flush=True)
-                result = run_daily_love_note()
-                print(f"  [恋爱笔记] {result[:200]}", flush=True)
+                print(f"\n  [{now.strftime('%H:%M:%S')}] 开始执行本地每日扩展...", flush=True)
+                result = _run_local_daily_job()
+                print(f"  [本地每日扩展] {result[:200]}", flush=True)
         except Exception as e:
-            print(f"  [恋爱笔记] 整理失败: {e}", flush=True)
-            _notify_status(f"每日恋爱笔记整理失败：{e}", key="love_note_error")
+            print(f"  [本地每日扩展] 执行失败: {e}", flush=True)
+            _notify_status(f"本地每日扩展执行失败：{e}", key="local_daily_job_error")
         time.sleep(20)
 
 
@@ -977,19 +1010,19 @@ def run_mem_clean_mode(dry_run: bool = True):
             print(f"    - {item[:80]}")
 
 
-def run_daily_note_test_mode():
+def run_local_daily_job_test_mode():
     print("=" * 60)
-    print("  DAILY NOTE TEST MODE - 生成并创建恋爱笔记短评")
+    print("  LOCAL DAILY JOB TEST MODE")
     print("=" * 60)
-    result = run_daily_love_note(force=True)
+    result = _run_local_daily_job(force=True)
     print(result)
 
 
-def run_daily_note_preview_mode():
+def run_local_daily_job_preview_mode():
     print("=" * 60)
-    print("  DAILY NOTE PREVIEW MODE - 只生成短评，不写入")
+    print("  LOCAL DAILY JOB PREVIEW MODE")
     print("=" * 60)
-    result = preview_daily_love_note()
+    result = _preview_local_daily_job()
     print(result)
 
 
@@ -1019,11 +1052,11 @@ def main():
     if "--mem-clean" in sys.argv:
         run_mem_clean_mode(dry_run=False)
         return
-    if "--daily-note-test" in sys.argv:
-        run_daily_note_test_mode()
+    if "--local-daily-job-test" in sys.argv:
+        run_local_daily_job_test_mode()
         return
-    if "--daily-note-preview" in sys.argv:
-        run_daily_note_preview_mode()
+    if "--local-daily-job-preview" in sys.argv:
+        run_local_daily_job_preview_mode()
         return
     if "--proactive-topic-test" in sys.argv:
         run_proactive_topic_test_mode()
@@ -1038,7 +1071,7 @@ def main():
     print(f"  长连接: 开启")
     print(f"  读取消息: {'开启' if FEISHU_READ_MESSAGES else '关闭'}")
     print(f"  记忆模块: {'开启' if MEMORY_ENABLED else '关闭'}")
-    print(f"  每日恋爱笔记: {'开启' if LOVE_NOTE_ENABLED else '关闭'}")
+    print(f"  本地每日扩展: {'开启' if LOCAL_DAILY_JOB_MODULE else '关闭'}")
     print(f"  主动话题: {'开启' if PROACTIVE_TOPIC_ENABLED else '关闭'}")
     print("=" * 60)
     _notify_status("已启动/重启，本地长连接正在保持在线。", key="startup")
@@ -1053,10 +1086,10 @@ def main():
     poll_thread.start()
     print("  GitHub 轮询线程已启动")
 
-    if LOVE_NOTE_ENABLED:
-        note_thread = threading.Thread(target=love_note_loop, daemon=True)
-        note_thread.start()
-        print(f"  每日恋爱笔记线程已启动: {LOVE_NOTE_RUN_AT}")
+    if LOCAL_DAILY_JOB_MODULE:
+        daily_thread = threading.Thread(target=local_daily_job_loop, daemon=True)
+        daily_thread.start()
+        print(f"  本地每日扩展线程已启动: {LOCAL_DAILY_JOB_RUN_AT}")
 
     if PROACTIVE_TOPIC_ENABLED:
         proactive_thread = threading.Thread(target=proactive_topic_loop, daemon=True)

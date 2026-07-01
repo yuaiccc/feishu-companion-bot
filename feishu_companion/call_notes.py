@@ -14,8 +14,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import requests
-from profile import owner_name, target_name
-from text_safety import sanitize_public_text
+from feishu_companion.profile import owner_name, target_name
+from feishu_companion.text_safety import sanitize_public_text
 
 OPEN_API = "https://open.feishu.cn/open-apis"
 SHANGHAI = timezone(timedelta(hours=8))

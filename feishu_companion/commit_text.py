@@ -173,7 +173,7 @@ def translate_commit_message(message: str) -> str:
 
 def _summarize_activity_with_deepseek(system_prompt: str, user_content: str) -> str:
     try:
-        from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+        from feishu_companion.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
     except Exception:
         return ""
     if not DEEPSEEK_API_KEY:
@@ -207,7 +207,7 @@ def _summarize_activity_with_deepseek(system_prompt: str, user_content: str) -> 
 
 def _translate_with_deepseek(subject: str) -> str:
     try:
-        from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+        from feishu_companion.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
     except Exception:
         return ""
     if not DEEPSEEK_API_KEY:

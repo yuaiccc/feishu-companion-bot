@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 # ---- Profile ----
@@ -72,11 +72,9 @@ PROACTIVE_TOPIC_CHECK_INTERVAL_SECONDS = int(os.getenv("PROACTIVE_TOPIC_CHECK_IN
 PROACTIVE_TOPIC_ACTIVE_START = os.getenv("PROACTIVE_TOPIC_ACTIVE_START", "09:30")
 PROACTIVE_TOPIC_ACTIVE_END = os.getenv("PROACTIVE_TOPIC_ACTIVE_END", "23:30")
 
-# ---- 每日恋爱笔记 ----
-LOVE_NOTE_ENABLED = os.getenv("LOVE_NOTE_ENABLED", "false").lower() in ("true", "1", "yes")
-LOVE_NOTE_WIKI_TOKEN = os.getenv("LOVE_NOTE_WIKI_TOKEN", "")
-LOVE_NOTE_DOC_TOKEN = os.getenv("LOVE_NOTE_DOC_TOKEN", "")
-LOVE_NOTE_RUN_AT = os.getenv("LOVE_NOTE_RUN_AT", "23:55")
+# ---- 本地私有每日任务扩展（默认关闭；扩展模块不要提交到公开仓库）----
+LOCAL_DAILY_JOB_MODULE = os.getenv("LOCAL_DAILY_JOB_MODULE", "").strip()
+LOCAL_DAILY_JOB_RUN_AT = os.getenv("LOCAL_DAILY_JOB_RUN_AT", "23:55")
 
 # ---- GitHub ----
 GITHUB_USERNAME = os.getenv("GITHUB_USERNAME", "")

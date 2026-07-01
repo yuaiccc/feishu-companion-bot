@@ -5,6 +5,7 @@
 state.json
 call_notes_cache.json
 *.log
+activity.txt
 
 # Python
 __pycache__/
@@ -22,6 +23,8 @@ venv/
 # Memory data (mem0 / Qdrant local storage)
 memory_data/
 profiles/sange-shushu.json
+local_*.py
+*_private.py
 
 # Temp files
 feishu_login_qr.png

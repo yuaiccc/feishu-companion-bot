@@ -1,92 +1,101 @@
-# AGENT.md - Maintenance Guide
+# AGENT.md - 维护说明
 
-Read this before changing the bot.
+改这个项目之前先读这里。
 
-## Project Goal
+## 项目目标
 
-Feishu Companion Bot is a configurable self-hosted companion bot. It should help a chat when the owner is away, but must not impersonate the owner. Keep the default codebase generic and safe for public open source use.
+飞书陪伴机器人是一个可配置、自托管的陪伴型机器人。它可以在 owner 暂时不在线时帮忙回应、整理信息、保留记忆，但不能伪装成 owner 本人。
 
-Private deployments belong in `.env`, `memory_data/`, and untracked profile files.
+默认代码库必须保持通用、可公开、可复用。私有部署内容只应该放在 `.env`、`memory_data/`、未跟踪 profile 或未跟踪本地扩展文件中。
 
-## Main Files
+## 目录约定
 
-- `main.py`: entry point, intent routing, long connection, polling threads.
-- `feishu_api.py`: Feishu/Lark SDK wrapper, messages, reactions, CardKit streaming, card callbacks.
-- `summarizer.py`: DeepSeek prompts and reply generation.
-- `context_manager.py`: bounded prompt context assembly.
-- `latency.py`: local span-style timing logs.
-- `memory.py`: local JSON memory, embedding, agentic write/rerank.
-- `external_search.py`: local DeerFlow/OpenClaw web search integration.
-- `call_notes.py`: Feishu Minutes transcript summaries.
-- `love_note.py`: Feishu Docx/Wiki comment workflow.
-- `actions_runner.py`: GitHub Actions fallback.
-- `tests/test_regressions.py`: regression tests for prompts, cards, memory, search, notes, and Feishu behavior.
+- `main.py`：本地长连接入口，负责启动轮询线程和飞书事件监听。
+- `actions_runner.py`：GitHub Actions 兜底入口。
+- `feishu_companion/`：通用业务模块。
+- `profiles/`：公开的通用 profile 模板。
+- `tests/`：回归测试。
+- `launchd/`：macOS LaunchAgent 模板。
 
-## Rules
+## 关键模块
 
-- Check Feishu behavior against official docs or `lark-cli schema`; do not guess API fields.
-- For Card JSON 2.0, put buttons directly in `body.elements`; do not use the old `{"tag": "action", "actions": [...]}` wrapper.
-- Card button callbacks use `card.action.trigger`; the app must subscribe to the event in the Feishu Developer Console.
-- Group messages should only trigger active replies when the bot is mentioned. P2P chats can reply directly.
-- Keep memory privacy boundaries: `private` never enters prompts; `owner_only` only for owner; `public_to_target` can be used for the target user.
-- Every new LLM context source needs an explicit budget in `context_manager.py`.
-- Every user-visible Feishu text/card should pass through `text_safety.py`.
-- Do not commit `.env`, logs, `state.json`, `memory_data/`, local QR codes, or private profiles.
+- `feishu_api.py`：飞书 SDK 封装，包含消息、表情、卡片、按钮回调。
+- `summarizer.py`：DeepSeek 回复生成。
+- `context_manager.py`：有预算的上下文拼接。
+- `latency.py`：本地 span 风格耗时日志。
+- `memory.py`：本地 JSON 记忆、向量、agentic 写入和 rerank。
+- `external_search.py`：本地 DeerFlow/OpenClaw 搜索。
+- `call_notes.py`：飞书妙记/通话纪要摘要。
+- `github_client.py`：GitHub Events 和 private repo commit 轮询。
+- `notifier.py`：GitHub 动态飞书卡片。
+- `health.py`：服务自检卡片。
+- `memory_audit.py`：记忆审计卡片。
 
-## Feishu Permissions
+## 规则
 
-Common scopes:
+- 飞书字段和行为必须对照官方文档或 `lark-cli schema`，不要猜。
+- Card JSON 2.0 的按钮直接放在 `body.elements`，不要用旧版 `{"tag": "action", "actions": [...]}`。
+- 卡片按钮回调依赖 `card.action.trigger`，需要在飞书开发者后台订阅。
+- 群聊只有 @ 机器人时主动回复；私聊可以直接回复。
+- 记忆隐私边界不能破坏：`private` 不进 prompt，`owner_only` 只给 owner，`public_to_target` 可以给目标用户。
+- 新增任何 LLM 上下文来源，都要在 `context_manager.py` 里设置明确预算。
+- 所有用户可见飞书文本和卡片都要经过 `text_safety.py`。
+- 不要提交 `.env`、日志、`state.json`、`memory_data/`、二维码、私有 profile、私有本地扩展。
 
-- `im:message`
-- `im:message:send_as_bot`
-- `im:resource`
-- `im:message.reactions:write`
-- `im:message:readonly`
+## 流式回复
 
-For card callbacks, enable `card.action.trigger` in Events & Callbacks. The SDK handler is registered in `start_event_listener()`.
-
-## Streaming Replies
-
-Normal chat replies should prefer:
+普通聊天优先走：
 
 ```python
 reply_to_shushu_stream(...)
 send_streaming_reply(...)
 ```
 
-The card starts with `正在输入...`, updates `reply_text`, then disables `streaming_mode`. Buttons currently supported:
+卡片先显示 `正在输入...`，逐步更新 `reply_text`，结束后关闭 `streaming_mode`。
 
-- `rephrase`: generate a rewritten reply from the cached short-term context.
-- `continue`: generate one extra short continuation.
-- `remember`: write a conservative owner-only manual memory.
-- `forget`: remove very recent memories related to the exchange when possible.
+已支持按钮：
 
-The stream message ID is cached in `state.json.streaming_reply_contexts` for button callbacks. Keep it short-lived and compact.
+- `rephrase`：根据缓存上下文换个说法。
+- `continue`：继续补充一句。
+- `remember`：写入保守的 owner-only 记忆。
+- `forget`：尽量删除最近与本轮相关的记忆。
 
-## Context And Latency
+按钮上下文存在 `state.json.streaming_reply_contexts`，必须保持短期、紧凑。
 
-All normal replies and activity summaries should use `context_manager.build_reply_context()`.
+## GitHub 动态
 
-`main.py` should log local latency spans for:
+动态卡片保持表格优先，commit/star 行要让非开发者也能看懂。不要给每张 GitHub 卡片加很腻的情绪总结。
 
-- `read_messages`
-- `search_memory`
-- `call_notes`
-- first DeepSeek token
-- reply sent
+幂等规则：
 
-This is intentionally local and LangSmith-like, without sending private data to external telemetry.
+- 先按 GitHub event id 去重。
+- PushEvent 再按 head sha 生成指纹，避免公开 Events API 和 private repo 轮询重复报同一个 commit。
 
-## GitHub Activity Cards
+## 本地私有扩展
 
-Activity cards should stay compact and table-first. Commit/star rows must be understandable to non-developers. Do not add a sentimental top summary to every GitHub card.
+不适合公开的工作流不要提交。需要每日私有任务时，在未跟踪文件里实现：
 
-## Tests
+```python
+def run_daily_job(force: bool = False) -> str:
+    ...
 
-Run before committing:
+def preview_daily_job() -> str:
+    ...
+```
+
+然后通过 `.env` 配：
+
+```env
+LOCAL_DAILY_JOB_MODULE=local_daily_job
+LOCAL_DAILY_JOB_RUN_AT=23:55
+```
+
+`local_daily_job.py` 已加入 `.gitignore`。
+
+## 提交前检查
 
 ```bash
-.venv/bin/python -m py_compile config.py context_manager.py feishu_api.py main.py memory.py summarizer.py tests/test_regressions.py
+.venv/bin/python -m py_compile main.py actions_runner.py feishu_companion/*.py tests/test_regressions.py
 .venv/bin/python -m unittest tests.test_regressions
 git diff --check
 ```

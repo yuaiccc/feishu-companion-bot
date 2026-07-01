@@ -15,12 +15,13 @@ import os
 import sys
 import json
 import time
+import hashlib
 from datetime import datetime, timezone, timedelta
 
-from commit_text import brief_commit_messages, summarize_commit_activity, summarize_star_activity
-from call_notes import build_call_notes_context
-from profile import bot_role, owner_name, relationship_context, target_addressing_instruction, target_name
-from text_safety import sanitize_card, sanitize_public_text
+from feishu_companion.commit_text import brief_commit_messages, summarize_commit_activity, summarize_star_activity
+from feishu_companion.call_notes import build_call_notes_context
+from feishu_companion.profile import bot_role, owner_name, relationship_context, target_addressing_instruction, target_name
+from feishu_companion.text_safety import sanitize_card, sanitize_public_text
 
 # 确保输出不缓冲
 sys.stdout.reconfigure(line_buffering=True)
@@ -67,7 +68,7 @@ def _load_state() -> dict:
                 return json.load(f)
         except Exception:
             pass
-    return {"replied_message_ids": [], "pushed_event_ids": []}
+    return {"replied_message_ids": [], "pushed_event_ids": [], "pushed_event_fingerprints": []}
 
 
 def _save_state(state: dict):
@@ -383,6 +384,40 @@ def fetch_private_repo_commits(repo: str) -> list[dict]:
     return events
 
 
+def event_fingerprint(ev: dict) -> str:
+    etype = ev.get("type", "")
+    payload = ev.get("payload", {}) or {}
+    repo = (ev.get("repo", {}) or {}).get("name", "")
+    if etype == "PushEvent":
+        head = (payload.get("head") or "").strip()
+        if head:
+            return f"push:{head}"
+        commit_shas = [
+            str(c.get("sha") or c.get("id") or "").strip()
+            for c in payload.get("commits", []) or []
+            if c.get("sha") or c.get("id")
+        ]
+        if commit_shas:
+            return "push:" + ",".join(commit_shas)
+    ev_id = str(ev.get("id", "")).strip()
+    if ev_id:
+        return f"id:{ev_id}"
+    raw = "|".join([etype, repo, str(ev.get("created_at", "")), str(payload)[:500]])
+    return "hash:" + hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def dedupe_events(events: list[dict], seen_fingerprints: set[str] | None = None) -> list[dict]:
+    seen = set(seen_fingerprints or set())
+    unique = []
+    for ev in events:
+        fp = event_fingerprint(ev)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        unique.append(ev)
+    return unique
+
+
 # 已知的仓库通俗描述（覆盖常见仓库）
 _REPO_DESC_MAP = {
     "feishu-companion-bot": "飞书陪伴机器人",
@@ -677,6 +712,7 @@ def main():
     state = _load_state()
     replied_ids = set(state.get("replied_message_ids", []))
     pushed_ids = set(state.get("pushed_event_ids", []))
+    pushed_fingerprints = set(state.get("pushed_event_fingerprints", []))
 
     # ---- 1. 检查飞书消息并回复 ----
     print("\n[1/2] 检查飞书消息...", flush=True)
@@ -721,8 +757,12 @@ def main():
         for repo in GITHUB_PRIVATE_REPOS:
             raw_events.extend(fetch_private_repo_commits(repo))
         raw_events.sort(key=lambda e: e.get("created_at", ""), reverse=True)
+        raw_events = dedupe_events(raw_events, pushed_fingerprints)
 
-        new_events = [e for e in raw_events if e.get("id", "") not in pushed_ids]
+        new_events = [
+            e for e in raw_events
+            if e.get("id", "") not in pushed_ids and event_fingerprint(e) not in pushed_fingerprints
+        ]
         if new_events:
             print(f"  发现 {len(new_events)} 条新 GitHub 活动", flush=True)
             card = build_commit_card(new_events)
@@ -730,6 +770,7 @@ def main():
                 print("  表格推送成功", flush=True)
             for e in new_events:
                 pushed_ids.add(e.get("id", ""))
+                pushed_fingerprints.add(event_fingerprint(e))
         else:
             print("  没有新活动", flush=True)
     except Exception as e:
@@ -739,6 +780,7 @@ def main():
     # 只保留最近 200 条，防止无限增长
     state["replied_message_ids"] = list(replied_ids)[-200:]
     state["pushed_event_ids"] = list(pushed_ids)[-200:]
+    state["pushed_event_fingerprints"] = list(pushed_fingerprints)[-200:]
     _save_state(state)
 
     print("\n完成!", flush=True)

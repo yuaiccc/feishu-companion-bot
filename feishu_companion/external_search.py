@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from config import (
+from feishu_companion.config import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
@@ -26,8 +26,8 @@ from config import (
     OPENCLAW_SEARCH_PROVIDER,
     OPENCLAW_SEARCH_TIMEOUT_SECONDS,
 )
-from profile import bot_role, owner_name, target_addressing_instruction, target_name
-from text_safety import sanitize_public_text
+from feishu_companion.profile import bot_role, owner_name, target_addressing_instruction, target_name
+from feishu_companion.text_safety import sanitize_public_text
 
 
 _UNTRUSTED_MARKER_RE = re.compile(r"<<<(?:END_)?EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>")
@@ -436,7 +436,7 @@ def build_external_search_card(query: str) -> dict:
 def remember_search_interaction(query: str, results: list[dict], actor: str = "用户") -> None:
     """Store a compact interest memory from a successful search."""
     try:
-        from memory import add_manual_memory
+        from feishu_companion.memory import add_manual_memory
     except Exception:
         return
     topic = _search_topic(query)

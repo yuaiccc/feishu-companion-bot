@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from memory import _is_low_value_memory, _load_all, _normalize_text
+from feishu_companion.memory import _is_low_value_memory, _load_all, _normalize_text
 
 
 def build_memory_audit_card(audience: str = "owner") -> dict:

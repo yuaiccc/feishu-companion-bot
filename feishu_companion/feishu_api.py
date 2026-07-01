@@ -23,12 +23,12 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
-from config import (
+from feishu_companion.config import (
     FEISHU_APP_ID, FEISHU_APP_SECRET,
     FEISHU_CHAT_ID, FEISHU_SHUSHU_OPEN_ID, FEISHU_BOT_OPEN_ID, DRY_RUN,
     FEISHU_EVENT_MAX_AGE_SECONDS,
 )
-from text_safety import sanitize_card, sanitize_public_text
+from feishu_companion.text_safety import sanitize_card, sanitize_public_text
 
 # ---- SDK Client ----
 

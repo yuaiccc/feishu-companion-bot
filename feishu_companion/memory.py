@@ -12,7 +12,7 @@ import re
 import hashlib
 from datetime import datetime
 
-from config import (
+from feishu_companion.config import (
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL,
     MEMORY_ENABLED, MEMORY_DIR, MEMORY_EMBEDDING_ENABLED,
     MEMORY_AGENTIC_RAG_ENABLED, MEMORY_AGENTIC_WRITE_ENABLED,
@@ -20,7 +20,7 @@ from config import (
     MEMORY_EMBEDDING_PROVIDER, MEMORY_OLLAMA_BASE_URL,
     MEMORY_OLLAMA_EMBED_MODEL, MEMORY_OLLAMA_TIMEOUT_SECONDS,
 )
-from profile import memory_category_keywords, profile_id
+from feishu_companion.profile import memory_category_keywords, profile_id
 
 import requests
 

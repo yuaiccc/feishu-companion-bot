@@ -2,6 +2,7 @@
 也支持直接轮询 private 仓库的 commits（Events API 不返回 private 仓库活动）。
 """
 import requests
+import hashlib
 
 GITHUB_API = "https://api.github.com"
 
@@ -76,6 +77,56 @@ def parse_events(events: list[dict], token: str = "") -> list[dict]:
     for ev in events:
         activities.append(_parse_one(ev, token))
     return activities
+
+
+def event_fingerprint(ev: dict) -> str:
+    """Return a stable cross-source idempotency key for one GitHub event.
+
+    GitHub's public Events API and direct repo commit polling can report the
+    same push with different event IDs, especially after a repo rename. For
+    pushes, the head SHA is the real identity; for other event types, the
+    GitHub event id is still the safest key.
+    """
+    etype = ev.get("type", "")
+    payload = ev.get("payload", {}) or {}
+    repo = (ev.get("repo", {}) or {}).get("name", "")
+
+    if etype == "PushEvent":
+        head = (payload.get("head") or "").strip()
+        if head:
+            return f"push:{head}"
+        commit_shas = [
+            str(c.get("sha") or c.get("id") or "").strip()
+            for c in payload.get("commits", []) or []
+            if c.get("sha") or c.get("id")
+        ]
+        if commit_shas:
+            return "push:" + ",".join(commit_shas)
+
+    ev_id = str(ev.get("id", "")).strip()
+    if ev_id:
+        return f"id:{ev_id}"
+
+    raw = "|".join([
+        etype,
+        repo,
+        str(ev.get("created_at", "")),
+        str(payload)[:500],
+    ])
+    return "hash:" + hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def dedupe_events(events: list[dict], seen_fingerprints: set[str] | None = None) -> list[dict]:
+    """Remove duplicate GitHub events across public/private polling sources."""
+    seen = set(seen_fingerprints or set())
+    unique = []
+    for ev in events:
+        fp = event_fingerprint(ev)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        unique.append(ev)
+    return unique
 
 
 def _parse_one(ev: dict, token: str = "") -> dict:

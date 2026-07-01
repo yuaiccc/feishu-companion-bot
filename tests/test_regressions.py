@@ -4,24 +4,24 @@ import unittest
 from unittest.mock import patch
 
 import actions_runner
-import call_notes
-import context_manager
-import commit_text
-import external_search
-import feishu_api
-import health
-import local_apps
-import love_note
-import memory_audit
-import memory
-import notifier
-import passive_assistant
-import proactive_topic
-import profile as bot_profile
-import summarizer
-import state
+import feishu_companion.call_notes as call_notes
+import feishu_companion.context_manager as context_manager
+import feishu_companion.commit_text as commit_text
+import feishu_companion.external_search as external_search
+import feishu_companion.feishu_api as feishu_api
+import feishu_companion.github_client as github_client
+import feishu_companion.health as health
+import feishu_companion.local_apps as local_apps
+import feishu_companion.memory_audit as memory_audit
+import feishu_companion.memory as memory
+import feishu_companion.notifier as notifier
+import feishu_companion.passive_assistant as passive_assistant
+import feishu_companion.proactive_topic as proactive_topic
+import feishu_companion.profile as bot_profile
+import feishu_companion.summarizer as summarizer
+import feishu_companion.state as state
 from main import _classify_tool_intent
-from text_safety import assert_public_text_clean, sanitize_card, sanitize_public_text
+from feishu_companion.text_safety import assert_public_text_clean, sanitize_card, sanitize_public_text
 
 
 class BotRegressionTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class BotRegressionTests(unittest.TestCase):
         self.assertTrue(feishu_api._is_message_unavailable("0", "The message was withdrawn."))
 
     def test_local_activity_card_starts_with_table_not_summary(self):
-        notifier._get_repo_desc = lambda repo: "和舒舒的聊天机器人"
+        notifier._get_repo_desc = lambda repo: "飞书陪伴机器人"
         activities = [
             {
                 "type": "PushEvent",
@@ -65,7 +65,7 @@ class BotRegressionTests(unittest.TestCase):
         assert_public_text_clean(elements)
 
     def test_actions_activity_card_starts_with_table_not_summary(self):
-        actions_runner.fetch_repo_desc = lambda repo: "和舒舒的聊天机器人"
+        actions_runner.fetch_repo_desc = lambda repo: "飞书陪伴机器人"
         activities = [
             {
                 "type": "PushEvent",
@@ -79,11 +79,11 @@ class BotRegressionTests(unittest.TestCase):
         assert_public_text_clean(elements)
 
     def test_activity_rows_use_lightweight_commit_summary(self):
-        notifier._get_repo_desc = lambda repo: "和舒舒的聊天机器人"
+        notifier._get_repo_desc = lambda repo: "飞书陪伴机器人"
         with patch.object(
             commit_text,
             "_summarize_activity_with_deepseek",
-            return_value="给和舒舒的聊天机器人新增了恋爱笔记评论功能",
+            return_value="给飞书陪伴机器人新增了卡片按钮功能",
         ):
             card = notifier.build_message([
                 {
@@ -92,12 +92,12 @@ class BotRegressionTests(unittest.TestCase):
                     "created_at": "2026-06-30T08:24:00Z",
                     "detail": {
                         "commit_count": 1,
-                        "commit_messages": ["feat: add love note comments"],
+                        "commit_messages": ["feat: add card actions"],
                     },
                 }
             ])
         rows = card["card"]["body"]["elements"][0]["rows"]
-        self.assertEqual(rows[0]["activity"], "给和舒舒的聊天机器人新增了恋爱笔记评论功能")
+        self.assertEqual(rows[0]["activity"], "给飞书陪伴机器人新增了卡片按钮功能")
         self.assertNotIn("feat:", rows[0]["activity"])
 
     def test_activity_rows_use_lightweight_star_summary(self):
@@ -113,6 +113,43 @@ class BotRegressionTests(unittest.TestCase):
             ])
         rows = card["card"]["body"]["elements"][0]["rows"]
         self.assertIn("收藏了一个大概和微信跨平台数据库有关的项目", rows[0]["activity"])
+
+    def test_github_events_dedupe_public_and_private_push_by_head_sha(self):
+        public_event = {
+            "id": "public-1",
+            "type": "PushEvent",
+            "repo": {"name": "example/feishu-companion-bot"},
+            "created_at": "2026-07-01T18:53:38Z",
+            "payload": {"head": "abc123", "commits": [{"message": "新增流式卡片"}]},
+        }
+        private_event = {
+            "id": "private-example/project-history-abc123",
+            "type": "PushEvent",
+            "repo": {"name": "example/project-history"},
+            "created_at": "2026-07-01T18:53:29Z",
+            "payload": {"head": "abc123", "commits": [{"message": "新增流式卡片"}]},
+        }
+        unique = github_client.dedupe_events([public_event, private_event])
+        self.assertEqual(len(unique), 1)
+        self.assertEqual(github_client.event_fingerprint(public_event), "push:abc123")
+
+    def test_state_filters_duplicate_push_fingerprints_in_same_batch(self):
+        state_obj = {"processed_event_ids": [], "processed_event_fingerprints": [], "last_event_time": None}
+        events = [
+            {
+                "id": "public-1",
+                "type": "PushEvent",
+                "created_at": "2026-07-01T18:53:38Z",
+                "payload": {"head": "abc123"},
+            },
+            {
+                "id": "private-1",
+                "type": "PushEvent",
+                "created_at": "2026-07-01T18:53:29Z",
+                "payload": {"head": "abc123"},
+            },
+        ]
+        self.assertEqual(len(state.filter_new_events(events, state_obj)), 1)
 
     def test_tool_intent_separates_status_from_github(self):
         self.assertEqual(_classify_tool_intent("三哥最近活动", "舒舒"), "status")
@@ -641,243 +678,6 @@ class BotRegressionTests(unittest.TestCase):
         s = {"proactive_topic_sent_dates": {"2026-07-02": 1}}
         self.assertFalse(state.can_send_proactive_today(s, "2026-07-02", 1))
         self.assertTrue(state.can_send_proactive_today(s, "2026-07-02", 2))
-
-    def test_love_note_markdown_to_docx_blocks(self):
-        blocks = love_note.markdown_to_docx_blocks(
-            "## 2026-07-01\n\n### 今天的小事\n- 舒舒说下雨像云雾。\n> 想坐你旁边看你敲电脑"
-        )
-        self.assertEqual(blocks[0]["block_type"], 3)
-        self.assertEqual(blocks[1]["block_type"], 4)
-        self.assertEqual(blocks[2]["block_type"], 12)
-        self.assertEqual(blocks[3]["block_type"], 2)
-        assert_public_text_clean(blocks)
-
-    def test_love_note_source_trims_generated_summary_tail(self):
-        source = "\n".join([
-            "和舒舒的恋爱笔记",
-            "今天一起研究飞书。",
-            "每日总结 2026-07-01",
-            "文档里记录的小事",
-            "这段是机器人已经生成过的总结。",
-        ])
-        trimmed = love_note._trim_document_source(source)
-        self.assertIn("今天一起研究飞书", trimmed)
-        self.assertNotIn("机器人已经生成过", trimmed)
-
-    def test_love_note_comment_anchor_can_use_middle_sweet_block(self):
-        blocks = [
-            {"block_id": "root", "page": {"elements": []}},
-            {
-                "block_id": "a",
-                "text": {"elements": [{"text_run": {"content": "第一段普通内容"}}]},
-            },
-            {
-                "block_id": "sweet",
-                "text": {"elements": [{"text_run": {"content": "想和舒舒一起出去玩儿，想永远陪在舒舒身边"}}]},
-            },
-            {"block_id": "image", "image": {"token": "img"}},
-            {
-                "block_id": "blank",
-                "text": {"elements": [{"text_run": {"content": ""}}]},
-            },
-            {
-                "block_id": "b",
-                "text": {"elements": [{"text_run": {"content": "最后一段"}}]},
-            },
-        ]
-        with patch.object(love_note, "get_docx_blocks", return_value=blocks), patch.object(
-            love_note,
-            "_pick_anchor_with_deepseek",
-            return_value="",
-        ):
-            self.assertEqual(love_note.pick_love_note_comment_anchor("doc", "这也太甜了"), "sweet")
-
-    def test_love_note_comment_anchor_accepts_model_middle_choice(self):
-        blocks = [
-            {
-                "block_id": "a",
-                "text": {"elements": [{"text_run": {"content": "第一段"}}]},
-            },
-            {
-                "block_id": "middle",
-                "text": {"elements": [{"text_run": {"content": "中间这一段最适合评论"}}]},
-            },
-            {
-                "block_id": "b",
-                "text": {"elements": [{"text_run": {"content": "最后一段"}}]},
-            },
-        ]
-        with patch.object(love_note, "get_docx_blocks", return_value=blocks), patch.object(
-            love_note,
-            "_pick_anchor_with_deepseek",
-            return_value="middle",
-        ):
-            self.assertEqual(love_note.pick_love_note_comment_anchor("doc", "短评"), "middle")
-
-    def test_love_note_anchor_candidates_skip_commented_blocks_first(self):
-        blocks = [
-            {
-                "block_id": "commented",
-                "comment_ids": ["c1"],
-                "text": {"elements": [{"text_run": {"content": "已经评论过"}}]},
-            },
-            {
-                "block_id": "fresh",
-                "text": {"elements": [{"text_run": {"content": "还没评论"}}]},
-            },
-        ]
-        self.assertEqual(
-            love_note._comment_anchor_candidates(blocks),
-            [{"block_id": "fresh", "text": "还没评论"}],
-        )
-
-    def test_love_note_anchor_candidates_fallback_when_all_commented(self):
-        blocks = [
-            {
-                "block_id": "commented",
-                "comment_ids": ["c1"],
-                "text": {"elements": [{"text_run": {"content": "已经评论过"}}]},
-            },
-        ]
-        self.assertEqual(
-            love_note._comment_anchor_candidates(blocks),
-            [{"block_id": "commented", "text": "已经评论过"}],
-        )
-
-    def test_love_note_comment_elements_escape_and_chunk_text(self):
-        elements = love_note._comment_text_elements("<" + "a" * 1200 + ">")
-        self.assertGreater(len(elements), 1)
-        self.assertTrue(all(item["type"] == "text" for item in elements))
-        self.assertTrue(all(len(item["text"]) <= 900 for item in elements))
-        joined = "".join(item["text"] for item in elements)
-        self.assertIn("&lt;", joined)
-        self.assertIn("&gt;", joined)
-
-    def test_love_note_prompt_is_reaction_not_structured_summary(self):
-        source = love_note.generate_love_note_reaction.__code__.co_consts
-        prompt_text = "\n".join(str(item) for item in source if isinstance(item, str))
-        self.assertIn("嗑糖短评", prompt_text)
-        self.assertIn("不要标题、不要分节、不要列表", prompt_text)
-        self.assertIn("不要出现“每日总结”", prompt_text)
-
-    def test_love_note_rejects_summary_template_comments(self):
-        self.assertFalse(love_note._is_acceptable_reaction("## 每日总结\n### 三哥该记得"))
-        self.assertTrue(love_note._is_acceptable_reaction("这段也太甜了，隔着屏幕都能看见两个人的小心思。"))
-
-    def test_love_note_first_run_sets_baseline_without_commenting(self):
-        state_obj = {}
-        blocks = [
-            {"block_id": "a", "text": {"elements": [{"text_run": {"content": "旧内容"}}]}},
-        ]
-        with patch.object(love_note, "load_state", return_value=state_obj), patch.object(
-            love_note,
-            "save_state",
-        ) as save_mock, patch.object(
-            love_note,
-            "get_docx_document",
-            return_value={"revision_id": 10},
-        ), patch.object(
-            love_note,
-            "get_docx_blocks",
-            return_value=blocks,
-        ), patch.object(
-            love_note,
-            "create_docx_comment",
-        ) as create_mock, patch.object(
-            love_note,
-            "LOVE_NOTE_DOC_TOKEN",
-            "doc",
-        ):
-            result = love_note.run_daily_love_note()
-        self.assertIn("已建立恋爱笔记增量基线", result)
-        self.assertEqual(state_obj["love_note_seen_block_ids"], ["a"])
-        self.assertEqual(state_obj["love_note_last_revision_id"], 10)
-        create_mock.assert_not_called()
-        save_mock.assert_called_once()
-
-    def test_love_note_no_new_blocks_does_not_comment(self):
-        state_obj = {"love_note_seen_block_ids": ["a"], "love_note_daily_comment_counts": {}}
-        blocks = [
-            {"block_id": "a", "text": {"elements": [{"text_run": {"content": "旧内容"}}]}},
-        ]
-        with patch.object(love_note, "load_state", return_value=state_obj), patch.object(
-            love_note,
-            "save_state",
-        ), patch.object(
-            love_note,
-            "get_docx_document",
-            return_value={"revision_id": 11},
-        ), patch.object(
-            love_note,
-            "get_docx_blocks",
-            return_value=blocks,
-        ), patch.object(
-            love_note,
-            "create_docx_comment",
-        ) as create_mock, patch.object(
-            love_note,
-            "LOVE_NOTE_DOC_TOKEN",
-            "doc",
-        ):
-            result = love_note.run_daily_love_note()
-        self.assertIn("没有新增正文", result)
-        create_mock.assert_not_called()
-
-    def test_love_note_daily_limit_is_two(self):
-        state_obj = {"love_note_seen_block_ids": ["old"], "love_note_daily_comment_counts": {}}
-        blocks = [
-            {"block_id": "old", "text": {"elements": [{"text_run": {"content": "旧内容"}}]}},
-            {"block_id": "n1", "text": {"elements": [{"text_run": {"content": "新内容一"}}]}},
-            {"block_id": "n2", "text": {"elements": [{"text_run": {"content": "新内容二"}}]}},
-            {"block_id": "n3", "text": {"elements": [{"text_run": {"content": "新内容三"}}]}},
-        ]
-        reactions = [
-            {"block_id": "n1", "comment": "第一条甜甜的短评"},
-            {"block_id": "n2", "comment": "第二条甜甜的短评"},
-            {"block_id": "n3", "comment": "第三条不应该发送"},
-        ]
-        with patch.object(love_note, "load_state", return_value=state_obj), patch.object(
-            love_note,
-            "save_state",
-        ), patch.object(
-            love_note,
-            "get_docx_document",
-            return_value={"revision_id": 12},
-        ), patch.object(
-            love_note,
-            "get_docx_blocks",
-            return_value=blocks,
-        ), patch.object(
-            love_note,
-            "generate_love_note_reactions",
-            return_value=reactions,
-        ), patch.object(
-            love_note,
-            "create_docx_comment",
-            return_value={"data": {"comment_id": "c", "reply_id": "r"}},
-        ) as create_mock, patch.object(
-            love_note,
-            "LOVE_NOTE_DOC_TOKEN",
-            "doc",
-        ):
-            result = love_note.run_daily_love_note(target_date=love_note.datetime(2026, 7, 2, tzinfo=love_note._SHANGHAI))
-        self.assertIn("第一条", result)
-        self.assertEqual(create_mock.call_count, 2)
-        self.assertEqual(state_obj["love_note_daily_comment_counts"]["2026-07-02"], 2)
-
-    def test_hide_love_note_comment_falls_back_to_solved(self):
-        with patch.object(love_note, "_delete_comment_reply", return_value={"ok": False}), patch.object(
-            love_note,
-            "_mark_comment_solved",
-            return_value={"ok": True},
-        ) as solved_mock, patch.object(
-            love_note,
-            "LOVE_NOTE_DOC_TOKEN",
-            "doc",
-        ):
-            self.assertTrue(love_note.hide_love_note_comment("c1", "r1").get("ok"))
-        solved_mock.assert_called_once_with("doc", "c1")
-
 
 if __name__ == "__main__":
     unittest.main()

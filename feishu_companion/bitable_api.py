@@ -17,7 +17,7 @@ from lark_oapi.api.bitable.v1 import (
     AppTableRecord,
 )
 
-from config import FEISHU_APP_ID, FEISHU_APP_SECRET, MEMORY_DIR
+from feishu_companion.config import FEISHU_APP_ID, FEISHU_APP_SECRET, MEMORY_DIR
 
 _OPEN_API_BASE = "https://open.feishu.cn/open-apis"
 _STATE_FILE = str(MEMORY_DIR / "bitable_state.json")
@@ -264,7 +264,7 @@ def _get_repo_desc(repo: str) -> str:
     if repo in _repo_desc_cache:
         return _repo_desc_cache[repo]
 
-    from config import GITHUB_TOKEN
+    from feishu_companion.config import GITHUB_TOKEN
     try:
         resp = requests.get(
             f"https://api.github.com/repos/{repo}",

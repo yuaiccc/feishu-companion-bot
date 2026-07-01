@@ -7,7 +7,7 @@ from pathlib import Path
 
 import requests
 
-from config import (
+from feishu_companion.config import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
@@ -20,9 +20,9 @@ from config import (
     MEMORY_OLLAMA_EMBED_MODEL,
     OPENCLAW_SEARCH_TIMEOUT_SECONDS,
 )
-from external_search import _resolve_deerflow_python, _resolve_openclaw_cli
-from local_apps import get_presence_summary
-from memory import _load_all
+from feishu_companion.external_search import _resolve_deerflow_python, _resolve_openclaw_cli
+from feishu_companion.local_apps import get_presence_summary
+from feishu_companion.memory import _load_all
 
 
 def build_health_card() -> dict:

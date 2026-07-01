@@ -1,7 +1,7 @@
 """飞书消息模块：使用飞书卡片原生 table 组件构建 commit 表格。"""
 from datetime import datetime, timezone, timedelta
-from commit_text import brief_commit_messages, summarize_commit_activity, summarize_star_activity
-from profile import owner_name
+from feishu_companion.commit_text import brief_commit_messages, summarize_commit_activity, summarize_star_activity
+from feishu_companion.profile import owner_name
 
 _SHANGHAI = timezone(timedelta(hours=8))
 
@@ -39,7 +39,7 @@ def _get_repo_desc(repo: str) -> str:
     # 2. 查 GitHub API 的 description
     try:
         import requests
-        from config import GITHUB_TOKEN
+        from feishu_companion.config import GITHUB_TOKEN
         resp = requests.get(
             f"https://api.github.com/repos/{repo}",
             headers={"Authorization": f"token {GITHUB_TOKEN}"},

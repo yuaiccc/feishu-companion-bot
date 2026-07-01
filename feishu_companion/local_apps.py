@@ -4,7 +4,7 @@
 import re
 import subprocess
 
-from profile import owner_name
+from feishu_companion.profile import owner_name
 
 
 def get_frontmost_app() -> str:

@@ -1,7 +1,7 @@
 """本地状态持久化：记录已处理事件、消息和旁听话题，避免重复汇报。"""
 import json
 import time
-from config import STATE_FILE
+from feishu_companion.config import STATE_FILE
 
 _MAX_PROCESSED = 500  # 最多保留 500 条已处理 ID
 
@@ -13,6 +13,7 @@ def load_state() -> dict:
     return {
         "last_event_time": None,
         "processed_event_ids": [],
+        "processed_event_fingerprints": [],
         "processed_shushu_message_ids": [],
         "passive_processed_message_ids": [],
         "passive_topic_timestamps": {},
@@ -31,37 +32,55 @@ def save_state(state: dict) -> None:
 # ---- GitHub 事件去重 ----
 
 def filter_new_events(events: list[dict], state: dict) -> list[dict]:
-    """返回尚未处理过的新事件（按 event id 和时间戳双重去重）。"""
+    """返回尚未处理过的新事件（按 event id、指纹和时间戳去重）。"""
+    from feishu_companion.github_client import event_fingerprint
+
     processed_ids = set(state.get("processed_event_ids", []))
+    processed_fingerprints = set(state.get("processed_event_fingerprints", []))
     last_time = state.get("last_event_time")
 
     new_events = []
+    batch_fingerprints = set()
     for ev in events:
         ev_id = ev.get("id", "")
         created_at = ev.get("created_at", "")
+        fingerprint = event_fingerprint(ev)
 
         if ev_id and ev_id in processed_ids:
             continue
+        if fingerprint and fingerprint in processed_fingerprints:
+            continue
+        if fingerprint and fingerprint in batch_fingerprints:
+            continue
         if last_time and created_at and created_at <= last_time:
             continue
+        if fingerprint:
+            batch_fingerprints.add(fingerprint)
         new_events.append(ev)
     return new_events
 
 
 def update_state(state: dict, new_events: list[dict]) -> None:
     """将新事件写入状态文件。"""
+    from feishu_companion.github_client import event_fingerprint
+
     processed_ids = list(state.get("processed_event_ids", []))
+    processed_fingerprints = list(state.get("processed_event_fingerprints", []))
     latest_time = state.get("last_event_time")
 
     for ev in new_events:
         ev_id = ev.get("id", "")
         if ev_id and ev_id not in processed_ids:
             processed_ids.append(ev_id)
+        fingerprint = event_fingerprint(ev)
+        if fingerprint and fingerprint not in processed_fingerprints:
+            processed_fingerprints.append(fingerprint)
         created_at = ev.get("created_at", "")
         if created_at and (not latest_time or created_at > latest_time):
             latest_time = created_at
 
     state["processed_event_ids"] = processed_ids[-_MAX_PROCESSED:]
+    state["processed_event_fingerprints"] = processed_fingerprints[-_MAX_PROCESSED:]
     state["last_event_time"] = latest_time
     save_state(state)
 

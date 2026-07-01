@@ -7,16 +7,16 @@ import threading
 import time
 from dataclasses import dataclass
 
-from config import (
+from feishu_companion.config import (
     PASSIVE_ASSIST_ENABLED,
     PASSIVE_ASSIST_MAX_PER_HOUR,
     PASSIVE_ASSIST_QUIET_SECONDS,
     PASSIVE_ASSIST_RECENT_WINDOW_SECONDS,
     PASSIVE_ASSIST_TOPIC_COOLDOWN_SECONDS,
 )
-from external_search import build_external_search_card
-from feishu_api import send_card
-from state import (
+from feishu_companion.external_search import build_external_search_card
+from feishu_companion.feishu_api import send_card
+from feishu_companion.state import (
     can_send_passive_now,
     is_passive_message_processed,
     is_passive_topic_in_cooldown,

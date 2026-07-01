@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 
-from config import (
+from feishu_companion.config import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
@@ -18,12 +18,12 @@ from config import (
     PROACTIVE_TOPIC_MAX_PER_DAY,
     PROACTIVE_TOPIC_QUIET_SECONDS,
 )
-from feishu_api import fetch_chat_messages, send_text
-from local_apps import get_local_status_summary
-from memory import search_memories
-from profile import owner_name, target_name
-from state import can_send_proactive_today, load_state, mark_proactive_sent
-from text_safety import sanitize_public_text
+from feishu_companion.feishu_api import fetch_chat_messages, send_text
+from feishu_companion.local_apps import get_local_status_summary
+from feishu_companion.memory import search_memories
+from feishu_companion.profile import owner_name, target_name
+from feishu_companion.state import can_send_proactive_today, load_state, mark_proactive_sent
+from feishu_companion.text_safety import sanitize_public_text
 
 _SHANGHAI = timezone(timedelta(hours=8))
 
