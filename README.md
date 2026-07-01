@@ -87,7 +87,7 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 
 记忆检索是隐私优先的 hybrid / agentic RAG：
 
-- embedding 使用本地哈希向量，不调用第三方 embedding API。
+- embedding 默认使用本地哈希向量，不调用第三方 embedding API；本机部署可以设置 `MEMORY_EMBEDDING_PROVIDER=ollama` 并使用 `qwen3-embedding:0.6b`。
 - 先做本地关键词 + embedding 召回，再把候选记忆按 `visibility` 过滤。
 - 给目标用户回复时只允许注入 `public_to_target`；给 owner 回复时可注入 `owner_only`；`private` 永不注入 prompt。
 - Agentic rerank 只在过滤后的候选记忆里调用 DeepSeek 选择最终上下文，避免把敏感记忆发给模型。

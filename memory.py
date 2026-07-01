@@ -16,6 +16,8 @@ from config import (
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL,
     MEMORY_ENABLED, MEMORY_DIR, MEMORY_EMBEDDING_ENABLED,
     MEMORY_AGENTIC_RAG_ENABLED, MEMORY_EMBEDDING_DIM, MEMORY_RAG_CANDIDATES,
+    MEMORY_EMBEDDING_PROVIDER, MEMORY_OLLAMA_BASE_URL,
+    MEMORY_OLLAMA_EMBED_MODEL, MEMORY_OLLAMA_TIMEOUT_SECONDS,
 )
 from profile import memory_category_keywords, profile_id
 
@@ -23,7 +25,9 @@ import requests
 
 _MEMORY_FILE = None
 _MAX_MEMORIES = int(os.getenv("MEMORY_MAX_ITEMS", "200"))
-_EMBEDDING_MODEL = "local-hash-ngram-v1"
+_HASH_EMBEDDING_MODEL = "local-hash-ngram-v1"
+_LAST_EMBEDDING_MODEL = _HASH_EMBEDDING_MODEL
+_OLLAMA_FAILED = False
 _VISIBILITY_PUBLIC = "public_to_target"
 _VISIBILITY_OWNER = "owner_only"
 _VISIBILITY_PRIVATE = "private"
@@ -114,9 +118,13 @@ def _normalize_memory_entry(mem: dict, idx: int = 0) -> dict:
     mem["time"] = mem.get("time") or now
     mem["last_seen"] = mem.get("last_seen") or mem.get("time") or now
     mem["seen_count"] = int(mem.get("seen_count") or 1)
-    mem["embedding_model"] = mem.get("embedding_model") or _EMBEDDING_MODEL
-    if MEMORY_EMBEDDING_ENABLED and not _valid_embedding(mem.get("embedding")):
+    mem["embedding_model"] = mem.get("embedding_model") or _HASH_EMBEDDING_MODEL
+    if MEMORY_EMBEDDING_ENABLED and (
+        not _valid_embedding(mem.get("embedding"))
+        or mem.get("embedding_model") != _current_embedding_model()
+    ):
         mem["embedding"] = _embed_text(content)
+        mem["embedding_model"] = _last_embedding_model()
     if "source_messages" in mem:
         mem["source_messages"] = _redact_source_messages(mem.get("source_messages") or [])
     return mem
@@ -179,7 +187,7 @@ def _merge_memory(existing: dict, fact: str, now: str, messages: list[dict]):
     existing["confidence"] = max(float(existing.get("confidence", 0.7)), 0.75)
     if MEMORY_EMBEDDING_ENABLED:
         existing["embedding"] = _embed_text(existing.get("content", ""))
-        existing["embedding_model"] = _EMBEDDING_MODEL
+        existing["embedding_model"] = _last_embedding_model()
     existing["source_messages"] = _redact_source_messages(messages)
 
 
@@ -281,6 +289,41 @@ def _keyword_score(query: str, text: str) -> float:
 
 
 def _embed_text(text: str) -> list[float]:
+    """Create an embedding with the configured provider, falling back locally."""
+    global _LAST_EMBEDDING_MODEL, _OLLAMA_FAILED
+    if MEMORY_EMBEDDING_PROVIDER == "ollama" and not _OLLAMA_FAILED:
+        embedding = _embed_with_ollama(text)
+        if embedding:
+            _LAST_EMBEDDING_MODEL = _current_embedding_model()
+            return embedding
+        _OLLAMA_FAILED = True
+
+    _LAST_EMBEDDING_MODEL = _HASH_EMBEDDING_MODEL
+    return _embed_text_hash(text)
+
+
+def _embed_with_ollama(text: str) -> list[float]:
+    if not text:
+        return []
+    try:
+        session = requests.Session()
+        session.trust_env = False
+        resp = session.post(
+            f"{MEMORY_OLLAMA_BASE_URL}/api/embed",
+            json={"model": MEMORY_OLLAMA_EMBED_MODEL, "input": text},
+            timeout=MEMORY_OLLAMA_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        embeddings = data.get("embeddings") or []
+        if embeddings and isinstance(embeddings[0], list):
+            return _normalize_vector([float(v) for v in embeddings[0]])
+    except Exception as e:
+        print(f"  [memory] Ollama embedding 失败，回退本地哈希: {e}", flush=True)
+    return []
+
+
+def _embed_text_hash(text: str) -> list[float]:
     """Create a deterministic local embedding from character ngrams."""
     dim = max(int(MEMORY_EMBEDDING_DIM or 256), 32)
     vec = [0.0] * dim
@@ -302,6 +345,10 @@ def _embed_text(text: str) -> list[float]:
         weight = 1.4 if len(gram) >= 2 else 0.7
         vec[bucket] += sign * weight
 
+    return _normalize_vector(vec)
+
+
+def _normalize_vector(vec: list[float]) -> list[float]:
     norm = math.sqrt(sum(v * v for v in vec))
     if norm <= 0:
         return vec
@@ -309,7 +356,17 @@ def _embed_text(text: str) -> list[float]:
 
 
 def _valid_embedding(value) -> bool:
-    return isinstance(value, list) and len(value) == max(int(MEMORY_EMBEDDING_DIM or 256), 32)
+    return isinstance(value, list) and len(value) > 0
+
+
+def _current_embedding_model() -> str:
+    if MEMORY_EMBEDDING_PROVIDER == "ollama":
+        return f"ollama:{MEMORY_OLLAMA_EMBED_MODEL}"
+    return _HASH_EMBEDDING_MODEL
+
+
+def _last_embedding_model() -> str:
+    return _LAST_EMBEDDING_MODEL
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -384,10 +441,11 @@ def add_memories(messages: list[dict], user_id: str = "shushu_chat") -> list:
             "time": now,
             "last_seen": now,
             "seen_count": 1,
-            "embedding_model": _EMBEDDING_MODEL,
+            "embedding_model": "",
             "embedding": _embed_text(fact) if MEMORY_EMBEDDING_ENABLED else [],
             "source_messages": _redact_source_messages(messages),
         }
+        entry["embedding_model"] = _last_embedding_model() if MEMORY_EMBEDDING_ENABLED else ""
         new_entries.append(entry)
         all_memories.append(entry)
         normalized_index[normalized] = entry

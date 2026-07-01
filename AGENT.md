@@ -248,7 +248,7 @@ GitHub 活动卡片不要生成顶部大段 DeepSeek 总结，只展示表格和
 ### 19. 记忆系统要轻量但可控
 `memory.py` 继续使用本地 JSON，不要引入重型向量库或第三方记忆 SaaS 作为默认依赖。记忆文件按 profile 隔离：`memory_data/<PROFILE_ID>/memories.json`；首次迁移时可从旧的 `memory_data/memories.json` 自动复制。新增记忆要包含 `category`、`importance`、`last_seen`、`seen_count`、`visibility`、`confidence`、`embedding`，同义或包含关系的重复事实应该合并，避免一问一答把同一件事刷成几十条。`MEMORY_MAX_ITEMS` 默认 200，裁剪时优先保留重要度高、重复出现、最近出现的记忆。
 
-记忆检索是 privacy-first hybrid / agentic RAG：本地哈希 embedding + 关键词先召回，再按受众过滤，最后才允许 DeepSeek 在候选里 rerank。`visibility=public_to_target` 可以给舒舒/目标用户上下文；`owner_only` 只能给 owner；`private` 永不注入任何回复 prompt。不要把 `memory_data/`、源消息原文、token、住址等敏感数据提交或发送给第三方 embedding 服务。
+记忆检索是 privacy-first hybrid / agentic RAG：embedding + 关键词先召回，再按受众过滤，最后才允许 DeepSeek 在候选里 rerank。默认开源配置用本地哈希 embedding；当前本机部署可以用 Ollama `qwen3-embedding:0.6b`，仍然只调用 `127.0.0.1`。`visibility=public_to_target` 可以给舒舒/目标用户上下文；`owner_only` 只能给 owner；`private` 永不注入任何回复 prompt。不要把 `memory_data/`、源消息原文、token、住址等敏感数据提交或发送给第三方 embedding 服务。
 
 ### 20. Profile 是开源复用边界
 `profiles/default.json` 是通用模板，`profiles/sange-shushu.json` 是当前项目配置。新增关系、人设、称呼、记忆关键词时优先改 profile，不要把真实姓名、昵称或关系写死进 `summarizer.py` / `memory.py`。prompt 里需要用 `profile.py` 暴露的 `owner_name()`、`target_name()`、`bot_role()`、`relationship_context()` 等函数。

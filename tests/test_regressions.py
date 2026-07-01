@@ -193,6 +193,10 @@ class BotRegressionTests(unittest.TestCase):
             memory,
             "MEMORY_AGENTIC_RAG_ENABLED",
             False,
+        ), patch.object(
+            memory,
+            "MEMORY_EMBEDDING_PROVIDER",
+            "local_hash",
         ):
             target_results = memory.search_memories("住哪里 不加糖", audience="target", top_k=5)
             owner_results = memory.search_memories("住哪里 不加糖", audience="owner", top_k=5)
@@ -202,11 +206,12 @@ class BotRegressionTests(unittest.TestCase):
         self.assertNotIn("三哥家住某某小区 71 栋 3 单元。", owner_results)
 
     def test_memory_entry_gets_local_embedding_and_visibility(self):
-        entry = memory._normalize_memory_entry({"content": "舒舒喜欢晚上散步。"}, 1)
+        with patch.object(memory, "MEMORY_EMBEDDING_PROVIDER", "local_hash"):
+            entry = memory._normalize_memory_entry({"content": "舒舒喜欢晚上散步。"}, 1)
+            private_entry = memory._normalize_memory_entry({"content": "家住某某小区 71 栋 3 单元。"}, 2)
         self.assertEqual(entry["visibility"], "public_to_target")
         self.assertEqual(entry["embedding_model"], "local-hash-ngram-v1")
         self.assertEqual(len(entry["embedding"]), memory.MEMORY_EMBEDDING_DIM)
-        private_entry = memory._normalize_memory_entry({"content": "家住某某小区 71 栋 3 单元。"}, 2)
         self.assertEqual(private_entry["visibility"], "private")
 
     def test_call_notes_context_uses_summary_cache_shape(self):
