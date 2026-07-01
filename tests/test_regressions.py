@@ -506,6 +506,7 @@ class BotRegressionTests(unittest.TestCase):
             [b["value"]["action"] for b in buttons],
             ["rephrase", "continue", "remember", "forget"],
         )
+        self.assertEqual(len({b["name"] for b in buttons}), len(buttons))
 
     def test_reply_context_is_bounded_and_auditable(self):
         messages = [

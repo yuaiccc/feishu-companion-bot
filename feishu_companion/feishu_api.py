@@ -525,7 +525,7 @@ def _streaming_action_button(label: str, action: str, button_type: str = "defaul
         "text": {"tag": "plain_text", "content": label},
         "type": button_type,
         "width": "default",
-        "name": "streaming_reply_action",
+        "name": f"streaming_reply_{action}",
         "value": {"action": action},
     }
 
