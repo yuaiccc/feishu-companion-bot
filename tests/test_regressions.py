@@ -267,6 +267,36 @@ class BotRegressionTests(unittest.TestCase):
         ):
             self.assertEqual(love_note.pick_love_note_comment_anchor("doc", "短评"), "middle")
 
+    def test_love_note_anchor_candidates_skip_commented_blocks_first(self):
+        blocks = [
+            {
+                "block_id": "commented",
+                "comment_ids": ["c1"],
+                "text": {"elements": [{"text_run": {"content": "已经评论过"}}]},
+            },
+            {
+                "block_id": "fresh",
+                "text": {"elements": [{"text_run": {"content": "还没评论"}}]},
+            },
+        ]
+        self.assertEqual(
+            love_note._comment_anchor_candidates(blocks),
+            [{"block_id": "fresh", "text": "还没评论"}],
+        )
+
+    def test_love_note_anchor_candidates_fallback_when_all_commented(self):
+        blocks = [
+            {
+                "block_id": "commented",
+                "comment_ids": ["c1"],
+                "text": {"elements": [{"text_run": {"content": "已经评论过"}}]},
+            },
+        ]
+        self.assertEqual(
+            love_note._comment_anchor_candidates(blocks),
+            [{"block_id": "commented", "text": "已经评论过"}],
+        )
+
     def test_love_note_comment_elements_escape_and_chunk_text(self):
         elements = love_note._comment_text_elements("<" + "a" * 1200 + ">")
         self.assertGreater(len(elements), 1)

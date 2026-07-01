@@ -315,8 +315,17 @@ def _block_plain_text(block: dict) -> str:
 
 
 def _comment_anchor_candidates(blocks: list[dict]) -> list[dict]:
+    candidates = _comment_anchor_candidates_from_blocks(blocks, skip_commented=True)
+    if candidates:
+        return candidates
+    return _comment_anchor_candidates_from_blocks(blocks, skip_commented=False)
+
+
+def _comment_anchor_candidates_from_blocks(blocks: list[dict], skip_commented: bool) -> list[dict]:
     candidates = []
     for block in blocks:
+        if skip_commented and block.get("comment_ids"):
+            continue
         text = sanitize_public_text(_block_plain_text(block)).strip()
         block_id = block.get("block_id", "")
         if not block_id or not text:
