@@ -233,6 +233,111 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(result["merged"], 1)
         save_mock.assert_called_once()
 
+    def test_memory_write_low_confidence_requires_confirmation(self):
+        decision = memory._normalize_write_decision(
+            {
+                "action": "create",
+                "content": "舒舒可能喜欢某种饮料。",
+                "category": "preference",
+                "visibility": "public_to_target",
+                "confidence": 0.2,
+            },
+            "舒舒可能喜欢某种饮料。",
+            "preference",
+            "public_to_target",
+        )
+        self.assertEqual(decision["action"], "confirm")
+
+    def test_private_memory_write_policy_stays_local(self):
+        with patch.object(memory.requests, "post") as post_mock:
+            decision = memory._decide_memory_write("三哥家住某某小区 71 栋 3 单元。", [])
+        post_mock.assert_not_called()
+        self.assertEqual(decision["action"], "create")
+        self.assertEqual(decision["visibility"], "private")
+
+    def test_add_memories_honors_agentic_create_and_ignore(self):
+        saved = {}
+
+        def capture(memories):
+            saved["memories"] = memories
+
+        decisions = [
+            {"action": "ignore", "reason": "寒暄"},
+            {
+                "action": "create",
+                "content": "舒舒喜欢不加糖的东方树叶。",
+                "category": "preference",
+                "visibility": "public_to_target",
+                "confidence": 0.92,
+            },
+        ]
+        with patch.object(memory, "_extract_facts", return_value=["你好", "舒舒喜欢不加糖的东方树叶。"]), patch.object(
+            memory,
+            "_load_all",
+            return_value=[],
+        ), patch.object(
+            memory,
+            "_save_all",
+            side_effect=capture,
+        ), patch.object(
+            memory,
+            "_decide_memory_write",
+            side_effect=decisions,
+        ), patch.object(
+            memory,
+            "MEMORY_EMBEDDING_PROVIDER",
+            "local_hash",
+        ):
+            new_entries = memory.add_memories([{"time": "10:00", "sender": "舒舒", "content": "你好"}])
+        self.assertEqual(len(new_entries), 1)
+        self.assertEqual(saved["memories"][0]["content"], "舒舒喜欢不加糖的东方树叶。")
+        self.assertEqual(saved["memories"][0]["source_type"], "agentic_write")
+
+    def test_add_memories_honors_agentic_update(self):
+        existing = [{
+            "id": "m1",
+            "content": "舒舒喜欢东方树叶。",
+            "category": "preference",
+            "visibility": "public_to_target",
+            "importance": 3,
+            "confidence": 0.8,
+            "seen_count": 1,
+        }]
+        saved = {}
+
+        def capture(memories):
+            saved["memories"] = memories
+
+        with patch.object(memory, "_extract_facts", return_value=["舒舒喜欢不加糖的东方树叶。"]), patch.object(
+            memory,
+            "_load_all",
+            return_value=existing,
+        ), patch.object(
+            memory,
+            "_save_all",
+            side_effect=capture,
+        ), patch.object(
+            memory,
+            "_decide_memory_write",
+            return_value={
+                "action": "update",
+                "target_id": "m1",
+                "content": "舒舒喜欢不加糖的东方树叶。",
+                "category": "preference",
+                "visibility": "public_to_target",
+                "confidence": 0.9,
+            },
+        ), patch.object(
+            memory,
+            "MEMORY_EMBEDDING_PROVIDER",
+            "local_hash",
+        ):
+            new_entries = memory.add_memories([{"time": "10:00", "sender": "舒舒", "content": "喜欢不加糖"}])
+        self.assertEqual(new_entries, [])
+        self.assertEqual(len(saved["memories"]), 1)
+        self.assertEqual(saved["memories"][0]["content"], "舒舒喜欢不加糖的东方树叶。")
+        self.assertEqual(saved["memories"][0]["seen_count"], 2)
+
     def test_search_interaction_writes_compact_interest_memory(self):
         with patch.object(memory, "add_manual_memory") as add_mock:
             external_search.remember_search_interaction(

@@ -15,7 +15,8 @@ from datetime import datetime
 from config import (
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL,
     MEMORY_ENABLED, MEMORY_DIR, MEMORY_EMBEDDING_ENABLED,
-    MEMORY_AGENTIC_RAG_ENABLED, MEMORY_EMBEDDING_DIM, MEMORY_RAG_CANDIDATES,
+    MEMORY_AGENTIC_RAG_ENABLED, MEMORY_AGENTIC_WRITE_ENABLED,
+    MEMORY_EMBEDDING_DIM, MEMORY_RAG_CANDIDATES,
     MEMORY_EMBEDDING_PROVIDER, MEMORY_OLLAMA_BASE_URL,
     MEMORY_OLLAMA_EMBED_MODEL, MEMORY_OLLAMA_TIMEOUT_SECONDS,
 )
@@ -31,6 +32,11 @@ _OLLAMA_FAILED = False
 _VISIBILITY_PUBLIC = "public_to_target"
 _VISIBILITY_OWNER = "owner_only"
 _VISIBILITY_PRIVATE = "private"
+_WRITE_ACTION_CREATE = "create"
+_WRITE_ACTION_UPDATE = "update"
+_WRITE_ACTION_IGNORE = "ignore"
+_WRITE_ACTION_DELETE = "delete"
+_WRITE_ACTION_CONFIRM = "confirm"
 _CATEGORY_KEYWORDS = {
     "person": ("生日", "学校", "大学", "本科", "家住", "地址", "家里", "姓名", "小名"),
     "relationship": ("想你", "爱你", "在一起", "电话", "晚安", "抱抱"),
@@ -302,6 +308,34 @@ def _merge_memory(existing: dict, fact: str, now: str, messages: list[dict]):
     existing["source_messages"] = _redact_source_messages(messages)
 
 
+def _find_duplicate_memory(normalized_index: dict[str, dict], text: str) -> dict | None:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return None
+    existing = normalized_index.get(normalized)
+    if existing:
+        return existing
+    for key, mem in normalized_index.items():
+        if normalized in key or key in normalized:
+            return mem
+    return None
+
+
+def _find_memory_by_id(memories: list[dict], memory_id: str) -> dict | None:
+    if not memory_id:
+        return None
+    for mem in memories:
+        if str(mem.get("id")) == str(memory_id):
+            return mem
+    return None
+
+
+def _delete_memory_by_id(memories: list[dict], memory_id: str) -> bool:
+    before = len(memories)
+    memories[:] = [mem for mem in memories if str(mem.get("id")) != str(memory_id)]
+    return len(memories) < before
+
+
 def _prune_memories(memories: list[dict]) -> list[dict]:
     if len(memories) <= _MAX_MEMORIES:
         return memories
@@ -380,6 +414,170 @@ def _extract_facts(messages: list[dict]) -> list[str]:
     except Exception as e:
         print(f"  [memory] 提取记忆失败: {e}", flush=True)
         return []
+
+
+def _decide_memory_write(fact: str, memories: list[dict]) -> dict:
+    """Decide create/update/ignore/delete/confirm before writing a fact."""
+    category = _categorize(fact)
+    inferred_visibility = _infer_visibility(fact, category)
+    if _is_low_value_memory(fact):
+        return {"action": _WRITE_ACTION_IGNORE, "reason": "低价值记忆"}
+    if inferred_visibility == _VISIBILITY_PRIVATE:
+        # Do not send secrets or exact private details to the agentic policy model.
+        return {
+            "action": _WRITE_ACTION_CREATE,
+            "content": fact,
+            "category": category,
+            "visibility": _VISIBILITY_PRIVATE,
+            "confidence": 0.65,
+            "reason": "本地规则判定为私密记忆",
+        }
+    if not MEMORY_AGENTIC_WRITE_ENABLED or not DEEPSEEK_API_KEY:
+        return {
+            "action": _WRITE_ACTION_CREATE,
+            "content": fact,
+            "category": category,
+            "visibility": inferred_visibility,
+            "confidence": 0.75,
+            "reason": "agentic write disabled",
+        }
+
+    candidates = _candidate_memories_for_write(fact, memories)
+    system = (
+        "你是隐私优先的长期记忆写入策略器。"
+        "请判断候选事实应该 create、update、ignore、delete 或 confirm。"
+        "只输出 JSON object，不要 markdown。"
+        "字段：action, content, category, visibility, target_id, confidence, reason。"
+        "action 只能是 create/update/ignore/delete/confirm。"
+        "category 只能是 person/relationship/preference/schedule/note。"
+        "visibility 只能是 public_to_target/owner_only/private。"
+        "原则：寒暄、一次性状态、重复问候、泛泛忙碌都 ignore；"
+        "稳定偏好、关系事实、称呼偏好、纪念日、长期雷点可以 create/update；"
+        "涉及住址、手机号、证件、密钥、token 必须 private 或 confirm；"
+        "不要编造事实，不要扩写到候选事实以外。"
+    )
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "fact": fact,
+                        "inferred_category": category,
+                        "inferred_visibility": inferred_visibility,
+                        "existing_candidates": [
+                            {
+                                "id": str(mem.get("id")),
+                                "content": mem.get("content", ""),
+                                "category": mem.get("category", "note"),
+                                "visibility": mem.get("visibility", _VISIBILITY_PUBLIC),
+                            }
+                            for mem in candidates
+                            if mem.get("visibility") != _VISIBILITY_PRIVATE
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        "temperature": 0.0,
+        "max_tokens": 220,
+    }
+    try:
+        resp = requests.post(
+            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        decision = _parse_json_object(raw)
+        return _normalize_write_decision(decision, fact, category, inferred_visibility)
+    except Exception as e:
+        print(f"  [memory] agentic write 失败，使用规则兜底: {e}", flush=True)
+        return {
+            "action": _WRITE_ACTION_CREATE,
+            "content": fact,
+            "category": category,
+            "visibility": inferred_visibility,
+            "confidence": 0.7,
+            "reason": "agentic write fallback",
+        }
+
+
+def _candidate_memories_for_write(fact: str, memories: list[dict], limit: int = 8) -> list[dict]:
+    query_embedding = _embed_text(fact) if MEMORY_EMBEDDING_ENABLED else []
+    scored = []
+    for mem in memories:
+        normalized = _normalize_memory_entry(dict(mem))
+        if normalized.get("visibility") == _VISIBILITY_PRIVATE:
+            continue
+        score = _memory_score(fact, query_embedding, normalized)
+        if score > 0:
+            scored.append((score, normalized))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return _dedupe_memory_candidates([mem for _, mem in scored[:limit]])
+
+
+def _normalize_write_decision(decision: dict, fact: str, category: str, visibility: str) -> dict:
+    if not isinstance(decision, dict):
+        decision = {}
+    action = str(decision.get("action") or _WRITE_ACTION_CREATE).lower()
+    if action not in {
+        _WRITE_ACTION_CREATE,
+        _WRITE_ACTION_UPDATE,
+        _WRITE_ACTION_IGNORE,
+        _WRITE_ACTION_DELETE,
+        _WRITE_ACTION_CONFIRM,
+    }:
+        action = _WRITE_ACTION_CREATE
+    content = str(decision.get("content") or fact).strip() or fact
+    decided_category = str(decision.get("category") or category)
+    if decided_category not in _CATEGORY_KEYWORDS and decided_category != "note":
+        decided_category = category
+    decided_visibility = _most_restrictive_visibility(
+        visibility,
+        str(decision.get("visibility") or visibility),
+        _infer_visibility(content, decided_category),
+    )
+    try:
+        confidence = float(decision.get("confidence", 0.75))
+    except (TypeError, ValueError):
+        confidence = 0.75
+    if confidence < 0.45 and action in (_WRITE_ACTION_CREATE, _WRITE_ACTION_UPDATE):
+        action = _WRITE_ACTION_CONFIRM
+    return {
+        "action": action,
+        "content": content,
+        "category": decided_category,
+        "visibility": decided_visibility,
+        "target_id": str(decision.get("target_id") or ""),
+        "confidence": max(0.0, min(confidence, 1.0)),
+        "reason": str(decision.get("reason") or ""),
+    }
+
+
+def _parse_json_object(raw: str) -> dict:
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end >= start:
+        text = text[start:end + 1]
+    try:
+        data = json.loads(text)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _keyword_score(query: str, text: str) -> float:
@@ -540,35 +738,66 @@ def add_memories(messages: list[dict], user_id: str = "shushu_chat") -> list:
         normalized = _normalize_text(fact)
         if not normalized:
             continue
-        existing = normalized_index.get(normalized)
-        if not existing:
-            for key, mem in normalized_index.items():
-                if normalized in key or key in normalized:
-                    existing = mem
-                    break
-        if existing:
-            _merge_memory(existing, fact, now, messages)
+        decision = _decide_memory_write(fact, all_memories)
+        action = decision.get("action") or _WRITE_ACTION_CREATE
+        content = (decision.get("content") or fact).strip()
+        if not content:
             continue
-        category = _categorize(fact)
-        visibility = _infer_visibility(fact, category)
+        if action in (_WRITE_ACTION_IGNORE, _WRITE_ACTION_CONFIRM):
+            continue
+        if action == _WRITE_ACTION_DELETE:
+            if _delete_memory_by_id(all_memories, decision.get("target_id", "")):
+                normalized_index = {
+                    _normalize_text(m.get("content", "")): m
+                    for m in all_memories
+                    if m.get("content")
+                }
+            continue
+
+        existing = None
+        if action == _WRITE_ACTION_UPDATE:
+            existing = _find_memory_by_id(all_memories, decision.get("target_id", ""))
+        if not existing:
+            existing = _find_duplicate_memory(normalized_index, content)
+        if existing:
+            existing["category"] = decision.get("category") or existing.get("category") or _categorize(content)
+            existing["visibility"] = _most_restrictive_visibility(
+                existing.get("visibility"),
+                decision.get("visibility"),
+                _infer_visibility(content, existing["category"]),
+            )
+            existing["confidence"] = max(
+                float(existing.get("confidence", 0.7)),
+                float(decision.get("confidence", 0.75)),
+            )
+            _merge_memory(existing, content, now, messages)
+            normalized_index[_normalize_text(existing.get("content", ""))] = existing
+            continue
+
+        category = decision.get("category") or _categorize(content)
+        visibility = _most_restrictive_visibility(
+            decision.get("visibility"),
+            _infer_visibility(content, category),
+        )
         entry = {
             "id": f"mem_{len(all_memories) + len(new_entries) + 1}",
-            "content": fact,
+            "content": content,
             "category": category,
-            "importance": _importance(fact, category),
+            "importance": _importance(content, category),
             "visibility": visibility,
-            "confidence": 0.75,
+            "confidence": float(decision.get("confidence", 0.75)),
             "time": now,
             "last_seen": now,
             "seen_count": 1,
+            "source_type": "agentic_write" if MEMORY_AGENTIC_WRITE_ENABLED else "deepseek_extract",
             "embedding_model": "",
-            "embedding": _embed_text(fact) if MEMORY_EMBEDDING_ENABLED else [],
+            "embedding": _embed_text(content) if MEMORY_EMBEDDING_ENABLED else [],
             "source_messages": _redact_source_messages(messages),
         }
         entry["embedding_model"] = _last_embedding_model() if MEMORY_EMBEDDING_ENABLED else ""
         new_entries.append(entry)
         all_memories.append(entry)
-        normalized_index[normalized] = entry
+        normalized_index[_normalize_text(content)] = entry
 
     all_memories = _prune_memories(all_memories)
     _save_all(all_memories)

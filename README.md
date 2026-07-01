@@ -86,7 +86,7 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 
 ## 记忆管理
 
-`memory.py` 仍然使用本地 JSON，默认写入 `memory_data/<PROFILE_ID>/memories.json`。新增记忆会先用 DeepSeek 抽取事实，再做归类、重要度评分、可见性判断、去重和本地 embedding；重复事实只更新 `last_seen`/`seen_count`，不会无限堆叠。默认最多保留 200 条，可用 `MEMORY_MAX_ITEMS` 调整。
+`memory.py` 仍然使用本地 JSON，默认写入 `memory_data/<PROFILE_ID>/memories.json`。新增记忆会先用 DeepSeek 抽取事实，再由 agentic write 策略判断 `create/update/ignore/delete/confirm`，最后做归类、重要度评分、可见性判断、去重和本地 embedding；重复事实只更新 `last_seen`/`seen_count`，不会无限堆叠。默认最多保留 200 条，可用 `MEMORY_MAX_ITEMS` 调整。
 
 本地维护命令：
 
@@ -101,6 +101,7 @@ python main.py --mem-clean          # 删除低价值记忆并合并重复项
 - 先做本地关键词 + embedding 召回，再把候选记忆按 `visibility` 过滤。
 - 给目标用户回复时只允许注入 `public_to_target`；给 owner 回复时可注入 `owner_only`；`private` 永不注入 prompt。
 - Agentic rerank 只在过滤后的候选记忆里调用 DeepSeek 选择最终上下文，避免把敏感记忆发给模型。
+- Agentic write 默认启用：低价值内容会被忽略，已有事实会更新，低置信或敏感边界不清的事实会进入 `confirm` 而不是自动写入。
 - `memory_data/` 已在 `.gitignore` 中，开源或推送代码时不会带上本地记忆。
 
 ## 旁听辅助

@@ -35,6 +35,7 @@ MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "true").lower() in ("true", "1", "y
 MEMORY_DIR = BASE_DIR / os.getenv("MEMORY_DIR", "memory_data")
 MEMORY_EMBEDDING_ENABLED = os.getenv("MEMORY_EMBEDDING_ENABLED", "true").lower() in ("true", "1", "yes")
 MEMORY_AGENTIC_RAG_ENABLED = os.getenv("MEMORY_AGENTIC_RAG_ENABLED", "true").lower() in ("true", "1", "yes")
+MEMORY_AGENTIC_WRITE_ENABLED = os.getenv("MEMORY_AGENTIC_WRITE_ENABLED", "true").lower() in ("true", "1", "yes")
 MEMORY_EMBEDDING_DIM = int(os.getenv("MEMORY_EMBEDDING_DIM", "256"))
 MEMORY_RAG_CANDIDATES = int(os.getenv("MEMORY_RAG_CANDIDATES", "12"))
 MEMORY_EMBEDDING_PROVIDER = os.getenv("MEMORY_EMBEDDING_PROVIDER", "local_hash").strip().lower()

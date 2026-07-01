@@ -246,7 +246,7 @@ GitHub 活动卡片不要生成顶部大段 DeepSeek 总结，只展示表格和
 `call_notes.py` 不应该把 transcript 原文整段塞给回复模型。当前流程是读取 transcript 后先整理为短摘要并写入 `call_notes_cache.json`（gitignore），摘要只保留关系上下文：舒舒最近在意/担心/开心的事、秋酿答应过或应该记得的事、相处偏好和雷点。DeepSeek 摘要失败时使用关键词 fallback 摘取相关句子。
 
 ### 19. 记忆系统要轻量但可控
-`memory.py` 继续使用本地 JSON，不要引入重型向量库或第三方记忆 SaaS 作为默认依赖。记忆文件按 profile 隔离：`memory_data/<PROFILE_ID>/memories.json`；首次迁移时可从旧的 `memory_data/memories.json` 自动复制。新增记忆要包含 `category`、`importance`、`last_seen`、`seen_count`、`visibility`、`confidence`、`embedding`，同义或包含关系的重复事实应该合并，避免一问一答把同一件事刷成几十条。`MEMORY_MAX_ITEMS` 默认 200，裁剪时优先保留重要度高、重复出现、最近出现的记忆。
+`memory.py` 继续使用本地 JSON，不要引入重型向量库或第三方记忆 SaaS 作为默认依赖。记忆文件按 profile 隔离：`memory_data/<PROFILE_ID>/memories.json`；首次迁移时可从旧的 `memory_data/memories.json` 自动复制。新增记忆要先走 agentic write 策略，判断 `create/update/ignore/delete/confirm` 后再落库；低价值内容忽略，已有事实更新，低置信或敏感边界不清的事实不要自动写入。记忆要包含 `category`、`importance`、`last_seen`、`seen_count`、`visibility`、`confidence`、`embedding`，同义或包含关系的重复事实应该合并，避免一问一答把同一件事刷成几十条。`MEMORY_MAX_ITEMS` 默认 200，裁剪时优先保留重要度高、重复出现、最近出现的记忆。
 
 记忆检索是 privacy-first hybrid / agentic RAG：embedding + 关键词先召回，再按受众过滤，最后才允许 DeepSeek 在候选里 rerank。默认开源配置用本地哈希 embedding；当前本机部署可以用 Ollama `qwen3-embedding:0.6b`，仍然只调用 `127.0.0.1`。`visibility=public_to_target` 可以给舒舒/目标用户上下文；`owner_only` 只能给 owner；`private` 永不注入任何回复 prompt。不要把 `memory_data/`、源消息原文、token、住址等敏感数据提交或发送给第三方 embedding 服务。
 
