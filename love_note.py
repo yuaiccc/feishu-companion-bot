@@ -25,36 +25,98 @@ from text_safety import sanitize_public_text
 
 _SHANGHAI = timezone(timedelta(hours=8))
 _MAX_DOCUMENT_SOURCE_CHARS = 12000
+_MAX_DAILY_LOVE_NOTE_COMMENTS = 2
 
 
 def run_daily_love_note(target_date: datetime | None = None, force: bool = False) -> str:
     """React to the configured love-note document and comment on it."""
     target_date = target_date or datetime.now(_SHANGHAI)
     date_key = target_date.strftime("%Y-%m-%d")
+    doc_token = LOVE_NOTE_DOC_TOKEN or resolve_wiki_doc_token(LOVE_NOTE_WIKI_TOKEN)
+    if not doc_token:
+        raise RuntimeError("缺少 LOVE_NOTE_DOC_TOKEN 或 LOVE_NOTE_WIKI_TOKEN")
 
     state = load_state()
-    if not force and state.get("last_love_note_date") == date_key:
-        return f"{date_key} 已经写入过恋爱笔记，跳过。"
+    daily_counts = dict(state.get("love_note_daily_comment_counts", {}) or {})
+    already_sent = int(daily_counts.get(date_key, 0) or 0)
+    remaining = _MAX_DAILY_LOVE_NOTE_COMMENTS - already_sent
+    if not force and remaining <= 0:
+        return f"{date_key} 恋爱笔记短评已达到每日上限 {_MAX_DAILY_LOVE_NOTE_COMMENTS} 条，跳过。"
 
-    source_text = fetch_love_note_content()
-    if not source_text.strip():
+    document = get_docx_document(doc_token)
+    blocks = get_docx_blocks(doc_token)
+    current_blocks = _text_block_candidates(blocks)
+    if not current_blocks:
         return f"{date_key} 没有读到可评论的文档内容，跳过。"
 
-    comment = generate_love_note_reaction(source_text, date_key)
-    add_love_note_comment(comment)
+    seen_ids = set(state.get("love_note_seen_block_ids", []) or [])
+    if not seen_ids and not force:
+        _mark_love_note_seen(state, current_blocks, document)
+        save_state(state)
+        return f"{date_key} 已建立恋爱笔记增量基线，本次不评论旧内容。"
 
+    new_blocks = [block for block in current_blocks if block["block_id"] not in seen_ids]
+    if not new_blocks:
+        _mark_love_note_seen(state, current_blocks, document)
+        save_state(state)
+        return f"{date_key} 恋爱笔记没有新增正文，不评论。"
+
+    limit = _MAX_DAILY_LOVE_NOTE_COMMENTS if force else max(0, remaining)
+    reactions = generate_love_note_reactions(new_blocks, date_key, limit=limit)
+    created = []
+    used_block_ids = set()
+    for item in reactions:
+        block_id = item.get("block_id", "")
+        comment = item.get("comment", "")
+        valid_ids = {block["block_id"] for block in new_blocks}
+        if block_id not in valid_ids or block_id in used_block_ids:
+            continue
+        if not _is_acceptable_reaction(comment):
+            continue
+        result = create_docx_comment(doc_token, block_id, comment)
+        created.append({
+            "block_id": block_id,
+            "comment": comment,
+            "comment_id": result.get("data", {}).get("comment_id", ""),
+            "reply_id": result.get("data", {}).get("reply_id", ""),
+        })
+        used_block_ids.add(block_id)
+        if len(created) >= limit:
+            break
+
+    _mark_love_note_seen(state, current_blocks, document)
+    daily_counts[date_key] = already_sent + len(created)
+    state["love_note_daily_comment_counts"] = _trim_daily_counts(daily_counts)
     state["last_love_note_date"] = date_key
     save_state(state)
-    return comment
+    if not created:
+        return f"{date_key} 恋爱笔记有新增内容，但没有找到适合短评的段落。"
+    return "\n".join(item["comment"] for item in created)
 
 
 def preview_daily_love_note(target_date: datetime | None = None) -> str:
     """Generate the daily love-note reaction without writing the document or state."""
     target_date = target_date or datetime.now(_SHANGHAI)
-    source_text = fetch_love_note_content()
-    if not source_text.strip():
+    doc_token = LOVE_NOTE_DOC_TOKEN or resolve_wiki_doc_token(LOVE_NOTE_WIKI_TOKEN)
+    if not doc_token:
+        raise RuntimeError("缺少 LOVE_NOTE_DOC_TOKEN 或 LOVE_NOTE_WIKI_TOKEN")
+    blocks = get_docx_blocks(doc_token)
+    current_blocks = _text_block_candidates(blocks)
+    if not current_blocks:
         return f"{target_date:%Y-%m-%d} 没有读到可评论的文档内容。"
-    return generate_love_note_reaction(source_text, target_date.strftime("%Y-%m-%d"))
+    state = load_state()
+    seen_ids = set(state.get("love_note_seen_block_ids", []) or [])
+    new_blocks = [block for block in current_blocks if block["block_id"] not in seen_ids]
+    if not seen_ids:
+        return f"{target_date:%Y-%m-%d} 还没有增量基线；正式运行会先建立基线，不评论旧内容。"
+    if not new_blocks:
+        return f"{target_date:%Y-%m-%d} 恋爱笔记没有新增正文，不评论。"
+    reactions = generate_love_note_reactions(
+        new_blocks,
+        target_date.strftime("%Y-%m-%d"),
+        limit=_MAX_DAILY_LOVE_NOTE_COMMENTS,
+    )
+    return "\n".join(f"{item['block_id']}: {item['comment']}" for item in reactions) or "没有合适短评。"
 
 
 def generate_love_note_reaction(document_text: str, date_key: str) -> str:
@@ -104,6 +166,70 @@ def generate_love_note_reaction(document_text: str, date_key: str) -> str:
     )
     resp.raise_for_status()
     return sanitize_public_text(resp.json()["choices"][0]["message"]["content"].strip())
+
+
+def generate_love_note_reactions(blocks: list[dict], date_key: str, limit: int = 2) -> list[dict]:
+    if limit <= 0:
+        return []
+    candidates = [
+        {"block_id": block["block_id"], "text": block["text"][:220]}
+        for block in blocks
+        if block.get("block_id") and block.get("text")
+    ]
+    if not candidates:
+        return []
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": """你是三哥的小弟，负责在三哥和舒舒的飞书恋爱笔记新增内容旁留下嗑糖短评。
+要求：
+- 只评论值得嗑糖或有关系感的新增段落；普通功能说明、无情绪内容可以不评论
+- 最多输出用户要求的条数，可以少于上限
+- 每条短评 35 到 90 个中文字符，不要标题、不要分节、不要 Markdown
+- 评论要贴合对应原文，不能泛泛总结整篇
+- 不要冒充三哥本人，不要过度油腻
+- 舒舒和烨子是同一个人，称呼时二选一，不要并列
+- 不要出现“每日总结”“文档里记录的小事”“三哥该记得”等总结模板词
+- 只输出 JSON 数组，元素为 {"block_id":"...","comment":"..."}""",
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"日期：{date_key}\n"
+                    f"最多评论 {limit} 条。\n"
+                    "新增段落 JSON：\n"
+                    f"{json.dumps(candidates, ensure_ascii=False)}"
+                ),
+            },
+        ],
+        "temperature": 0.75,
+        "max_tokens": 700,
+    }
+    resp = requests.post(
+        f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    items = _loads_json_array(raw)
+    valid_ids = {item["block_id"] for item in candidates}
+    reactions = []
+    for item in items:
+        block_id = str(item.get("block_id", "")).strip()
+        comment = sanitize_public_text(str(item.get("comment", "")).strip())
+        if block_id in valid_ids and _is_acceptable_reaction(comment):
+            reactions.append({"block_id": block_id, "comment": comment})
+        if len(reactions) >= limit:
+            break
+    return reactions
 
 
 def fetch_love_note_content() -> str:
@@ -198,6 +324,18 @@ def create_docx_comment(doc_token: str, block_id: str, markdown_summary: str) ->
     if data.get("code") != 0:
         raise RuntimeError(f"创建文档评论失败: {data.get('msg')} {data.get('error')}")
     return data
+
+
+def hide_love_note_comment(comment_id: str, reply_id: str = "", doc_token: str = "") -> dict:
+    """Best-effort removal for bot comments: delete reply if possible, otherwise mark solved."""
+    doc_token = doc_token or LOVE_NOTE_DOC_TOKEN or resolve_wiki_doc_token(LOVE_NOTE_WIKI_TOKEN)
+    if not doc_token:
+        raise RuntimeError("缺少 LOVE_NOTE_DOC_TOKEN 或 LOVE_NOTE_WIKI_TOKEN")
+    if reply_id:
+        deleted = _delete_comment_reply(doc_token, comment_id, reply_id)
+        if deleted.get("ok"):
+            return deleted
+    return _mark_comment_solved(doc_token, comment_id)
 
 
 def get_docx_document(doc_token: str) -> dict:
@@ -314,6 +452,55 @@ def _block_plain_text(block: dict) -> str:
     return "".join(pieces)
 
 
+def _text_block_candidates(blocks: list[dict]) -> list[dict]:
+    candidates = []
+    for block in blocks:
+        text = sanitize_public_text(_block_plain_text(block)).strip()
+        block_id = block.get("block_id", "")
+        if not block_id or not text:
+            continue
+        candidates.append({
+            "block_id": block_id,
+            "text": text,
+            "comment_ids": list(block.get("comment_ids") or []),
+        })
+    return candidates
+
+
+def _mark_love_note_seen(state: dict, blocks: list[dict], document: dict | None = None) -> None:
+    state["love_note_seen_block_ids"] = [block["block_id"] for block in blocks if block.get("block_id")]
+    if document:
+        state["love_note_last_revision_id"] = document.get("revision_id")
+
+
+def _trim_daily_counts(counts: dict) -> dict:
+    return dict(list(counts.items())[-14:])
+
+
+def _loads_json_array(raw: str) -> list[dict]:
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    start = text.find("[")
+    end = text.rfind("]")
+    if start >= 0 and end >= start:
+        text = text[start:end + 1]
+    data = json.loads(text)
+    return data if isinstance(data, list) else []
+
+
+def _is_acceptable_reaction(comment: str) -> bool:
+    text = sanitize_public_text(comment or "").strip()
+    if not text:
+        return False
+    blocked = ["每日总结", "文档里记录的小事", "三哥该记得", "###", "##", "- "]
+    if any(word in text for word in blocked):
+        return False
+    return 8 <= len(text) <= 140
+
+
 def _comment_anchor_candidates(blocks: list[dict]) -> list[dict]:
     candidates = _comment_anchor_candidates_from_blocks(blocks, skip_commented=True)
     if candidates:
@@ -418,9 +605,36 @@ def _pick_anchor_by_score(candidates: list[dict], comment_text: str) -> str:
 def _comment_text_elements(text: str) -> list[dict]:
     cleaned = sanitize_public_text(text or "").replace("<", "&lt;").replace(">", "&gt;").strip()
     if not cleaned:
-        cleaned = "今天没有生成有效总结。"
+        cleaned = "今天没有生成有效短评。"
     chunks = [cleaned[i:i + 900] for i in range(0, min(len(cleaned), 9000), 900)]
     return [{"type": "text", "text": chunk} for chunk in chunks]
+
+
+def _delete_comment_reply(doc_token: str, comment_id: str, reply_id: str) -> dict:
+    token = _tenant_token()
+    resp = requests.delete(
+        f"{FEISHU_OPEN_API}/drive/v1/files/{doc_token}/comments/{comment_id}/replys/{reply_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"file_type": "docx"},
+        timeout=30,
+    )
+    data = resp.json()
+    return {"ok": data.get("code") == 0, "data": data}
+
+
+def _mark_comment_solved(doc_token: str, comment_id: str) -> dict:
+    token = _tenant_token()
+    resp = requests.patch(
+        f"{FEISHU_OPEN_API}/drive/v1/files/{doc_token}/comments/{comment_id}",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        params={"file_type": "docx"},
+        json={"is_solved": True},
+        timeout=30,
+    )
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"隐藏评论失败: {data.get('msg')} {data.get('error')}")
+    return {"ok": True, "data": data}
 
 
 def _trim_document_source(document_text: str) -> str:

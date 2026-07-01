@@ -203,11 +203,13 @@ https://open.feishu.cn/document/home/index
 幂等状态写在 `state.json`：`passive_processed_message_ids`、`passive_topic_timestamps`、`passive_sent_timestamps`。同一消息、同一话题、每小时超过上限都必须跳过。不要让旁听模式处理“哈哈/想你/晚安/摸头”等低信号情绪闲聊。
 
 ### 11d. 每日恋爱笔记用局部短评，不污染正文
-`love_note.py` 负责每天读取已有 Wiki/Docx 恋爱笔记正文，生成一条“嗑到了 / 这也太甜了 / 小弟被可爱到了”风格的短评，再通过飞书 Drive 评论 API 挂到最适合这条短评的正文段落上。它不是总结群聊消息，也不是结构化日报总结，不要再把总结追加成正文块。当前文档：
+`love_note.py` 负责每天读取已有 Wiki/Docx 恋爱笔记正文，只对新增正文生成“嗑到了 / 这也太甜了 / 小弟被可爱到了”风格的短评，再通过飞书 Drive 评论 API 挂到最适合这条短评的正文段落上。它不是总结群聊消息，也不是结构化日报总结，不要再把总结追加成正文块。当前文档：
 - Wiki token: `IwfGwwGBBiQ4t3k9MW1cjJuDnab`
 - Docx token: `TjKadw7I8oqQT4xyCC0c2WhEnPe`
 
-写入必须使用 `POST /open-apis/drive/v1/files/{doc_token}/new_comments` 创建局部评论，`file_type=docx`，`anchor.block_id` 由短评内容和文档段落匹配决定；不要固定最后一段。不要 overwrite，不要 append children。`state.json.last_love_note_date` 用于保证每天只写一次；`--daily-note-preview` 只预览不写入，`--daily-note-test` 会 `force=True` 并真实创建评论，只在人工测试时使用。评论必须是一段自然短评，不要出现 `每日总结`、标题、分节、列表。
+写入必须使用 `POST /open-apis/drive/v1/files/{doc_token}/new_comments` 创建局部评论，`file_type=docx`，`anchor.block_id` 由短评内容和文档段落匹配决定；不要固定最后一段。不要 overwrite，不要 append children。`state.json.love_note_seen_block_ids` 记录已处理正文 block；没有新增正文就不评论。`state.json.love_note_daily_comment_counts` 控制每天最多 2 条。`--daily-note-preview` 只预览不写入，`--daily-note-test` 会 `force=True` 并真实创建评论，只在人工测试时使用。评论必须是一段自然短评，不要出现 `每日总结`、标题、分节、列表。
+
+机器人认为自己评论不合适时，优先尝试删除自己的 reply；飞书拒绝删除时，改为把评论标记为已解决。不要反复调用删除接口刷错误。
 
 ### 12. GitHub commit 卡片不生成 DeepSeek 总结
 GitHub commit 活动卡片不生成 DeepSeek 总结，只展示表格和统计，避免自动开场太腻。

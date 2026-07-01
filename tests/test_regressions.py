@@ -313,6 +313,124 @@ class BotRegressionTests(unittest.TestCase):
         self.assertIn("不要标题、不要分节、不要列表", prompt_text)
         self.assertIn("不要出现“每日总结”", prompt_text)
 
+    def test_love_note_rejects_summary_template_comments(self):
+        self.assertFalse(love_note._is_acceptable_reaction("## 每日总结\n### 三哥该记得"))
+        self.assertTrue(love_note._is_acceptable_reaction("这段也太甜了，隔着屏幕都能看见两个人的小心思。"))
+
+    def test_love_note_first_run_sets_baseline_without_commenting(self):
+        state_obj = {}
+        blocks = [
+            {"block_id": "a", "text": {"elements": [{"text_run": {"content": "旧内容"}}]}},
+        ]
+        with patch.object(love_note, "load_state", return_value=state_obj), patch.object(
+            love_note,
+            "save_state",
+        ) as save_mock, patch.object(
+            love_note,
+            "get_docx_document",
+            return_value={"revision_id": 10},
+        ), patch.object(
+            love_note,
+            "get_docx_blocks",
+            return_value=blocks,
+        ), patch.object(
+            love_note,
+            "create_docx_comment",
+        ) as create_mock, patch.object(
+            love_note,
+            "LOVE_NOTE_DOC_TOKEN",
+            "doc",
+        ):
+            result = love_note.run_daily_love_note()
+        self.assertIn("已建立恋爱笔记增量基线", result)
+        self.assertEqual(state_obj["love_note_seen_block_ids"], ["a"])
+        self.assertEqual(state_obj["love_note_last_revision_id"], 10)
+        create_mock.assert_not_called()
+        save_mock.assert_called_once()
+
+    def test_love_note_no_new_blocks_does_not_comment(self):
+        state_obj = {"love_note_seen_block_ids": ["a"], "love_note_daily_comment_counts": {}}
+        blocks = [
+            {"block_id": "a", "text": {"elements": [{"text_run": {"content": "旧内容"}}]}},
+        ]
+        with patch.object(love_note, "load_state", return_value=state_obj), patch.object(
+            love_note,
+            "save_state",
+        ), patch.object(
+            love_note,
+            "get_docx_document",
+            return_value={"revision_id": 11},
+        ), patch.object(
+            love_note,
+            "get_docx_blocks",
+            return_value=blocks,
+        ), patch.object(
+            love_note,
+            "create_docx_comment",
+        ) as create_mock, patch.object(
+            love_note,
+            "LOVE_NOTE_DOC_TOKEN",
+            "doc",
+        ):
+            result = love_note.run_daily_love_note()
+        self.assertIn("没有新增正文", result)
+        create_mock.assert_not_called()
+
+    def test_love_note_daily_limit_is_two(self):
+        state_obj = {"love_note_seen_block_ids": ["old"], "love_note_daily_comment_counts": {}}
+        blocks = [
+            {"block_id": "old", "text": {"elements": [{"text_run": {"content": "旧内容"}}]}},
+            {"block_id": "n1", "text": {"elements": [{"text_run": {"content": "新内容一"}}]}},
+            {"block_id": "n2", "text": {"elements": [{"text_run": {"content": "新内容二"}}]}},
+            {"block_id": "n3", "text": {"elements": [{"text_run": {"content": "新内容三"}}]}},
+        ]
+        reactions = [
+            {"block_id": "n1", "comment": "第一条甜甜的短评"},
+            {"block_id": "n2", "comment": "第二条甜甜的短评"},
+            {"block_id": "n3", "comment": "第三条不应该发送"},
+        ]
+        with patch.object(love_note, "load_state", return_value=state_obj), patch.object(
+            love_note,
+            "save_state",
+        ), patch.object(
+            love_note,
+            "get_docx_document",
+            return_value={"revision_id": 12},
+        ), patch.object(
+            love_note,
+            "get_docx_blocks",
+            return_value=blocks,
+        ), patch.object(
+            love_note,
+            "generate_love_note_reactions",
+            return_value=reactions,
+        ), patch.object(
+            love_note,
+            "create_docx_comment",
+            return_value={"data": {"comment_id": "c", "reply_id": "r"}},
+        ) as create_mock, patch.object(
+            love_note,
+            "LOVE_NOTE_DOC_TOKEN",
+            "doc",
+        ):
+            result = love_note.run_daily_love_note(target_date=love_note.datetime(2026, 7, 2, tzinfo=love_note._SHANGHAI))
+        self.assertIn("第一条", result)
+        self.assertEqual(create_mock.call_count, 2)
+        self.assertEqual(state_obj["love_note_daily_comment_counts"]["2026-07-02"], 2)
+
+    def test_hide_love_note_comment_falls_back_to_solved(self):
+        with patch.object(love_note, "_delete_comment_reply", return_value={"ok": False}), patch.object(
+            love_note,
+            "_mark_comment_solved",
+            return_value={"ok": True},
+        ) as solved_mock, patch.object(
+            love_note,
+            "LOVE_NOTE_DOC_TOKEN",
+            "doc",
+        ):
+            self.assertTrue(love_note.hide_love_note_comment("c1", "r1").get("ok"))
+        solved_mock.assert_called_once_with("doc", "c1")
+
 
 if __name__ == "__main__":
     unittest.main()
