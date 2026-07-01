@@ -5,6 +5,7 @@ import actions_runner
 import call_notes
 import commit_text
 import external_search
+import feishu_api
 import health
 import local_apps
 import love_note
@@ -400,6 +401,41 @@ class BotRegressionTests(unittest.TestCase):
             card = health.build_health_card()
         self.assertEqual(card["card"]["body"]["elements"][0]["tag"], "table")
         assert_public_text_clean(card)
+
+    def test_streaming_reply_reuses_token_and_batches_updates(self):
+        updates = []
+        with patch.object(feishu_api, "DRY_RUN", False), patch.object(
+            feishu_api,
+            "create_streaming_card",
+            return_value="card_1",
+        ) as create_mock, patch.object(
+            feishu_api,
+            "send_card_entity",
+            return_value=True,
+        ), patch.object(
+            feishu_api,
+            "_get_token",
+            return_value="tenant_token",
+        ) as token_mock, patch.object(
+            feishu_api,
+            "update_streaming_text",
+            side_effect=lambda card_id, text, sequence, token="": updates.append((text, sequence, token)) or True,
+        ), patch.object(
+            feishu_api,
+            "stop_streaming",
+            return_value=True,
+        ) as stop_mock, patch.object(
+            feishu_api.time,
+            "time",
+            side_effect=[0.0, 0.1, 0.2, 0.3],
+        ):
+            text = feishu_api.send_streaming_reply(iter(["你", "好", "呀"]), update_interval=10)
+        self.assertEqual(text, "你好呀")
+        create_mock.assert_called_once()
+        token_mock.assert_called_once()
+        self.assertEqual(updates[0], ("你", 1, "tenant_token"))
+        self.assertEqual(updates[-1][0], "你好呀")
+        stop_mock.assert_called_once()
 
     def test_call_notes_context_uses_summary_cache_shape(self):
         with patch.dict(

@@ -510,7 +510,7 @@ def _get_token() -> str:
     return resp.json()["tenant_access_token"]
 
 
-def create_streaming_card(title: str = "回复中...") -> str:
+def create_streaming_card(title: str = "回复中...", initial_text: str = "整理中...") -> str:
     """创建一个流式更新模式的卡片实体，返回 card_id。
     卡片包含一个 markdown 组件，element_id='reply_text'。
     """
@@ -531,7 +531,7 @@ def create_streaming_card(title: str = "回复中...") -> str:
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": "",
+                    "content": sanitize_public_text(initial_text),
                     "element_id": "reply_text",
                 }
             ]
@@ -582,11 +582,11 @@ def send_card_entity(card_id: str, receive_id: str = "") -> bool:
     return True
 
 
-def update_streaming_text(card_id: str, full_text: str, sequence: int) -> bool:
+def update_streaming_text(card_id: str, full_text: str, sequence: int, token: str = "") -> bool:
     """流式更新卡片中的文本内容（打字机效果）。
     full_text 是累积的完整文本，sequence 必须严格递增。
     """
-    token = _get_token()
+    token = token or _get_token()
     resp = _requests.put(
         f"{_OPEN_API_BASE}/cardkit/v1/cards/{card_id}/elements/reply_text/content",
         headers={
@@ -606,9 +606,9 @@ def update_streaming_text(card_id: str, full_text: str, sequence: int) -> bool:
     return True
 
 
-def stop_streaming(card_id: str, sequence: int) -> bool:
+def stop_streaming(card_id: str, sequence: int, token: str = "") -> bool:
     """关闭流式更新模式。"""
-    token = _get_token()
+    token = token or _get_token()
     resp = _requests.patch(
         f"{_OPEN_API_BASE}/cardkit/v1/cards/{card_id}/settings",
         headers={
@@ -631,7 +631,13 @@ def stop_streaming(card_id: str, sequence: int) -> bool:
     return True
 
 
-def send_streaming_reply(full_text_generator, title: str = "回复", receive_id: str = "") -> str:
+def send_streaming_reply(
+    full_text_generator,
+    title: str = "回复",
+    receive_id: str = "",
+    initial_text: str = "整理中...",
+    update_interval: float = 0.35,
+) -> str:
     """完整的流式回复流程：
     1. 创建流式卡片实体
     2. 发送到群聊
@@ -650,8 +656,8 @@ def send_streaming_reply(full_text_generator, title: str = "回复", receive_id:
         print("\n" + "=" * 56 + "\n")
         return full_text
 
-    # 1. 创建卡片
-    card_id = create_streaming_card(title=title)
+    # 1. 创建卡片。先带一个占位文本，让群里立即看到机器人接住了。
+    card_id = create_streaming_card(title=title, initial_text=initial_text)
 
     # 2. 发送卡片到目标聊天
     send_card_entity(card_id, receive_id=receive_id)
@@ -660,20 +666,24 @@ def send_streaming_reply(full_text_generator, title: str = "回复", receive_id:
     import time
     full_text = ""
     sequence = 1
+    token = _get_token()
+    last_update = 0.0
     for chunk in full_text_generator:
         full_text += chunk
-        update_streaming_text(card_id, full_text, sequence)
-        sequence += 1
-        # 控制更新频率，避免超过 10 QPS 限制
-        time.sleep(0.15)
+        now = time.time()
+        # 首个 token 立即更新；后续按间隔批量刷新，避免卡片 API 变成瓶颈。
+        if sequence == 1 or now - last_update >= update_interval or chunk.endswith(("。", "！", "？", "\n")):
+            update_streaming_text(card_id, full_text, sequence, token=token)
+            sequence += 1
+            last_update = now
 
     # 4. 最终更新一次完整文本
     if full_text:
-        update_streaming_text(card_id, full_text, sequence)
+        update_streaming_text(card_id, full_text, sequence, token=token)
         sequence += 1
 
     # 5. 关闭流式模式
-    stop_streaming(card_id, sequence)
+    stop_streaming(card_id, sequence, token=token)
 
     return full_text
 

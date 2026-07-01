@@ -32,6 +32,8 @@ from config import (
     POLL_INTERVAL_SECONDS,
     PROACTIVE_TOPIC_CHECK_INTERVAL_SECONDS,
     PROACTIVE_TOPIC_ENABLED,
+    STREAMING_REPLY_ENABLED,
+    STREAMING_REPLY_UPDATE_INTERVAL_SECONDS,
     DRY_RUN,
     FEISHU_READ_MESSAGES,
     FEISHU_STATUS_CHAT_ID,
@@ -695,40 +697,64 @@ def on_message_received(msg_data: dict):
         except Exception as e:
             print(f"  [警告] 读取通话纪要失败: {e}", flush=True)
 
-        try:
-            reply = reply_to_shushu(
-                recent_messages, memories,
-                is_shushu=is_shushu,
-                call_notes_context=call_notes_context,
-            )
-        except Exception as e:
-            print(f"  DeepSeek 回复失败: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            # 回复失败也要删掉思考表情
-            if thinking_reaction_id and message_id:
-                delete_reaction(message_id, thinking_reaction_id)
-            return
+        reply = ""
+        replied_via_stream = False
+        if STREAMING_REPLY_ENABLED and chat_id:
+            try:
+                generator = reply_to_shushu_stream(
+                    recent_messages, memories,
+                    is_shushu=is_shushu,
+                    call_notes_context=call_notes_context,
+                )
+                reply = send_streaming_reply(
+                    generator,
+                    title="整理中",
+                    receive_id=chat_id,
+                    initial_text="整理中...",
+                    update_interval=STREAMING_REPLY_UPDATE_INTERVAL_SECONDS,
+                )
+                replied_via_stream = bool(reply)
+            except Exception as e:
+                print(f"  [流式回复] 失败，回退普通回复: {e}", flush=True)
+                reply = ""
+                replied_via_stream = False
 
-        # ---- 第3步：发送回复（引用回复，显示在原消息下方）----
+        if not reply:
+            try:
+                reply = reply_to_shushu(
+                    recent_messages, memories,
+                    is_shushu=is_shushu,
+                    call_notes_context=call_notes_context,
+                )
+            except Exception as e:
+                print(f"  DeepSeek 回复失败: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                # 回复失败也要删掉思考表情
+                if thinking_reaction_id and message_id:
+                    delete_reaction(message_id, thinking_reaction_id)
+                return
+
+        # ---- 第3步：发送回复（非流式时引用回复，流式时已经发卡片并逐步更新）----
         if reply:
             print("-" * 60, flush=True)
             print(f"  回复({chat_type}):\n{reply}", flush=True)
             print("-" * 60, flush=True)
-            try:
-                if message_id:
-                    reply_text(reply, message_id)
-                else:
-                    send_text(reply, receive_id=chat_id)
-            except FeishuMessageUnavailable as e:
-                print(f"  [跳过] 消息不可回复: {e}", flush=True)
-                if thinking_reaction_id and message_id:
-                    delete_reaction(message_id, thinking_reaction_id)
-                return
-            except Exception as e:
-                print(f"  [错误] 发送消息失败: {e}", flush=True)
-                import traceback
-                traceback.print_exc()
+            if not replied_via_stream:
+                try:
+                    if message_id:
+                        reply_text(reply, message_id)
+                    else:
+                        send_text(reply, receive_id=chat_id)
+                except FeishuMessageUnavailable as e:
+                    print(f"  [跳过] 消息不可回复: {e}", flush=True)
+                    if thinking_reaction_id and message_id:
+                        delete_reaction(message_id, thinking_reaction_id)
+                    return
+                except Exception as e:
+                    print(f"  [错误] 发送消息失败: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
 
         # ---- 第4步：删掉"思考中"表情，加上内容匹配的表情 ----
         if thinking_reaction_id and message_id:

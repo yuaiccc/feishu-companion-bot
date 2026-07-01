@@ -85,5 +85,9 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
 STATUS_NOTIFY_COOLDOWN_SECONDS = int(os.getenv("STATUS_NOTIFY_COOLDOWN_SECONDS", "300"))
 
+# ---- 回复体验 ----
+STREAMING_REPLY_ENABLED = os.getenv("STREAMING_REPLY_ENABLED", "true").lower() in ("true", "1", "yes")
+STREAMING_REPLY_UPDATE_INTERVAL_SECONDS = float(os.getenv("STREAMING_REPLY_UPDATE_INTERVAL_SECONDS", "0.35"))
+
 # ---- 状态文件 ----
 STATE_FILE = BASE_DIR / "state.json"
