@@ -1,4 +1,5 @@
-"""External web search through the local OpenClaw CLI."""
+"""External web search through local DeerFlow or OpenClaw."""
+import hashlib
 import json
 import os
 import re
@@ -13,12 +14,19 @@ from config import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
+    DEERFLOW_BACKEND_DIR,
+    DEERFLOW_PYTHON,
+    DEERFLOW_SEARCH_THREAD_PREFIX,
+    DEERFLOW_SEARCH_TIMEOUT_SECONDS,
+    EXTERNAL_SEARCH_BACKEND,
     EXTERNAL_SEARCH_ENABLED,
+    EXTERNAL_SEARCH_FALLBACK_OPENCLAW,
     OPENCLAW_CLI,
     OPENCLAW_SEARCH_LIMIT,
     OPENCLAW_SEARCH_PROVIDER,
     OPENCLAW_SEARCH_TIMEOUT_SECONDS,
 )
+from profile import bot_role, owner_name, target_addressing_instruction, target_name
 from text_safety import sanitize_public_text
 
 
@@ -66,9 +74,30 @@ def _result_items(payload: dict) -> list[dict]:
 
 
 def search_web(query: str, limit: int | None = None) -> list[dict]:
-    """Run OpenClaw web search and return cleaned result items."""
+    """Run the configured local web search backend and return cleaned result items."""
     if not EXTERNAL_SEARCH_ENABLED:
         raise RuntimeError("外部搜索未开启")
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    backend = EXTERNAL_SEARCH_BACKEND or "deerflow"
+    if backend not in ("deerflow", "openclaw", "auto"):
+        raise RuntimeError(f"未知外部搜索后端: {backend}")
+
+    if backend in ("deerflow", "auto"):
+        try:
+            return search_deerflow(query, limit=limit)
+        except Exception as e:
+            if backend == "deerflow" and not EXTERNAL_SEARCH_FALLBACK_OPENCLAW:
+                raise
+            print(f"  [external-search] DeerFlow 搜索失败，回退 OpenClaw: {e}", flush=True)
+
+    return search_openclaw(query, limit=limit)
+
+
+def search_openclaw(query: str, limit: int | None = None) -> list[dict]:
+    """Run OpenClaw web search and return cleaned result items."""
     query = (query or "").strip()
     if not query:
         return []
@@ -110,6 +139,63 @@ def search_web(query: str, limit: int | None = None) -> list[dict]:
     return _result_items(payload)
 
 
+def search_deerflow(query: str, limit: int | None = None) -> list[dict]:
+    """Ask local DeerFlow to perform a web-aware research pass.
+
+    DeerFlow returns a synthesized answer instead of a raw search-result list, so the
+    adapter exposes that answer as one primary result and extracts cited URLs into
+    secondary rows for Feishu table cards.
+    """
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    backend_dir = Path(DEERFLOW_BACKEND_DIR).expanduser()
+    python = _resolve_deerflow_python(backend_dir)
+    if not backend_dir.exists():
+        raise RuntimeError(f"DeerFlow 后端目录不存在: {backend_dir}")
+    if not Path(python).exists():
+        raise RuntimeError(f"DeerFlow Python 不存在: {python}")
+
+    prompt = _build_deerflow_search_prompt(query, limit or OPENCLAW_SEARCH_LIMIT)
+    thread_id = _deerflow_thread_id(query)
+    env = os.environ.copy()
+    harness_dir = backend_dir / "packages" / "harness"
+    env["PYTHONPATH"] = f"{backend_dir}:{harness_dir}:{env.get('PYTHONPATH', '')}"
+    env["DEERFLOW_SEARCH_PROMPT"] = prompt
+    env["DEERFLOW_SEARCH_THREAD_ID"] = thread_id
+    script = """
+import json
+import os
+from deerflow.client import DeerFlowClient
+
+client = DeerFlowClient(thinking_enabled=False, subagent_enabled=True)
+answer = client.chat(
+    os.environ["DEERFLOW_SEARCH_PROMPT"],
+    thread_id=os.environ["DEERFLOW_SEARCH_THREAD_ID"],
+)
+print(json.dumps({"answer": answer}, ensure_ascii=False))
+"""
+    proc = subprocess.run(
+        [python, "-c", script],
+        cwd=str(backend_dir),
+        text=True,
+        capture_output=True,
+        timeout=DEERFLOW_SEARCH_TIMEOUT_SECONDS,
+        check=False,
+        env=env,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(f"DeerFlow 搜索失败: {detail[:300]}")
+
+    payload = _extract_json_object(proc.stdout)
+    answer = _clean_external_text(payload.get("answer", ""))
+    if not answer:
+        raise RuntimeError("DeerFlow 没有返回有效搜索结论")
+    return _deerflow_result_items(answer, limit or OPENCLAW_SEARCH_LIMIT)
+
+
 def _resolve_openclaw_cli() -> str:
     if "/" in OPENCLAW_CLI and Path(OPENCLAW_CLI).exists():
         return OPENCLAW_CLI
@@ -131,6 +217,60 @@ def _resolve_openclaw_cli() -> str:
     return OPENCLAW_CLI
 
 
+def _resolve_deerflow_python(backend_dir: Path) -> str:
+    configured = Path(DEERFLOW_PYTHON).expanduser()
+    if configured.exists():
+        return str(configured)
+    local_python = backend_dir / ".venv/bin/python"
+    if local_python.exists():
+        return str(local_python)
+    return shutil.which("python3") or "python3"
+
+
+def _build_deerflow_search_prompt(query: str, limit: int) -> str:
+    return f"""请联网检索并整理这个问题：{query}
+
+要求：
+- 优先使用公开网页、官方来源或社区来源，不要凭空补全。
+- 输出中文，先给 1 段简短结论，再列 {min(limit, 5)} 条以内来源线索。
+- 每条来源线索保留标题、要点和 URL。
+- 如果无法联网或没有可靠结果，请明确说明。"""
+
+
+def _deerflow_thread_id(query: str) -> str:
+    digest = hashlib.sha1(query.encode("utf-8")).hexdigest()[:12]
+    return f"{DEERFLOW_SEARCH_THREAD_PREFIX}-{digest}"
+
+
+def _deerflow_result_items(answer: str, limit: int) -> list[dict]:
+    urls = _extract_urls(answer)
+    items = [{
+        "title": "DeerFlow 本地调研结论",
+        "snippet": _shorten(answer, 240),
+        "url": "",
+        "provider": "deerflow",
+    }]
+    for url in urls[: max(0, limit - 1)]:
+        items.append({
+            "title": _source_host(url) or "DeerFlow 提到的来源",
+            "snippet": "DeerFlow 调研过程中提到的来源链接。",
+            "url": url,
+            "provider": "deerflow",
+        })
+    return items[: max(1, limit)]
+
+
+def _extract_urls(text: str) -> list[str]:
+    seen = set()
+    urls = []
+    for match in re.finditer(r"https?://[^\s)\]}>\"'，。；、]+", text or ""):
+        url = match.group(0).rstrip(".,;:!?")
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
 def summarize_search_results(query: str, results: list[dict]) -> str:
     """Summarize search results with source awareness."""
     if not results:
@@ -150,14 +290,13 @@ def summarize_search_results(query: str, results: list[dict]) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": """你是三哥的小弟，帮舒舒或三哥整理外部搜索结果。
+                "content": f"""你是{bot_role()}，帮{target_name()}或{owner_name()}整理外部搜索结果。
 要求：
 - 简短、可靠，不要把搜索结果当作绝对事实
-- 明确说这是小弟搜到的结果
+- 明确说这是机器人搜到的结果
 - 优先给结论，再列 2-4 个要点
 - 保留来源链接，链接数量不要超过 4 个
-- "舒舒"和"烨子"是同一个人的两个昵称；称呼她时二选一，不要把两个名字并列写出来
-- 不要使用“微里”这个名字
+- {target_addressing_instruction()}
 - 不要编造搜索结果里没有的信息""",
             },
             {
@@ -201,6 +340,8 @@ def summarize_search_intro(query: str, results: list[dict]) -> str:
     """Generate a short one-paragraph intro for a search card."""
     if not results:
         return "小弟没搜到靠谱结果，换个关键词再试试。"
+    if any(item.get("provider") == "deerflow" for item in results):
+        return "小弟让本地 DeerFlow 做了一轮联网调研，先把结论和来源线索列成表。"
     return "小弟搜到这些相关结果，热度和片单可能会变，先按来源列成表给你看。"
 
 

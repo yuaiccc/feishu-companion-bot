@@ -4,18 +4,18 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.xujunshan.github-activity-bot</string>
+  <string>com.example.feishu-companion-bot</string>
 
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/caffeinate</string>
     <string>-dimsu</string>
-    <string>/Users/xujunshan/Code/github_activity_generator/.venv/bin/python</string>
-    <string>/Users/xujunshan/Code/github_activity_generator/main.py</string>
+    <string>/ABSOLUTE/PATH/TO/feishu-companion-bot/.venv/bin/python</string>
+    <string>/ABSOLUTE/PATH/TO/feishu-companion-bot/main.py</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/xujunshan/Code/github_activity_generator</string>
+  <string>/ABSOLUTE/PATH/TO/feishu-companion-bot</string>
 
   <key>EnvironmentVariables</key>
   <dict>
@@ -30,9 +30,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/xujunshan/Code/github_activity_generator/bot.log</string>
+  <string>/ABSOLUTE/PATH/TO/feishu-companion-bot/bot.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/xujunshan/Code/github_activity_generator/bot.err.log</string>
+  <string>/ABSOLUTE/PATH/TO/feishu-companion-bot/bot.err.log</string>
 </dict>
 </plist>

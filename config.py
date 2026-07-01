@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
 # ---- Profile ----
-PROFILE_ID = os.getenv("PROFILE_ID", "sange-shushu")
+PROFILE_ID = os.getenv("PROFILE_ID", "default")
 
 # ---- DeepSeek ----
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -44,8 +44,14 @@ MEMORY_OLLAMA_BASE_URL = os.getenv("MEMORY_OLLAMA_BASE_URL", "http://127.0.0.1:1
 MEMORY_OLLAMA_EMBED_MODEL = os.getenv("MEMORY_OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
 MEMORY_OLLAMA_TIMEOUT_SECONDS = float(os.getenv("MEMORY_OLLAMA_TIMEOUT_SECONDS", "5"))
 
-# ---- 外部搜索（本地 OpenClaw）----
+# ---- 外部搜索（本地 DeerFlow / OpenClaw）----
 EXTERNAL_SEARCH_ENABLED = os.getenv("EXTERNAL_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")
+EXTERNAL_SEARCH_BACKEND = os.getenv("EXTERNAL_SEARCH_BACKEND", "deerflow").strip().lower()
+EXTERNAL_SEARCH_FALLBACK_OPENCLAW = os.getenv("EXTERNAL_SEARCH_FALLBACK_OPENCLAW", "true").lower() in ("true", "1", "yes")
+DEERFLOW_BACKEND_DIR = Path(os.getenv("DEERFLOW_BACKEND_DIR", str(Path.home() / "Code/deer-flow/backend"))).expanduser()
+DEERFLOW_PYTHON = os.getenv("DEERFLOW_PYTHON", str(DEERFLOW_BACKEND_DIR / ".venv/bin/python"))
+DEERFLOW_SEARCH_TIMEOUT_SECONDS = int(os.getenv("DEERFLOW_SEARCH_TIMEOUT_SECONDS", "120"))
+DEERFLOW_SEARCH_THREAD_PREFIX = os.getenv("DEERFLOW_SEARCH_THREAD_PREFIX", "feishu-companion-search")
 OPENCLAW_CLI = os.getenv("OPENCLAW_CLI", "openclaw")
 OPENCLAW_SEARCH_PROVIDER = os.getenv("OPENCLAW_SEARCH_PROVIDER", "").strip()
 OPENCLAW_SEARCH_LIMIT = int(os.getenv("OPENCLAW_SEARCH_LIMIT", "5"))

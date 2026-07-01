@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import requests
+from profile import owner_name, target_name
 from text_safety import sanitize_public_text
 
 OPEN_API = "https://open.feishu.cn/open-apis"
@@ -144,6 +145,8 @@ def _summarize_transcript_with_deepseek(title: str, created: str, transcript: st
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
     clipped = transcript[: min(len(transcript), 8000)]
+    owner = owner_name()
+    target = target_name()
     try:
         resp = requests.post(
             f"{base_url}/v1/chat/completions",
@@ -153,11 +156,11 @@ def _summarize_transcript_with_deepseek(title: str, created: str, transcript: st
                 "messages": [
                     {
                         "role": "system",
-                        "content": """你在整理情侣通话纪要给秋酿本人作回复参考。
-只抽取长期有用的关系上下文，不要写成给舒舒看的话，不要煽情，不要暴露"读取了纪要"。
+                        "content": f"""你在整理通话纪要给{owner}本人作回复参考。
+只抽取长期有用的关系上下文，不要写成给{target}看的话，不要煽情，不要暴露"读取了纪要"。
 输出 3-5 条短要点，尽量包含：
-- 舒舒最近在意/担心/开心的事
-- 秋酿答应过或应该记得的事
+- {target}最近在意/担心/开心的事
+- {owner}答应过或应该记得的事
 - 相处偏好、雷点、称呼习惯
 不要编造，不确定就不写。""",
                     },
@@ -179,8 +182,10 @@ def _summarize_transcript_with_deepseek(title: str, created: str, transcript: st
 
 
 def _fallback_summarize_transcript(transcript: str) -> str:
+    owner = owner_name()
+    target = target_name()
     keywords = (
-        "舒舒", "舒烨", "烨子", "想你", "爱你", "开心", "难过", "委屈",
+        owner, target, "想你", "爱你", "开心", "难过", "委屈",
         "生气", "担心", "害怕", "记得", "答应", "约定", "晚安", "抱",
         "贴贴", "电话", "见面", "学校", "家里",
     )

@@ -1,143 +1,194 @@
-# Project History
+# Feishu Companion Bot
 
-飞书群聊机器人。它的人设是三哥的小弟，在秋酿（三哥）本人不在时帮忙照看群聊、给舒舒（舒烨）传话和解释状态，并在必要时汇报 GitHub 活动。
+A self-hosted Feishu/Lark companion bot for small private groups. It can reply in real time, keep lightweight long-term memory, summarize activity signals, search external sources through a local tool, and publish compact interactive cards.
 
-## 运行模式
+The project is designed for personal or relationship-aware assistants, but the default profile is generic. A bot should help when a real person is away; it should not pretend to be that person.
 
-- 本地实时模式：`python3 main.py`，启动飞书长连接和 GitHub 轮询，适合电脑开机时使用。
-- GitHub Actions 兜底模式：`.github/workflows/bot.yml` 每 5 分钟运行 `actions_runner.py`，适合电脑关机、休眠或本地机器人不在线时使用。
-- macOS 常驻模式：`launchd/com.xujunshan.github-activity-bot.plist` 用 `caffeinate` 包住本地进程，登录后自动启动并阻止空闲睡眠。
+## Features
 
-## 人设边界
+- Real-time Feishu long-connection listener for group mentions and p2p chats.
+- GitHub Actions fallback that polls every few minutes when the local machine is offline.
+- Streaming Feishu CardKit replies with buttons: `换个说法`, `继续展开`, `记住这点`, `不要记这个`.
+- Local latency traces for each reply: message read, memory search, call-note context, first token, final send.
+- Privacy-first memory: JSON storage, profile isolation, local embedding by default, visibility filtering, and agentic write/rerank.
+- Optional local signals: foreground app status through AppleScript, DeerFlow/OpenClaw web search, Feishu Minutes/call-note summaries, daily document comments.
+- Health check card for Feishu, DeepSeek, memory, Ollama, local search, and local status.
 
-- 秋酿/三哥 = 许君山；舒舒/烨子 = 舒烨。
-- 群里直接称呼她时，在"舒舒"和"烨子"里任选一个；这是同一个人，不要并列说"舒舒和烨子"。
-- 机器人是三哥的小弟，不是秋酿分身，也不要冒充秋酿本人；对小弟来说舒舒是大哥的老婆，维护时按这个分寸照看她的安全感。
-- 对舒舒说话时用"三哥..."来转述状态和心意，不要用三哥第一人称说"我想你/我在干嘛"。
-- 默认关系重心是秋酿想着舒舒；代码、项目、GitHub 只是状态线索，除非被明确问到，不要反复提。
+## Architecture
 
-## 接手入口
+```mermaid
+flowchart LR
+  A["Feishu event"] --> B["main.py"]
+  B --> C["intent router"]
+  C --> D["context_manager.py"]
+  D --> E["DeepSeek"]
+  E --> F["streaming CardKit reply"]
+  F --> G["card buttons"]
+  G --> B
+  B --> H["memory.py"]
+  B --> I["DeerFlow/OpenClaw search"]
+  B --> J["call_notes.py"]
+  K["GitHub Actions"] --> L["actions_runner.py"]
+  L --> A
+```
 
-先读 `AGENT.md`。那里记录了飞书权限、Actions secrets、群聊 @ 规则、常见坑和关系背景。
-
-## 本地运行
+## Quick Start
 
 ```bash
+python3 -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-python3 main.py
+python main.py
 ```
 
-默认 `DRY_RUN=true` 不会真的发飞书消息。生产运行前把 `.env` 里的 `DRY_RUN=false`，并补齐 DeepSeek、飞书应用、GitHub token 等配置。
+`DRY_RUN=true` is the default for local testing. Set `DRY_RUN=false` only after Feishu, DeepSeek, and GitHub credentials are configured.
 
-## Profile 配置
+## Profiles
 
-项目支持用 `PROFILE_ID` 切换人设和关系背景，不需要直接改 prompt 源码。
+Profiles live in `profiles/` and keep persona, names, aliases, relationship boundaries, and memory keywords out of prompt source code.
 
-- `profiles/default.json`：通用陪伴机器人模板。
-- `profiles/example-couple.json`：情侣陪伴机器人模板，适合开源用户复制后改名改称呼。
-- `profiles/sange-shushu.json`：当前“三哥和舒舒”这套人设示例。
+- `profiles/default.json`: generic companion bot.
+- `profiles/example-couple.json`: relationship assistant template.
 
-开源复用时复制一份 profile JSON，然后在 `.env` 里设置：
+Create your own profile:
 
 ```bash
-PROFILE_ID=your-profile-id
+cp profiles/example-couple.json profiles/my-profile.json
 ```
 
-记忆会按 profile 分目录保存，例如 `memory_data/sange-shushu/memories.json`，避免不同机器人关系的记忆混在一起。首次启用 profile 分目录时，如果存在旧的 `memory_data/memories.json`，会自动复制一份到当前 profile 目录。
+Then set:
 
-本机长期在线推荐安装 LaunchAgent：
+```env
+PROFILE_ID=my-profile
+```
+
+Runtime memory is stored under `memory_data/<PROFILE_ID>/` and is ignored by Git.
+
+## Feishu Setup
+
+Create a Feishu/Lark custom app with Bot enabled, add it to the target chat, and configure:
+
+```env
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=xxx
+FEISHU_CHAT_ID=oc_xxx
+FEISHU_BOT_OPEN_ID=ou_xxx
+FEISHU_READ_MESSAGES=true
+```
+
+Common permissions:
+
+- `im:message`
+- `im:message:send_as_bot`
+- `im:resource`
+- `im:message.reactions:write`
+- `im:message:readonly` for card action callbacks and message reads
+
+For card buttons, enable the `card.action.trigger` event in the Feishu Developer Console under Events & Callbacks. Button callbacks are delivered through the same long connection.
+
+Feishu API details should be checked against the official docs: https://open.feishu.cn/document/home/index
+
+## Local Always-On Mode
+
+The included LaunchAgent keeps the bot running after macOS login and wraps it with `caffeinate`:
 
 ```bash
 mkdir -p ~/Library/LaunchAgents
-cp launchd/com.xujunshan.github-activity-bot.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.xujunshan.github-activity-bot.plist
-launchctl kickstart -k gui/501/com.xujunshan.github-activity-bot
+cp launchd/com.example.feishu-companion-bot.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.feishu-companion-bot.plist
+launchctl kickstart -k gui/$(id -u)/com.example.feishu-companion-bot
 tail -f bot.log
 ```
 
-即时回复和私聊回复依赖本地长连接。GitHub Actions 兜底只读取 `FEISHU_CHAT_ID` 指向的群聊历史消息，不读取私聊。
+Customize the plist path and label before publishing a packaged deployment.
 
-如果配置了 `FEISHU_STATUS_CHAT_ID`，本地服务启动、重启、轮询异常、长连接退出时会向这个单聊推送状态。电脑关机或系统睡死时，本地进程无法主动推送，只能依赖 GitHub Actions 兜底。
+## GitHub Actions Fallback
 
-长连接补发的旧消息默认超过 10 分钟会跳过；已撤回、找不到或纯 @ 的历史消息不会进入聊天上下文。
+`.github/workflows/bot.yml` runs `actions_runner.py` on a schedule. It can post GitHub activity cards and fallback responses when the local long connection is unavailable.
 
-## 云端兜底
+Use Environment secrets, not repository secrets, when the workflow has `environment: feishu`.
 
-GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository secrets。变量名按 `AGENT.md` 配置，其中 GitHub 相关变量在 Actions 中使用 `GH_USERNAME`、`GH_TOKEN`、`GH_PRIVATE_REPOS`，避免 GitHub 保留名前缀。
+GitHub-related environment names use `GH_USERNAME`, `GH_TOKEN`, and `GH_PRIVATE_REPOS` in Actions to avoid reserved `GITHUB_` names.
 
-飞书接口字段以官方文档为准：https://open.feishu.cn/document/home/index
+## Memory
 
-## 信息源
+`memory.py` stores structured memories locally:
 
-- 本地窗口/在席状态：`local_apps.py` 通过 AppleScript 读取前台应用和窗口标题，并通过 macOS `HIDIdleTime`/ConsoleUser 会话推测三哥是否在电脑前，只在本地模式可用。这个判断是概率推测，不要说成确定事实。
-- 通话纪要：`call_notes.py` 通过飞书妙记官方接口读取已配置 `minute_token` 的文字记录，默认关闭。开启前要配置 `CALL_NOTES_ENABLED=true` 和 `FEISHU_MINUTE_TOKENS`，并确保应用具备妙记读取/导出权限。读取后会先整理成短摘要并缓存，只给回复模型关系上下文，不把原文整段塞进去。
-- 外部搜索：`external_search.py` 通过本机 `openclaw infer web search` 搜索网页，再用 DeepSeek 整理为"短结论 + 表格 + 来源链接"卡片。它只在本地模式可用；Actions 兜底不能调用三哥电脑上的 OpenClaw。
-- 搜索记忆联动：成功搜索后只记录“谁对什么主题感兴趣”和少量来源标题，不把搜索结果全文写进长期记忆。
-- 旁听辅助：`passive_assistant.py` 接收未 @ 机器人的群聊消息，只在最近时间窗口内出现资料型话题、群里静默一段时间、同话题不在冷却中时，才用 OpenClaw 补一张背景资料卡片。已处理消息和话题冷却写入 `state.json`，避免同一个问题重复回答。
-- 主动话题：`proactive_topic.py` 默认每天最多主动发起 1 次，只在群聊冷场超过配置时间后 @ 三哥和舒舒，抛一个轻量话题让两个人接话；热聊时不会插嘴。
-- 健康自检：在飞书里问“机器人健康检查 / 服务状态 / 自检”，会返回飞书配置、DeepSeek、Ollama、OpenClaw、记忆库、本机状态的表格。
-- 每日恋爱笔记：`love_note.py` 每天按 `LOVE_NOTE_RUN_AT` 读取已有飞书 Wiki/Docx 恋爱笔记正文，只对新增正文生成嗑糖短评，每天最多 2 条，并以局部评论挂到匹配短评的正文段落上，不向正文追加内容。预览用 `python main.py --daily-note-preview`，手动写入测试用 `python main.py --daily-note-test`。
-- GitHub 活动：用于兜底判断时间线，不应该盖过秋酿和舒舒的关系上下文。
-- 状态查询和 GitHub 查询分开处理：问"在干嘛/最近活动"默认只看本地窗口状态；明确问 GitHub、提交、代码、仓库时才推 GitHub 卡片。
-- 外部搜索和近期活动分开处理：问"最近B站哪些新番热门/查一下/搜索"走 OpenClaw；问"三哥最近活动/在干嘛"仍走电脑活动。
-- 普通聊天回复默认启用飞书流式卡片：先发“正在输入...”，再逐步更新 DeepSeek 输出；如果流式卡片失败，会回退为普通文本回复。
-- LLM 上下文由 `context_manager.py` 统一拼接：最近对话、相关记忆、通话纪要各自有字符预算，并会在日志里输出本次实际注入的来源和长度。
-- 活动卡片只合并同仓库且组内首尾时间跨度不超过 1 小时的提交；超过 1 小时必须分成多行。
-- 活动卡片里的“动态”会强制改写成中文短句：Star 说明大概收藏了什么方向的项目，commit 说明给项目新增/修复了什么能力，避免舒舒看到英文 commit 标题看不懂。
-- 所有发往飞书的文本和卡片都会先经过 `text_safety.py` 统一清洗。
+- default path: `memory_data/<PROFILE_ID>/memories.json`
+- default embedding: local hash vectors
+- optional embedding: local Ollama with `qwen3-embedding:0.6b`
+- `private` memories are never injected into reply prompts
+- `owner_only` memories are only available when replying to the owner
+- `public_to_target` memories may be used for the target user
 
-## 记忆管理
-
-`memory.py` 仍然使用本地 JSON，默认写入 `memory_data/<PROFILE_ID>/memories.json`。新增记忆会先用 DeepSeek 抽取事实，再由 agentic write 策略判断 `create/update/ignore/delete/confirm`，最后做归类、重要度评分、可见性判断、去重和本地 embedding；重复事实只更新 `last_seen`/`seen_count`，不会无限堆叠。默认最多保留 200 条，可用 `MEMORY_MAX_ITEMS` 调整。
-
-本地维护命令：
+Maintenance:
 
 ```bash
-python main.py --mem-clean-preview  # 只看清洗统计
-python main.py --mem-clean          # 删除低价值记忆并合并重复项
+python main.py --mem-clean-preview
+python main.py --mem-clean
 ```
 
-在飞书里问“记忆审计 / 记忆面板 / 记忆检查”会返回审计面板，展示总量、可见性分布、低置信、疑似噪声和疑似重复。群聊里会隐藏 `private` 记忆原文，避免把私密资料发给目标用户。
+In Feishu, ask for a memory audit panel to inspect low-confidence, duplicate, or sensitive entries.
 
-记忆检索是隐私优先的 hybrid / agentic RAG：
+## Context Management
 
-- embedding 默认使用本地哈希向量，不调用第三方 embedding API；本机部署可以设置 `MEMORY_EMBEDDING_PROVIDER=ollama` 并使用 `qwen3-embedding:0.6b`。
-- 先做本地关键词 + embedding 召回，再把候选记忆按 `visibility` 过滤。
-- 给目标用户回复时只允许注入 `public_to_target`；给 owner 回复时可注入 `owner_only`；`private` 永不注入 prompt。
-- Agentic rerank 只在过滤后的候选记忆里调用 DeepSeek 选择最终上下文，避免把敏感记忆发给模型。
-- Agentic write 默认启用：低价值内容会被忽略，已有事实会更新，低置信或敏感边界不清的事实会进入 `confirm` 而不是自动写入。
-- `memory_data/` 已在 `.gitignore` 中，开源或推送代码时不会带上本地记忆。
+Every LLM reply goes through `context_manager.py`. The context is bounded by source:
 
-## 旁听辅助
+- recent chat messages
+- retrieved memories
+- summarized call notes
 
-默认开启但很克制。它不回复普通情绪闲聊，只对番剧、作品、地名、人物、新闻、热榜等资料型话题尝试补背景。默认参数：
+Each call logs which sections were injected and how many characters were used. This keeps prompt growth predictable and makes debugging easier.
 
-- `PASSIVE_ASSIST_QUIET_SECONDS=75`：群里静默 75 秒后才可能发。
-- `PASSIVE_ASSIST_RECENT_WINDOW_SECONDS=480`：只看最近 8 分钟消息。
-- `PASSIVE_ASSIST_TOPIC_COOLDOWN_SECONDS=1800`：同话题 30 分钟内不重复。
-- `PASSIVE_ASSIST_MAX_PER_HOUR=2`：每小时最多补 2 次。
+## Latency Tracing
 
-## 主动话题
+The bot logs local traces similar in spirit to LangSmith spans, without sending data to any external observability service:
 
-默认开启但每天最多一次。它会定期读取群聊最近消息，只有最后一条用户消息距离现在超过 `PROACTIVE_TOPIC_QUIET_SECONDS`，且当前时间在 `PROACTIVE_TOPIC_ACTIVE_START` 到 `PROACTIVE_TOPIC_ACTIVE_END` 之间，才会用 DeepSeek 生成一句轻量开场，并用飞书文本消息 @ 三哥和舒舒。状态写入 `state.json.proactive_topic_sent_dates`，防止一天多次触发。
+```text
+[延迟] chat_reply: total=2430ms read_messages=220ms search_memory=80ms call_notes=5ms deepseek_first_token_at=910ms reply_sent_at=2380ms
+```
 
-## 每日恋爱笔记
+Use these logs to decide whether optimization should target Feishu reads, memory retrieval, call-note loading, model first token latency, or card updates.
 
-默认关闭，打开 `LOVE_NOTE_ENABLED=true` 后，本地长连接进程会启动每日评论线程。它读取现有恋爱笔记正文，只评论新增内容；如果当天没有新增正文，就不评论。每日最多 2 条短评，评论会挂在最适合的正文段落上，不覆盖原文，也不向正文追加噪声。
+## External Search
 
-配置项：
+`external_search.py` supports two local search backends:
 
-- `LOVE_NOTE_WIKI_TOKEN`：Wiki 链接里的 token，例如 `IwfGwwGBBiQ4t3k9MW1cjJuDnab`。
-- `LOVE_NOTE_DOC_TOKEN`：解析后的 docx token，例如 `TjKadw7I8oqQT4xyCC0c2WhEnPe`；填了可以少一次 Wiki 解析。
-- `LOVE_NOTE_RUN_AT=23:55`：每天写入时间。
+- `deerflow`: runs the local DeerFlow embedded Python client and asks it to perform a web-aware research pass. This is the default because it can synthesize the search process into a short conclusion.
+- `openclaw`: calls `openclaw infer web search` and summarizes the returned source list.
 
-手动命令：
+Typical local configuration:
 
-- `python main.py --daily-note-preview`：只生成短评预览，不写入文档、不更新状态。
-- `python main.py --daily-note-test`：强制生成并创建今天的文档短评评论，会绕过当天幂等检查。
+```env
+EXTERNAL_SEARCH_ENABLED=true
+EXTERNAL_SEARCH_BACKEND=deerflow
+EXTERNAL_SEARCH_FALLBACK_OPENCLAW=true
+DEERFLOW_BACKEND_DIR=/Users/you/Code/deer-flow/backend
+DEERFLOW_PYTHON=/Users/you/Code/deer-flow/backend/.venv/bin/python
+OPENCLAW_CLI=openclaw
+```
 
-状态字段：
+Use `EXTERNAL_SEARCH_BACKEND=auto` if you want DeerFlow first and OpenClaw fallback regardless of DeerFlow-specific failures. GitHub Actions cannot access your local DeerFlow or OpenClaw process, so scheduled cloud runs should not rely on local search.
 
-- `love_note_seen_block_ids`：已处理过的正文 block，避免重复评论旧内容。
-- `love_note_daily_comment_counts`：每日评论计数，默认最多 2 条。
+## Optional Integrations
+
+- `local_apps.py`: reads the active macOS app/window via AppleScript.
+- `external_search.py`: calls local DeerFlow or OpenClaw web search, then summarizes sources into a Feishu table card.
+- `call_notes.py`: reads configured Feishu Minutes transcripts and caches short relationship-safe summaries.
+- `love_note.py`: comments on new blocks in a configured Feishu Docx/Wiki document instead of editing the document body.
+
+## Safety Notes
+
+- Never commit `.env`, `state.json`, logs, `memory_data/`, call-note caches, or generated QR codes.
+- Do not put real addresses, tokens, or private relationship notes in tracked profiles.
+- Keep private deployments in untracked local profile files.
+- The bot is an assistant, not a replacement for the real person.
+
+## Tests
+
+```bash
+.venv/bin/python -m py_compile config.py context_manager.py feishu_api.py main.py memory.py summarizer.py tests/test_regressions.py
+.venv/bin/python -m unittest tests.test_regressions
+git diff --check
+```

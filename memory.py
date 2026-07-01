@@ -205,6 +205,35 @@ def add_manual_memory(
     return entry
 
 
+def forget_recent_memories_for_texts(texts: list[str], minutes: int = 10) -> int:
+    """Remove very recent memories related to a user-declined exchange."""
+    needles = [_normalize_text(t)[:40] for t in texts if _normalize_text(t)]
+    needles = [n for n in needles if len(n) >= 4]
+    if not needles:
+        return 0
+    memories = _load_all()
+    now = datetime.now()
+    kept = []
+    removed = 0
+    for mem in memories:
+        haystack = _normalize_text(mem.get("content", ""))
+        for sm in mem.get("source_messages", []) or []:
+            haystack += _normalize_text(sm.get("content", ""))
+        last_seen = mem.get("last_seen") or mem.get("time") or ""
+        try:
+            seen_at = datetime.strptime(last_seen, "%Y-%m-%d %H:%M")
+            is_recent = (now - seen_at).total_seconds() <= minutes * 60
+        except Exception:
+            is_recent = False
+        if is_recent and any(n in haystack or haystack in n for n in needles):
+            removed += 1
+            continue
+        kept.append(mem)
+    if removed:
+        _save_all(kept)
+    return removed
+
+
 def _normalize_text(text: str) -> str:
     text = re.sub(r"\s+", "", (text or "").lower())
     text = re.sub(r"[，。！？、,.!?；;：:（）()【】\[\]\"'“”‘’]", "", text)

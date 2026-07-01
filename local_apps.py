@@ -4,6 +4,8 @@
 import re
 import subprocess
 
+from profile import owner_name
+
 
 def get_frontmost_app() -> str:
     """获取当前最前台的应用名称。"""
@@ -141,26 +143,27 @@ def is_screen_locked() -> bool | None:
 
 
 def get_presence_summary() -> str:
-    """Summarize whether 三哥 is likely at the computer.
+    """Summarize whether the owner is likely at the computer.
 
     This is an inference from local-only signals, not a certainty.
     """
+    owner = owner_name()
     locked = is_screen_locked()
     idle = get_idle_seconds()
 
     if locked is True:
-        return "电脑当前锁屏，三哥大概率不在电脑前"
+        return f"电脑当前锁屏，{owner}大概率不在电脑前"
     if idle is None:
         return "暂时看不到键鼠空闲时间，只能根据前台窗口粗略判断"
 
     idle_min = idle / 60
     if idle < 90:
-        return f"键鼠刚刚有活动（空闲约 {int(idle)} 秒），三哥大概率在电脑前"
+        return f"键鼠刚刚有活动（空闲约 {int(idle)} 秒），{owner}大概率在电脑前"
     if idle < 600:
-        return f"键鼠有一会儿没动了（空闲约 {idle_min:.1f} 分钟），三哥可能在旁边或短暂离开"
+        return f"键鼠有一会儿没动了（空闲约 {idle_min:.1f} 分钟），{owner}可能在旁边或短暂离开"
     if idle < 1800:
-        return f"键鼠较久没动（空闲约 {int(idle_min)} 分钟），三哥可能离开电脑了"
-    return f"键鼠很久没动（空闲约 {int(idle_min)} 分钟），三哥大概率不在电脑前"
+        return f"键鼠较久没动（空闲约 {int(idle_min)} 分钟），{owner}可能离开电脑了"
+    return f"键鼠很久没动（空闲约 {int(idle_min)} 分钟），{owner}大概率不在电脑前"
 
 
 def get_local_status_summary() -> str:

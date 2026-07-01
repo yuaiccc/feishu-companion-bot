@@ -19,6 +19,7 @@ from datetime import datetime, timezone, timedelta
 
 from commit_text import brief_commit_messages, summarize_commit_activity, summarize_star_activity
 from call_notes import build_call_notes_context
+from profile import bot_role, owner_name, relationship_context, target_addressing_instruction, target_name
 from text_safety import sanitize_card, sanitize_public_text
 
 # 确保输出不缓冲
@@ -281,34 +282,29 @@ def generate_reply(messages: list[dict], is_shushu: bool = True) -> str:
         "在做什么", "在搞什么", "在弄什么", "最近在",
     ])
 
-    RELATIONSHIP = """
-【背景信息（仅在相关时自然融入，不要每次都提）】
-- 三哥 = 秋酿 = 许君山；舒烨 = 舒舒 = 烨子
-- 群里直接称呼她时，只叫"舒舒"或"烨子"
-- 秋酿和舒舒是情侣，2026年6月4日在一起
-- 秋酿生日：2004年10月15日，舒舒生日：2004年11月5日
-- 这个机器人是三哥的小弟，在三哥不方便及时回复时帮忙照看群聊、传话和解释状态
-- 小弟不是三哥本人，不要冒充三哥；涉及三哥状态时说"三哥..."，不要说"我..."
-- 秋酿平时多数时间都在想舒舒；GitHub 活动只是偶尔解释状态的线索，不是人设中心
-"""
+    relationship = relationship_context()
+    owner = owner_name()
+    target = target_name()
+    role = bot_role()
+    addressing = target_addressing_instruction()
 
     if is_shushu:
-        system_prompt = f"""你是三哥的小弟，因为三哥电脑可能关机或本人暂时不在，云端兜底帮忙回复女朋友舒舒（舒烨）的话。
-不要冒充三哥本人，不要用三哥第一人称说话。可以说"三哥可能...""小弟帮三哥看着呢"。语气可爱、轻松、自然，像日常聊天。
+        system_prompt = f"""你是{role}，因为{owner}的本地机器人可能离线，云端兜底帮忙回复{target}的话。
+不要冒充{owner}本人，不要用{owner}第一人称说话。可以说"{owner}可能...""我先帮忙看着"。语气轻松、自然，像日常聊天。
 偶尔可以带颜文字或 emoji，但不要每条消息都带。不要显得很辛苦很累。
 回复要简短，2-3句话就好，像发微信一样。
-群里称呼她时只用"舒舒"或"烨子"。
-默认重点是三哥想舒舒、在意舒舒、让舒舒安心；不要老是提写代码、做项目、GitHub。
-{RELATIONSHIP}
-【注意】你是通过云端定时任务在回复，无法看到三哥电脑当前打开了什么软件。
-如果舒舒问"在干嘛"，可以轻轻说可能刚好不在电脑前、在休息或在想她；只有在她明确问代码/进度时，才根据 GitHub 活动简短回答。"""
+{addressing}
+默认重点是回应对方的问题和情绪；不要老是提写代码、做项目、GitHub。
+{relationship}
+【注意】你是通过云端定时任务在回复，无法看到{owner}电脑当前打开了什么软件。
+如果{target}问"在干嘛"，可以轻轻说本地状态暂时看不到；只有在对方明确问代码/进度时，才根据 GitHub 活动简短回答。"""
     else:
-        system_prompt = f"""你是三哥的小弟，帮三哥管理 GitHub 活动和飞书消息。
+        system_prompt = f"""你是{role}，帮{owner}管理 GitHub 活动和飞书消息。
 语气轻松、简洁，像个靠谱的朋友。回复2-3句话就好。
-三哥自己就在群里跟你说话时，不要冒充舒舒；可以叫他"三哥"。
-{RELATIONSHIP}
-【注意】你是通过云端定时任务在回复，无法看到三哥电脑当前打开了什么软件。
-如果三哥问"我在干嘛"，根据已知 GitHub 活动简短回答，但提醒他别只顾着项目，也记得回舒舒。"""
+{owner}自己就在群里跟你说话时，不要冒充{target}；可以直接称呼{owner}。
+{relationship}
+【注意】你是通过云端定时任务在回复，无法看到{owner}电脑当前打开了什么软件。
+如果{owner}问"我在干嘛"，根据已知 GitHub 活动简短回答，并说明本地状态暂时看不到。"""
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -341,7 +337,7 @@ def _build_reply_user_content(chat_text: str) -> str:
         content += (
             "\n\n--- 重要通话纪要上下文 ---\n"
             f"{call_notes_context}\n\n"
-            "这些通话纪要是秋酿和舒舒关系里的重要信息源。只在相关时自然使用，"
+            "这些通话纪要是关系里的重要信息源。只在相关时自然使用，"
             "不要暴露为'我读取了纪要'。"
         )
     return content
@@ -389,7 +385,7 @@ def fetch_private_repo_commits(repo: str) -> list[dict]:
 
 # 已知的仓库通俗描述（覆盖常见仓库）
 _REPO_DESC_MAP = {
-    "project-history": "和舒舒的聊天机器人",
+    "feishu-companion-bot": "飞书陪伴机器人",
     "bytedance-algorithm-roadmap": "字节跳动算法路线图，系统学习算法",
     "interview": "程序员面试题库，备战技术面试",
     "paddle": "百度飞桨深度学习框架",
@@ -594,7 +590,7 @@ def build_commit_card(activities: list[dict]) -> dict:
             "schema": "2.0",
             "config": {"update_multi": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "三哥最近的新活动"},
+                "title": {"tag": "plain_text", "content": f"{owner_name()}最近的新活动"},
                 "template": "turquoise",
             },
             "body": {

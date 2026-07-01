@@ -17,6 +17,11 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequestBody,
     Reaction,
 )
+from lark_oapi.event.callback.model.p2_card_action_trigger import (
+    CallBackToast,
+    P2CardActionTrigger,
+    P2CardActionTriggerResponse,
+)
 
 from config import (
     FEISHU_APP_ID, FEISHU_APP_SECRET,
@@ -510,11 +515,42 @@ def _get_token() -> str:
     return resp.json()["tenant_access_token"]
 
 
-def create_streaming_card(title: str = "回复", initial_text: str = "正在输入...") -> str:
+def _streaming_action_button(label: str, action: str, button_type: str = "default") -> dict:
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": label},
+        "type": button_type,
+        "width": "default",
+        "name": "streaming_reply_action",
+        "value": {"action": action},
+    }
+
+
+def create_streaming_card(
+    title: str = "回复",
+    initial_text: str = "正在输入...",
+    include_actions: bool = True,
+) -> str:
     """创建一个流式更新模式的卡片实体，返回 card_id。
     卡片包含一个 markdown 组件，element_id='reply_text'。
     """
     token = _get_token()
+
+    body_elements = [
+        {
+            "tag": "markdown",
+            "content": sanitize_public_text(initial_text),
+            "element_id": "reply_text",
+        }
+    ]
+    if include_actions:
+        # Card JSON 2.0 places buttons directly in body.elements.
+        body_elements.extend([
+            _streaming_action_button("换个说法", "rephrase"),
+            _streaming_action_button("继续展开", "continue"),
+            _streaming_action_button("记住这点", "remember", "primary"),
+            _streaming_action_button("不要记这个", "forget", "danger"),
+        ])
 
     card_json = {
         "schema": "2.0",
@@ -528,13 +564,7 @@ def create_streaming_card(title: str = "回复", initial_text: str = "正在输�
             "template": "turquoise",
         },
         "body": {
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": sanitize_public_text(initial_text),
-                    "element_id": "reply_text",
-                }
-            ]
+            "elements": body_elements
         },
     }
 
@@ -558,8 +588,8 @@ def create_streaming_card(title: str = "回复", initial_text: str = "正在输�
     return card_id
 
 
-def send_card_entity(card_id: str, receive_id: str = "") -> bool:
-    """发送卡片实体到群聊或私聊。"""
+def send_card_entity(card_id: str, receive_id: str = "") -> str:
+    """发送卡片实体到群聊或私聊，返回 message_id。"""
     target = receive_id or FEISHU_CHAT_ID
     client = _get_client()
     content = json.dumps({"type": "card", "data": {"card_id": card_id}})
@@ -579,7 +609,7 @@ def send_card_entity(card_id: str, receive_id: str = "") -> bool:
     resp = client.im.v1.message.create(req)
     if not resp.success():
         raise RuntimeError(f"发送卡片实体失败: code={resp.code} msg={resp.msg}")
-    return True
+    return resp.data.message_id if resp.data and hasattr(resp.data, "message_id") else ""
 
 
 def update_streaming_text(card_id: str, full_text: str, sequence: int, token: str = "") -> bool:
@@ -637,6 +667,7 @@ def send_streaming_reply(
     receive_id: str = "",
     initial_text: str = "正在输入...",
     update_interval: float = 0.35,
+    on_sent=None,
 ) -> str:
     """完整的流式回复流程：
     1. 创建流式卡片实体
@@ -660,7 +691,9 @@ def send_streaming_reply(
     card_id = create_streaming_card(title=title, initial_text=initial_text)
 
     # 2. 发送卡片到目标聊天
-    send_card_entity(card_id, receive_id=receive_id)
+    message_id = send_card_entity(card_id, receive_id=receive_id)
+    if on_sent:
+        on_sent(card_id, message_id)
 
     # 3. 流式更新文本
     import time
@@ -690,7 +723,13 @@ def send_streaming_reply(
 
 # ---- 长连接事件订阅 ----
 
-def start_event_listener(on_message_received=None, on_passive_message=None):
+def _card_action_toast(content: str, toast_type: str = "success") -> P2CardActionTriggerResponse:
+    resp = P2CardActionTriggerResponse()
+    resp.toast = CallBackToast({"type": toast_type, "content": content})
+    return resp
+
+
+def start_event_listener(on_message_received=None, on_passive_message=None, on_card_action=None):
     """启动长连接事件监听，实时接收群消息。
     on_message_received: 回调函数，参数为消息 dict {message_id, time, content, sender, is_shushu}
     on_passive_message: 未 @ 机器人时的旁听回调，不直接回复。
@@ -804,9 +843,35 @@ def start_event_listener(on_message_received=None, on_passive_message=None):
         except Exception as e:
             print(f"  [长连接] 处理消息异常: {e}", flush=True)
 
+    def _handle_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
+        try:
+            event = data.event
+            action = event.action if event else None
+            context = event.context if event else None
+            value = action.value if action and action.value else {}
+            payload = {
+                "action": value.get("action", ""),
+                "action_value": value,
+                "action_tag": action.tag if action else "",
+                "action_name": action.name if action else "",
+                "operator_id": event.operator.open_id if event and event.operator else "",
+                "message_id": context.open_message_id if context else "",
+                "chat_id": context.open_chat_id if context else "",
+                "token": event.token if event else "",
+            }
+            print(f"  [卡片回调] {payload}", flush=True)
+            if on_card_action:
+                message = on_card_action(payload) or "已处理"
+                return _card_action_toast(message)
+            return _card_action_toast("已收到")
+        except Exception as e:
+            print(f"  [卡片回调] 处理异常: {e}", flush=True)
+            return _card_action_toast("处理失败，稍后再试", "error")
+
     event_handler = (
         lark.EventDispatcherHandler.builder("", "")
         .register_p2_im_message_receive_v1(_handle_message)
+        .register_p2_card_action_trigger(_handle_card_action)
         .build()
     )
 

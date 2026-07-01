@@ -46,8 +46,10 @@ from config import (
     DEEPSEEK_MODEL,
 )
 from github_client import fetch_github_events, fetch_private_repo_commits, parse_events
+from latency import LatencyTrace
 from summarizer import reply_to_shushu, reply_to_shushu_stream, sanitize_public_text
 from notifier import build_message
+from profile import bot_role, owner_name, target_addressing_instruction, target_name
 from state import (
     load_state,
     save_state,
@@ -55,6 +57,10 @@ from state import (
     update_state,
     filter_new_shushu_messages,
     mark_shushu_messages_processed,
+    remember_streaming_reply_context,
+    get_streaming_reply_context,
+    is_streaming_callback_processed,
+    mark_streaming_callback_processed,
 )
 from feishu_api import (
     fetch_chat_messages,
@@ -72,7 +78,9 @@ from feishu_api import (
 )
 from memory import (
     add_memories,
+    add_manual_memory,
     clean_memory_store,
+    forget_recent_memories_for_texts,
     search_memories,
     get_all_memories,
     format_for_deepseek as format_memories,
@@ -99,7 +107,7 @@ _MOCK_EVENTS = [
     {
         "id": "mock-1",
         "type": "PushEvent",
-        "repo": {"name": "yuaiccc/project-history"},
+        "repo": {"name": "example/feishu-companion-bot"},
         "created_at": "2026-06-29T15:30:00Z",
         "payload": {
             "ref": "refs/heads/main",
@@ -113,7 +121,7 @@ _MOCK_EVENTS = [
     {
         "id": "mock-2",
         "type": "PullRequestEvent",
-        "repo": {"name": "yuaiccc/lean-utils"},
+        "repo": {"name": "example/lean-utils"},
         "created_at": "2026-06-29T14:10:00Z",
         "payload": {
             "action": "opened",
@@ -123,7 +131,7 @@ _MOCK_EVENTS = [
     {
         "id": "mock-3",
         "type": "PushEvent",
-        "repo": {"name": "yuaiccc/nn-verify"},
+        "repo": {"name": "example/nn-verify"},
         "created_at": "2026-06-29T12:00:00Z",
         "payload": {
             "ref": "refs/heads/dev",
@@ -335,7 +343,7 @@ def _classify_tool_intent(content: str, sender: str = "") -> str:
 
 回复 MEMORY_AUDIT：用户要看记忆审计、记忆面板、记忆状态、记忆检查。
 回复 HEALTH：用户要看机器人服务状态、健康检查、自检、状态面板、Ollama/OpenClaw/DeepSeek/飞书连接状态。
-回复 STATUS：用户在问秋酿当前/最近状态、在干嘛、忙不忙、电脑活动、当前窗口。
+回复 STATUS：用户在问 owner 当前/最近状态、在干嘛、忙不忙、电脑活动、当前窗口。
 回复 GITHUB：用户明确问 GitHub、提交、commit、代码记录、仓库、PR、issue、项目进度。
 回复 SEARCH：用户要查外部实时信息、网上资料、热榜、B站、新番、新闻、最近热门内容。
 回复 NONE：普通聊天，不需要查工具。
@@ -378,8 +386,12 @@ NONE 例子：
 
 
 def _interpret_apps(app_summary: str) -> str:
-    """让 DeepSeek 根据本地状态列表，用小弟语气给舒舒一句状态。"""
+    """让 DeepSeek 根据本地状态列表，用 profile 语气给目标用户一句状态。"""
     import requests as req
+    owner = owner_name()
+    target = target_name()
+    role = bot_role()
+    addressing = target_addressing_instruction()
 
     try:
         resp = req.post(
@@ -393,32 +405,31 @@ def _interpret_apps(app_summary: str) -> str:
                 "messages": [
                     {
                         "role": "system",
-                        "content": """你是三哥的小弟，根据三哥电脑当前本地状态，跟舒舒（舒烨）说一句三哥大概在不在电脑前、可能在做什么。
+                        "content": f"""你是{role}，根据{owner}电脑当前本地状态，跟{target}说一句{owner}大概在不在电脑前、可能在做什么。
 
 要求：
-- 你不是三哥本人，不要用三哥第一人称说话
-- 可以说"三哥刚刚...""三哥这会儿...""我帮三哥看着呢"
+- 你不是{owner}本人，不要用{owner}第一人称说话
+- 可以说"{owner}刚刚...""{owner}这会儿...""我先帮忙看着呢"
 - 语气轻松可爱，像日常聊天
 - 1-2句话就好，不要长篇大论
 - 把英文名翻译成通俗中文，不要出现英文 app 名
-- 根据键鼠空闲时间、锁屏状态、前台应用和窗口标题推测秋酿是否在电脑前；这只是推测，不要说得像确定事实
-- 如果状态显示键鼠刚刚有活动，可以说三哥大概率在电脑前；如果锁屏或空闲很久，可以说可能离开电脑了
+- 根据键鼠空闲时间、锁屏状态、前台应用和窗口标题推测{owner}是否在电脑前；这只是推测，不要说得像确定事实
+- 如果状态显示键鼠刚刚有活动，可以说{owner}大概率在电脑前；如果锁屏或空闲很久，可以说可能离开电脑了
 - 不要把"写代码/做项目"当成默认重点
-- 群里称呼她时在"舒舒"和"烨子"里任选一个，不要把两个名字并列说出来
-- 秋酿平时多数时间都在想舒舒；如果状态不明确，优先表达"刚刚在忙一下/在想你/马上来找你"，不要硬编技术内容
+- {addressing}
+- 如果状态不明确，优先表达"刚刚在忙一下/稍后会回来"，不要硬编技术内容
 - 偶尔可以带个 emoji
-- 不要说"我在XXX"，要说"三哥在/可能在XXX"
-- 可以自然带一句三哥惦记舒舒、等会儿会来找舒舒；不要每次都用同一句
+- 不要说"我在XXX"，要说"{owner}在/可能在XXX"
 
 例子：
-输入: 键鼠刚刚有活动（空闲约 12 秒），三哥大概率在电脑前；正在用 Terminal（main.py），旁边还开着: Claude, Feishu
-输出: 三哥刚刚在电脑前处理一点小事，不过小弟看得出来他还是惦记舒舒的，等会儿应该就来找你～
+输入: 键鼠刚刚有活动（空闲约 12 秒），{owner}大概率在电脑前；正在用 Terminal（main.py），旁边还开着: Claude, Feishu
+输出: {owner}刚刚在电脑前处理一点小事，我先帮你看着，等会儿他应该就会回消息～
 
-输入: 键鼠很久没动（空闲约 41 分钟），三哥大概率不在电脑前；正在用 Feishu
-输出: 三哥这会儿可能不在电脑前，小弟先帮舒舒看着，等他回来就让他来找你～
+输入: 键鼠很久没动（空闲约 41 分钟），{owner}大概率不在电脑前；正在用 Feishu
+输出: {owner}这会儿可能不在电脑前，我先帮你看着，等他回来再提醒他～
 
 输入: 正在用 Feishu
-输出: 三哥像是在看消息，小弟帮你盯着，等他冒泡就让他来找烨子～
+输出: {owner}像是在看消息，我帮你盯着，等他冒泡就提醒他～
 """,
                     },
                     {"role": "user", "content": f"应用状态: {app_summary}"},
@@ -482,6 +493,7 @@ def proactive_topic_loop():
 
 def on_message_received(msg_data: dict):
     """长连接收到消息时的回调。三哥和舒舒的消息都回复。"""
+    trace = LatencyTrace("chat_reply")
     try:
         # 存入记忆
         if MEMORY_ENABLED:
@@ -636,7 +648,7 @@ def on_message_received(msg_data: dict):
             return
 
         if tool_intent == "search":
-            print("  [工具调用] 用户询问外部实时信息，调用 OpenClaw 搜索...", flush=True)
+            print("  [工具调用] 用户询问外部实时信息，调用本地搜索后端...", flush=True)
             try:
                 results = search_web(content)
                 card = build_search_card(content, results, summarize_search_intro(content, results))
@@ -655,7 +667,7 @@ def on_message_received(msg_data: dict):
                 try:
                     fallback = answer_external_search(content)
                 except Exception:
-                    fallback = "小弟这边外部搜索暂时没接通，等三哥电脑上的 OpenClaw 稳一下再查。"
+                    fallback = "小弟这边外部搜索暂时没接通，等三哥电脑上的本地搜索服务稳一下再查。"
                 if message_id:
                     try:
                         reply_text(fallback, message_id)
@@ -676,26 +688,29 @@ def on_message_received(msg_data: dict):
 
         # ---- 第2步：读对话上下文 + 搜索记忆 + 生成回复 ----
         recent_messages = []
-        try:
-            recent_messages = _get_chat_messages(chat_id)
-        except Exception as e:
-            print(f"  [警告] 读取消息失败: {e}", flush=True)
+        with trace.span("read_messages"):
+            try:
+                recent_messages = _get_chat_messages(chat_id)
+            except Exception as e:
+                print(f"  [警告] 读取消息失败: {e}", flush=True)
 
         memories = []
-        try:
-            audience = "target" if is_shushu else "owner"
-            memory_query = content or format_for_deepseek(recent_messages[-5:])
-            memories = _search_relevant_memories(memory_query, audience=audience)
-        except Exception as e:
-            print(f"  [警告] 搜索记忆失败: {e}", flush=True)
+        with trace.span("search_memory"):
+            try:
+                audience = "target" if is_shushu else "owner"
+                memory_query = content or format_for_deepseek(recent_messages[-5:])
+                memories = _search_relevant_memories(memory_query, audience=audience)
+            except Exception as e:
+                print(f"  [警告] 搜索记忆失败: {e}", flush=True)
 
         call_notes_context = ""
-        try:
-            call_notes_context = build_call_notes_context()
-            if call_notes_context:
-                print("  [通话纪要] 已读取上下文", flush=True)
-        except Exception as e:
-            print(f"  [警告] 读取通话纪要失败: {e}", flush=True)
+        with trace.span("call_notes"):
+            try:
+                call_notes_context = build_call_notes_context()
+                if call_notes_context:
+                    print("  [通话纪要] 已读取上下文", flush=True)
+            except Exception as e:
+                print(f"  [警告] 读取通话纪要失败: {e}", flush=True)
 
         reply = ""
         replied_via_stream = False
@@ -706,13 +721,40 @@ def on_message_received(msg_data: dict):
                     is_shushu=is_shushu,
                     call_notes_context=call_notes_context,
                 )
+                first_token_seen = False
+                stream_message_id = ""
+
+                def _on_stream_sent(card_id: str, message_id: str) -> None:
+                    nonlocal stream_message_id
+                    stream_message_id = message_id
+
+                def _trace_stream(gen):
+                    nonlocal first_token_seen
+                    for chunk in gen:
+                        if not first_token_seen:
+                            trace.mark("deepseek_first_token")
+                            first_token_seen = True
+                        yield chunk
+
                 reply = send_streaming_reply(
-                    generator,
+                    _trace_stream(generator),
                     title="回复",
                     receive_id=chat_id,
                     initial_text="正在输入...",
                     update_interval=STREAMING_REPLY_UPDATE_INTERVAL_SECONDS,
+                    on_sent=_on_stream_sent,
                 )
+                trace.mark("reply_sent")
+                if stream_message_id and reply:
+                    state = load_state()
+                    remember_streaming_reply_context(state, stream_message_id, {
+                        "chat_id": chat_id,
+                        "is_shushu": is_shushu,
+                        "messages": recent_messages[-12:],
+                        "memories": memories[:8],
+                        "call_notes_context": call_notes_context[:1600],
+                        "reply": reply,
+                    })
                 replied_via_stream = bool(reply)
             except Exception as e:
                 print(f"  [流式回复] 失败，回退普通回复: {e}", flush=True)
@@ -721,11 +763,12 @@ def on_message_received(msg_data: dict):
 
         if not reply:
             try:
-                reply = reply_to_shushu(
-                    recent_messages, memories,
-                    is_shushu=is_shushu,
-                    call_notes_context=call_notes_context,
-                )
+                with trace.span("deepseek_full"):
+                    reply = reply_to_shushu(
+                        recent_messages, memories,
+                        is_shushu=is_shushu,
+                        call_notes_context=call_notes_context,
+                    )
             except Exception as e:
                 print(f"  DeepSeek 回复失败: {e}", flush=True)
                 import traceback
@@ -771,12 +814,81 @@ def on_message_received(msg_data: dict):
                 pass
             except Exception as e:
                 print(f"  [警告] 添加内容表情失败: {e}", flush=True)
+        trace.log()
 
     except Exception as e:
         print(f"  [错误] on_message_received 整体异常: {e}", flush=True)
         import traceback
         traceback.print_exc()
         _notify_status(f"处理飞书消息异常：{e}", key="message_handler_error")
+        trace.log()
+
+
+def on_card_action(action_data: dict) -> str:
+    state = load_state()
+    callback_id = "|".join([
+        action_data.get("message_id", ""),
+        action_data.get("operator_id", ""),
+        action_data.get("action", ""),
+    ])
+    if is_streaming_callback_processed(state, callback_id):
+        return "这次点击已经处理过了"
+    mark_streaming_callback_processed(state, callback_id)
+
+    action = action_data.get("action", "")
+    message_id = action_data.get("message_id", "")
+    context = get_streaming_reply_context(state, message_id)
+    if not context:
+        return "这条回复太早了，已经找不到上下文"
+
+    chat_id = context.get("chat_id") or action_data.get("chat_id") or FEISHU_CHAT_ID
+    messages = context.get("messages") or []
+    memories = context.get("memories") or []
+    call_notes_context = context.get("call_notes_context") or ""
+    is_shushu = bool(context.get("is_shushu", True))
+    original_reply = context.get("reply", "")
+    latest_user_text = messages[-1].get("content", "") if messages else ""
+
+    if action == "rephrase":
+        trace = LatencyTrace("card_rephrase")
+        with trace.span("deepseek_full"):
+            reply = reply_to_shushu(
+                messages,
+                memories,
+                is_shushu=is_shushu,
+                call_notes_context=call_notes_context,
+                extra_instruction=f"请把上一版回复换一种更自然的说法，不要增加新事实。上一版：{original_reply}",
+            )
+        if reply:
+            send_text(reply, receive_id=chat_id)
+        trace.log()
+        return "换了一版"
+
+    if action == "continue":
+        trace = LatencyTrace("card_continue")
+        with trace.span("deepseek_full"):
+            reply = reply_to_shushu(
+                messages,
+                memories,
+                is_shushu=is_shushu,
+                call_notes_context=call_notes_context,
+                extra_instruction=f"请基于上一版再补充一小句，仍然自然克制，不要超过80字。上一版：{original_reply}",
+            )
+        if reply:
+            send_text(reply, receive_id=chat_id)
+        trace.log()
+        return "补充了一句"
+
+    if action == "remember":
+        content = f"这次对话里用户希望机器人留意：{latest_user_text or original_reply}"
+        entry = add_manual_memory(content, category="note", visibility="owner_only", source_type="card_button")
+        return "已写入记忆" if entry else "这条内容价值不高，没写入"
+
+    if action == "forget":
+        removed = forget_recent_memories_for_texts([latest_user_text, original_reply], minutes=15)
+        return f"已尽量移除这次相关记忆 {removed} 条" if removed else "已标记这次不应写入记忆"
+
+    return "未知按钮"
 
 
 # ---- 测试模式 ----
@@ -957,6 +1069,7 @@ def main():
         start_event_listener(
             on_message_received=on_message_received,
             on_passive_message=_PASSIVE_ASSISTANT.on_message,
+            on_card_action=on_card_action,
         )
     except Exception as e:
         print(f"  [致命] 飞书长连接退出: {e}", flush=True)

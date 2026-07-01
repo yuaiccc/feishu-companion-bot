@@ -181,6 +181,7 @@ def reply_to_shushu(
     memories: list[str] = None,
     is_shushu: bool = True,
     call_notes_context: str = "",
+    extra_instruction: str = "",
 ) -> str | None:
     """根据群消息生成回复。is_shushu=True 用对目标用户的语气，False 用对 owner 的语气。"""
     if not messages:
@@ -195,6 +196,8 @@ def reply_to_shushu(
     else:
         prompt = REPLY_PROMPT_SANGE
         user_content = f"{OWNER_NAME}刚刚发了这些话，只根据本轮对话回一句，不要脑补他在做什么：\n\n{context.text}"
+    if extra_instruction:
+        user_content += f"\n\n--- 本次额外要求 ---\n{extra_instruction.strip()}"
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",

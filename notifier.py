@@ -1,6 +1,7 @@
 """飞书消息模块：使用飞书卡片原生 table 组件构建 commit 表格。"""
 from datetime import datetime, timezone, timedelta
 from commit_text import brief_commit_messages, summarize_commit_activity, summarize_star_activity
+from profile import owner_name
 
 _SHANGHAI = timezone(timedelta(hours=8))
 
@@ -9,7 +10,7 @@ _repo_desc_cache: dict[str, str] = {}
 
 # 已知的仓库通俗描述（覆盖常见仓库）
 _REPO_DESC_MAP = {
-    "project-history": "和舒舒的聊天机器人",
+    "feishu-companion-bot": "飞书陪伴机器人",
     "bytedance-algorithm-roadmap": "字节跳动算法路线图，系统学习算法",
     "interview": "程序员面试题库，备战技术面试",
     "paddle": "百度飞桨深度学习框架",
@@ -186,7 +187,7 @@ def build_message(activities: list[dict], summary: str = "") -> dict:
             "schema": "2.0",
             "config": {"update_multi": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "三哥最近的新活动"},
+                "title": {"tag": "plain_text", "content": f"{owner_name()}最近的新活动"},
                 "template": "turquoise",
                 "padding": "12px 12px 12px 12px",
             },
@@ -232,7 +233,7 @@ def _parse_time(iso_str: str):
 
 
 def _short_repo(full: str) -> str:
-    """yuaiccc/project-history → project-history"""
+    """example/feishu-companion-bot -> feishu-companion-bot"""
     return full.split("/")[-1] if "/" in full else full
 
 

@@ -18,6 +18,8 @@ def load_state() -> dict:
         "passive_topic_timestamps": {},
         "passive_sent_timestamps": [],
         "proactive_topic_sent_dates": {},
+        "streaming_reply_contexts": {},
+        "streaming_reply_callback_ids": [],
     }
 
 
@@ -162,4 +164,39 @@ def mark_proactive_sent(state: dict, date_key: str, now: float | None = None) ->
         if key >= time.strftime("%Y-%m-%d", time.localtime(now - 31 * 24 * 3600))
     }
     state["proactive_topic_last_sent_at"] = now
+    save_state(state)
+
+
+# ---- 流式回复卡片短期上下文 / 按钮幂等 ----
+
+def remember_streaming_reply_context(state: dict, message_id: str, context: dict, now: float | None = None) -> None:
+    if not message_id:
+        return
+    now = now or time.time()
+    contexts = dict(state.get("streaming_reply_contexts", {}) or {})
+    compact = dict(context)
+    compact["created_at"] = now
+    contexts[message_id] = compact
+    state["streaming_reply_contexts"] = {
+        key: value for key, value in contexts.items()
+        if now - float(value.get("created_at", now)) < 24 * 3600
+    }
+    save_state(state)
+
+
+def get_streaming_reply_context(state: dict, message_id: str) -> dict:
+    return dict((state.get("streaming_reply_contexts", {}) or {}).get(message_id, {}) or {})
+
+
+def is_streaming_callback_processed(state: dict, callback_id: str) -> bool:
+    return bool(callback_id and callback_id in set(state.get("streaming_reply_callback_ids", [])))
+
+
+def mark_streaming_callback_processed(state: dict, callback_id: str) -> None:
+    if not callback_id:
+        return
+    ids = list(state.get("streaming_reply_callback_ids", []) or [])
+    if callback_id not in ids:
+        ids.append(callback_id)
+    state["streaming_reply_callback_ids"] = ids[-_MAX_PROCESSED:]
     save_state(state)

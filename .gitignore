@@ -21,6 +21,7 @@ venv/
 
 # Memory data (mem0 / Qdrant local storage)
 memory_data/
+profiles/sange-shushu.json
 
 # Temp files
 feishu_login_qr.png

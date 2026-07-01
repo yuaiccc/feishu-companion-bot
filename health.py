@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from pathlib import Path
 
 import requests
 
@@ -10,6 +11,8 @@ from config import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
+    DEERFLOW_BACKEND_DIR,
+    EXTERNAL_SEARCH_BACKEND,
     FEISHU_APP_ID,
     FEISHU_APP_SECRET,
     FEISHU_CHAT_ID,
@@ -17,7 +20,7 @@ from config import (
     MEMORY_OLLAMA_EMBED_MODEL,
     OPENCLAW_SEARCH_TIMEOUT_SECONDS,
 )
-from external_search import _resolve_openclaw_cli
+from external_search import _resolve_deerflow_python, _resolve_openclaw_cli
 from local_apps import get_presence_summary
 from memory import _load_all
 
@@ -66,7 +69,7 @@ def _health_rows() -> list[dict]:
     rows.append(_config_check())
     rows.append(_deepseek_check())
     rows.append(_ollama_check())
-    rows.append(_openclaw_check())
+    rows.append(_search_backend_check())
     rows.append(_memory_check())
     rows.append(_local_status_check())
     return rows
@@ -115,6 +118,32 @@ def _ollama_check() -> dict:
         return _row("Ollama 向量", bool(embedding), f"{MEMORY_OLLAMA_EMBED_MODEL} / {len(embedding)} 维")
     except Exception as e:
         return _row("Ollama 向量", False, str(e))
+
+
+def _search_backend_check() -> dict:
+    backend = EXTERNAL_SEARCH_BACKEND or "deerflow"
+    if backend == "deerflow":
+        return _deerflow_check()
+    if backend == "openclaw":
+        return _openclaw_check()
+    if backend == "auto":
+        deerflow = _deerflow_check()
+        openclaw = _openclaw_check()
+        ok = deerflow["status"] == "正常" or openclaw["status"] == "正常"
+        detail = f"DeerFlow: {deerflow['detail']}；OpenClaw: {openclaw['detail']}"
+        return _row("外部搜索(auto)", ok, detail)
+    return _row("外部搜索", False, f"未知后端: {backend}")
+
+
+def _deerflow_check() -> dict:
+    try:
+        backend_dir = Path(DEERFLOW_BACKEND_DIR).expanduser()
+        python = Path(_resolve_deerflow_python(backend_dir))
+        ok = backend_dir.exists() and python.exists()
+        detail = f"{backend_dir} / {python}"
+        return _row("DeerFlow 搜索", ok, detail)
+    except Exception as e:
+        return _row("DeerFlow 搜索", False, str(e))
 
 
 def _openclaw_check() -> dict:

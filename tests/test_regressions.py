@@ -1,3 +1,5 @@
+import json
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -46,7 +48,7 @@ class BotRegressionTests(unittest.TestCase):
         activities = [
             {
                 "type": "PushEvent",
-                "repo": "yuaiccc/project-history",
+                "repo": "example/feishu-companion-bot",
                 "created_at": "2026-06-30T08:24:00Z",
                 "detail": {
                     "commit_count": 1,
@@ -63,7 +65,7 @@ class BotRegressionTests(unittest.TestCase):
         activities = [
             {
                 "type": "PushEvent",
-                "repo": {"name": "yuaiccc/project-history"},
+                "repo": {"name": "example/feishu-companion-bot"},
                 "created_at": "2026-06-30T08:24:00Z",
                 "payload": {"commits": [{"message": "Remove activity summary"}]},
             }
@@ -82,7 +84,7 @@ class BotRegressionTests(unittest.TestCase):
             card = notifier.build_message([
                 {
                     "type": "PushEvent",
-                    "repo": "yuaiccc/project-history",
+                    "repo": "example/feishu-companion-bot",
                     "created_at": "2026-06-30T08:24:00Z",
                     "detail": {
                         "commit_count": 1,
@@ -117,17 +119,17 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(_classify_tool_intent("打开记忆审计面板", "三哥"), "memory_audit")
         self.assertEqual(_classify_tool_intent("想你了", "舒舒"), "none")
 
-    def test_persona_is_helper_not_sange_persona(self):
+    def test_persona_is_helper_not_impersonation(self):
         prompts = "\n".join([
             summarizer.RELATIONSHIP_CONTEXT,
             summarizer.SYSTEM_PROMPT,
             summarizer.REPLY_PROMPT_SHUSHU,
             external_search.summarize_search_results.__doc__ or "",
         ])
-        self.assertIn("三哥的小弟", prompts)
-        self.assertIn("大哥的老婆", prompts)
-        self.assertNotIn("你是秋酿本人", prompts)
-        self.assertNotIn("用第一人称跟舒舒说话", prompts)
+        self.assertIn("不是用户本人", prompts)
+        self.assertIn("不要冒充用户", prompts)
+        self.assertNotIn("你是用户本人", prompts)
+        self.assertNotIn("用第一人称跟对方说话", prompts)
 
     def test_aliases_are_one_person_not_parallel_names(self):
         prompts = "\n".join([
@@ -135,8 +137,7 @@ class BotRegressionTests(unittest.TestCase):
             summarizer.SYSTEM_PROMPT,
             summarizer.REPLY_PROMPT_SHUSHU,
         ])
-        self.assertIn("同一个人", prompts)
-        self.assertIn("不要把两个名字并列说出来", prompts)
+        self.assertIn("直接称呼对方", prompts)
         self.assertNotIn("只用舒舒或烨子", prompts)
 
     def test_default_profile_has_no_private_names(self):
@@ -148,13 +149,13 @@ class BotRegressionTests(unittest.TestCase):
         self.assertIn("可配置", context)
         bot_profile.load_profile.cache_clear()
 
-    def test_sange_profile_supplies_relationship_context(self):
-        with patch.object(bot_profile, "PROFILE_ID", "sange-shushu"):
+    def test_example_couple_profile_supplies_relationship_context(self):
+        with patch.object(bot_profile, "PROFILE_ID", "example-couple"):
             bot_profile.load_profile.cache_clear()
             context = bot_profile.relationship_context()
             addressing = bot_profile.target_addressing_instruction()
-        self.assertIn("三哥", context)
-        self.assertIn("舒舒", context)
+        self.assertIn("A 和 B", context)
+        self.assertIn("宝贝", addressing)
         self.assertIn("不要把两个名字并列说出来", addressing)
         bot_profile.load_profile.cache_clear()
 
@@ -162,7 +163,7 @@ class BotRegressionTests(unittest.TestCase):
         transcript = "\n".join([
             "随便聊一点普通事情",
             "舒舒说晚上记得早点来打电话，想听你说晚安",
-            "秋酿答应散步回来就找她",
+            "用户答应散步回来就找她",
         ])
         summary = call_notes._fallback_summarize_transcript(transcript)
         self.assertIn("记得早点来打电话", summary)
@@ -440,6 +441,31 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(updates[-1][0], "你好呀")
         stop_mock.assert_called_once()
 
+    def test_streaming_card_uses_schema2_buttons(self):
+        payloads = []
+
+        class Resp:
+            def json(self):
+                return {"code": 0, "data": {"card_id": "card_1"}}
+
+        with patch.object(feishu_api, "_get_token", return_value="tenant_token"), patch.object(
+            feishu_api._requests,
+            "post",
+            side_effect=lambda *args, **kwargs: payloads.append(kwargs["json"]) or Resp(),
+        ):
+            card_id = feishu_api.create_streaming_card()
+
+        self.assertEqual(card_id, "card_1")
+        card_json = json.loads(payloads[0]["data"])
+        elements = card_json["body"]["elements"]
+        self.assertEqual(card_json["schema"], "2.0")
+        self.assertNotIn("action", [e.get("tag") for e in elements])
+        buttons = [e for e in elements if e.get("tag") == "button"]
+        self.assertEqual(
+            [b["value"]["action"] for b in buttons],
+            ["rephrase", "continue", "remember", "forget"],
+        )
+
     def test_reply_context_is_bounded_and_auditable(self):
         messages = [
             {"time": f"07-01 12:{i:02d}", "sender": "舒舒", "content": "消息" + str(i) * 60}
@@ -493,7 +519,7 @@ class BotRegressionTests(unittest.TestCase):
         ), patch.object(
             call_notes,
             "_summarize_transcript_with_deepseek",
-            return_value="舒舒在意晚上能不能好好通电话；秋酿要记得主动找她。",
+            return_value="对方在意晚上能不能好好通电话；用户要记得主动找她。",
         ):
             context = call_notes.build_call_notes_context()
         self.assertIn("通话摘要", context)
@@ -517,6 +543,37 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(elements[1]["tag"], "table")
         self.assertEqual(elements[1]["columns"][0]["display_name"], "推荐")
         assert_public_text_clean(card)
+
+    def test_deerflow_search_wraps_agent_answer_as_result(self):
+        class Proc:
+            returncode = 0
+            stdout = json.dumps({
+                "answer": "结论：近期可以先看官方专题。来源：https://example.com/anime"
+            }, ensure_ascii=False)
+            stderr = ""
+
+        with patch.object(external_search, "DEERFLOW_BACKEND_DIR", external_search.Path(".")), patch.object(
+            external_search,
+            "DEERFLOW_PYTHON",
+            sys.executable,
+        ), patch.object(external_search.subprocess, "run", return_value=Proc()):
+            results = external_search.search_deerflow("近期B站新番", limit=3)
+        self.assertEqual(results[0]["provider"], "deerflow")
+        self.assertIn("DeerFlow 本地调研", results[0]["title"])
+        self.assertEqual(results[1]["url"], "https://example.com/anime")
+
+    def test_search_web_can_fallback_from_deerflow_to_openclaw(self):
+        with patch.object(external_search, "EXTERNAL_SEARCH_BACKEND", "auto"), patch.object(
+            external_search,
+            "search_deerflow",
+            side_effect=RuntimeError("down"),
+        ), patch.object(
+            external_search,
+            "search_openclaw",
+            return_value=[{"title": "fallback", "snippet": "ok", "url": ""}],
+        ):
+            results = external_search.search_web("查一下")
+        self.assertEqual(results[0]["title"], "fallback")
 
     def test_presence_summary_uses_probability_language(self):
         with patch.object(local_apps, "is_screen_locked", return_value=False), patch.object(
@@ -573,8 +630,8 @@ class BotRegressionTests(unittest.TestCase):
             "ou_shushu",
         ):
             text = proactive_topic._with_mentions("小弟来开个话题。")
-        self.assertIn('<at user_id="ou_sange">三哥</at>', text)
-        self.assertIn('<at user_id="ou_shushu">舒舒</at>', text)
+        self.assertIn('<at user_id="ou_sange">用户</at>', text)
+        self.assertIn('<at user_id="ou_shushu">对方</at>', text)
 
     def test_proactive_state_daily_limit(self):
         s = {"proactive_topic_sent_dates": {"2026-07-02": 1}}
