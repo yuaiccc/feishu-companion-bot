@@ -147,11 +147,11 @@ def _save_to_memory(messages: list[dict]):
     add_memories(messages)
 
 
-def _search_relevant_memories(query: str) -> list[str]:
+def _search_relevant_memories(query: str, audience: str = "target") -> list[str]:
     if not MEMORY_ENABLED:
         return []
     print("  正在搜索相关记忆...")
-    memories = search_memories(query)
+    memories = search_memories(query, audience=audience)
     if memories:
         print(f"  找到 {len(memories)} 条相关记忆:")
         for m in memories:
@@ -572,11 +572,12 @@ def on_message_received(msg_data: dict):
             print(f"  [警告] 读取消息失败: {e}", flush=True)
 
         memories = []
-        if is_shushu:
-            try:
-                memories = _search_relevant_memories(f"{sender_name}最近说了什么")
-            except Exception as e:
-                print(f"  [警告] 搜索记忆失败: {e}", flush=True)
+        try:
+            audience = "target" if is_shushu else "owner"
+            memory_query = content or format_for_deepseek(recent_messages[-5:])
+            memories = _search_relevant_memories(memory_query, audience=audience)
+        except Exception as e:
+            print(f"  [警告] 搜索记忆失败: {e}", flush=True)
 
         call_notes_context = ""
         try:

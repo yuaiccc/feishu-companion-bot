@@ -33,6 +33,10 @@ FEISHU_EVENT_MAX_AGE_SECONDS = int(os.getenv("FEISHU_EVENT_MAX_AGE_SECONDS", "60
 # ---- 记忆模块 ----
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "true").lower() in ("true", "1", "yes")
 MEMORY_DIR = BASE_DIR / os.getenv("MEMORY_DIR", "memory_data")
+MEMORY_EMBEDDING_ENABLED = os.getenv("MEMORY_EMBEDDING_ENABLED", "true").lower() in ("true", "1", "yes")
+MEMORY_AGENTIC_RAG_ENABLED = os.getenv("MEMORY_AGENTIC_RAG_ENABLED", "true").lower() in ("true", "1", "yes")
+MEMORY_EMBEDDING_DIM = int(os.getenv("MEMORY_EMBEDDING_DIM", "256"))
+MEMORY_RAG_CANDIDATES = int(os.getenv("MEMORY_RAG_CANDIDATES", "12"))
 
 # ---- 外部搜索（本地 OpenClaw）----
 EXTERNAL_SEARCH_ENABLED = os.getenv("EXTERNAL_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")

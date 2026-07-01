@@ -1,14 +1,21 @@
-"""轻量记忆模块：JSON 文件存储 + DeepSeek 提取关键信息 + 关键词搜索。
-不依赖 scipy/sklearn/HuggingFace，稳定可靠。
+"""Privacy-first memory module with local embeddings and agentic retrieval.
+
+The JSON file remains the source of truth. Embeddings are deterministic local
+hash vectors, so private memories are not sent to a third-party embedding API.
+DeepSeek is only used after visibility filtering, and never receives memories
+marked ``private``.
 """
 import json
+import math
 import os
 import re
+import hashlib
 from datetime import datetime
 
 from config import (
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL,
-    MEMORY_ENABLED, MEMORY_DIR,
+    MEMORY_ENABLED, MEMORY_DIR, MEMORY_EMBEDDING_ENABLED,
+    MEMORY_AGENTIC_RAG_ENABLED, MEMORY_EMBEDDING_DIM, MEMORY_RAG_CANDIDATES,
 )
 from profile import memory_category_keywords, profile_id
 
@@ -16,12 +23,25 @@ import requests
 
 _MEMORY_FILE = None
 _MAX_MEMORIES = int(os.getenv("MEMORY_MAX_ITEMS", "200"))
+_EMBEDDING_MODEL = "local-hash-ngram-v1"
+_VISIBILITY_PUBLIC = "public_to_target"
+_VISIBILITY_OWNER = "owner_only"
+_VISIBILITY_PRIVATE = "private"
 _CATEGORY_KEYWORDS = {
     "person": ("生日", "学校", "大学", "本科", "家住", "地址", "家里", "姓名", "小名"),
     "relationship": ("想你", "爱你", "在一起", "电话", "晚安", "抱抱"),
     "preference": ("喜欢", "不喜欢", "偏好", "爱喝", "不加糖", "吃", "喝", "散步"),
     "schedule": ("晚上", "早上", "明天", "今天", "最近", "待在", "回家", "学校"),
 }
+_PRIVATE_PATTERNS = (
+    re.compile(r"(?i)\b(sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})\b"),
+    re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd|密码|密钥)\b"),
+    re.compile(r"(家住|住址|地址|小区|栋|单元|门牌|身份证|手机号|电话号)"),
+    re.compile(r"\d+\s*(栋|单元|室|号楼|号)"),
+)
+_OWNER_ONLY_PATTERNS = (
+    re.compile(r"[\u4e00-\u9fff]{2,}(省|市|区|县|乡|镇|街道|路|巷)"),
+)
 
 
 def _get_memory_file():
@@ -45,7 +65,21 @@ def _load_all() -> list[dict]:
         return []
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        normalized = []
+        changed = False
+        for idx, mem in enumerate(data, start=1):
+            if not isinstance(mem, dict):
+                continue
+            before = json.dumps(mem, ensure_ascii=False, sort_keys=True)
+            normalized.append(_normalize_memory_entry(mem, idx))
+            after = json.dumps(normalized[-1], ensure_ascii=False, sort_keys=True)
+            changed = changed or before != after
+        if changed:
+            _save_all(normalized)
+        return normalized
     except (json.JSONDecodeError, IOError):
         return []
 
@@ -63,6 +97,31 @@ def _normalize_text(text: str) -> str:
     return text
 
 
+def _normalize_memory_entry(mem: dict, idx: int = 0) -> dict:
+    content = str(mem.get("content", "")).strip()
+    category = mem.get("category") or _categorize(content)
+    visibility = _most_restrictive_visibility(
+        mem.get("visibility") or _VISIBILITY_PUBLIC,
+        _infer_visibility(content, category),
+    )
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    mem["id"] = str(mem.get("id") or f"mem_{idx}")
+    mem["content"] = content
+    mem["category"] = category
+    mem["visibility"] = _normalize_visibility(visibility)
+    mem["importance"] = int(mem.get("importance") or _importance(content, category))
+    mem["confidence"] = float(mem.get("confidence") or 0.7)
+    mem["time"] = mem.get("time") or now
+    mem["last_seen"] = mem.get("last_seen") or mem.get("time") or now
+    mem["seen_count"] = int(mem.get("seen_count") or 1)
+    mem["embedding_model"] = mem.get("embedding_model") or _EMBEDDING_MODEL
+    if MEMORY_EMBEDDING_ENABLED and not _valid_embedding(mem.get("embedding")):
+        mem["embedding"] = _embed_text(content)
+    if "source_messages" in mem:
+        mem["source_messages"] = _redact_source_messages(mem.get("source_messages") or [])
+    return mem
+
+
 def _categorize(text: str) -> str:
     keywords_by_category = dict(_CATEGORY_KEYWORDS)
     keywords_by_category.update(memory_category_keywords())
@@ -70,6 +129,30 @@ def _categorize(text: str) -> str:
         if any(keyword in text for keyword in keywords):
             return category
     return "note"
+
+
+def _infer_visibility(text: str, category: str) -> str:
+    if _contains_private_secret(text):
+        return _VISIBILITY_PRIVATE
+    if _contains_owner_only_info(text):
+        return _VISIBILITY_OWNER
+    if category in ("person", "schedule") and any(word in text for word in ("家", "住", "地址", "电话")):
+        return _VISIBILITY_OWNER
+    return _VISIBILITY_PUBLIC
+
+
+def _normalize_visibility(visibility: str) -> str:
+    if visibility in (_VISIBILITY_PUBLIC, _VISIBILITY_OWNER, _VISIBILITY_PRIVATE):
+        return visibility
+    return _VISIBILITY_OWNER
+
+
+def _contains_private_secret(text: str) -> bool:
+    return any(pattern.search(text or "") for pattern in _PRIVATE_PATTERNS)
+
+
+def _contains_owner_only_info(text: str) -> bool:
+    return any(pattern.search(text or "") for pattern in _OWNER_ONLY_PATTERNS)
 
 
 def _importance(text: str, category: str) -> int:
@@ -89,10 +172,15 @@ def _merge_memory(existing: dict, fact: str, now: str, messages: list[dict]):
     existing["seen_count"] = int(existing.get("seen_count", 1)) + 1
     existing["category"] = existing.get("category") or _categorize(existing.get("content", ""))
     existing["importance"] = max(int(existing.get("importance", 1)), _importance(existing.get("content", ""), existing["category"]))
-    existing["source_messages"] = [
-        {"sender": m["sender"], "content": m["content"][:50], "time": m["time"]}
-        for m in messages
-    ]
+    existing["visibility"] = _most_restrictive_visibility(
+        existing.get("visibility"),
+        _infer_visibility(fact, _categorize(fact)),
+    )
+    existing["confidence"] = max(float(existing.get("confidence", 0.7)), 0.75)
+    if MEMORY_EMBEDDING_ENABLED:
+        existing["embedding"] = _embed_text(existing.get("content", ""))
+        existing["embedding_model"] = _EMBEDDING_MODEL
+    existing["source_messages"] = _redact_source_messages(messages)
 
 
 def _prune_memories(memories: list[dict]) -> list[dict]:
@@ -105,6 +193,30 @@ def _prune_memories(memories: list[dict]) -> list[dict]:
             mem.get("last_seen") or mem.get("time") or "",
         )
     return sorted(memories, key=key, reverse=True)[:_MAX_MEMORIES]
+
+
+def _most_restrictive_visibility(*values: str) -> str:
+    rank = {_VISIBILITY_PUBLIC: 0, _VISIBILITY_OWNER: 1, _VISIBILITY_PRIVATE: 2}
+    normalized = [_normalize_visibility(v or _VISIBILITY_OWNER) for v in values]
+    return max(normalized, key=lambda v: rank[v])
+
+
+def _redact_source_messages(messages: list[dict]) -> list[dict]:
+    safe = []
+    for m in messages or []:
+        content = str(m.get("content", ""))
+        if _contains_private_secret(content):
+            content = "[已隐藏敏感内容]"
+        elif _contains_owner_only_info(content):
+            content = content[:20] + "..." if len(content) > 20 else content
+        else:
+            content = content[:50]
+        safe.append({
+            "sender": m.get("sender", ""),
+            "content": content,
+            "time": m.get("time", ""),
+        })
+    return safe
 
 
 def _extract_facts(messages: list[dict]) -> list[str]:
@@ -168,6 +280,66 @@ def _keyword_score(query: str, text: str) -> float:
     return score
 
 
+def _embed_text(text: str) -> list[float]:
+    """Create a deterministic local embedding from character ngrams."""
+    dim = max(int(MEMORY_EMBEDDING_DIM or 256), 32)
+    vec = [0.0] * dim
+    normalized = _normalize_text(text)
+    if not normalized:
+        return vec
+
+    grams = []
+    for n in (1, 2, 3):
+        if len(normalized) >= n:
+            grams.extend(normalized[i:i + n] for i in range(len(normalized) - n + 1))
+    for token in re.findall(r"[A-Za-z0-9_]+", text or ""):
+        grams.append(token.lower())
+
+    for gram in grams:
+        digest = hashlib.blake2b(gram.encode("utf-8"), digest_size=8).digest()
+        bucket = int.from_bytes(digest[:4], "big") % dim
+        sign = 1.0 if digest[4] % 2 == 0 else -1.0
+        weight = 1.4 if len(gram) >= 2 else 0.7
+        vec[bucket] += sign * weight
+
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm <= 0:
+        return vec
+    return [round(v / norm, 6) for v in vec]
+
+
+def _valid_embedding(value) -> bool:
+    return isinstance(value, list) and len(value) == max(int(MEMORY_EMBEDDING_DIM or 256), 32)
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _allowed_for_audience(mem: dict, audience: str) -> bool:
+    visibility = _normalize_visibility(mem.get("visibility"))
+    if visibility == _VISIBILITY_PRIVATE:
+        return False
+    if audience == "owner":
+        return True
+    return visibility == _VISIBILITY_PUBLIC
+
+
+def _memory_score(query: str, query_embedding: list[float], mem: dict) -> float:
+    text = mem.get("content", "")
+    keyword = _keyword_score(query, text)
+    source_score = sum(
+        _keyword_score(query, sm.get("content", "")) * 0.2
+        for sm in mem.get("source_messages", [])
+    )
+    semantic = _cosine(query_embedding, mem.get("embedding", [])) if MEMORY_EMBEDDING_ENABLED else 0.0
+    importance = int(mem.get("importance", 1)) * 0.12
+    repeated = min(int(mem.get("seen_count", 1)), 5) * 0.06
+    return keyword + source_score + max(semantic, 0.0) * 2.0 + importance + repeated
+
+
 def add_memories(messages: list[dict], user_id: str = "shushu_chat") -> list:
     """把对话存入记忆。DeepSeek 自动提取关键信息。"""
     if not MEMORY_ENABLED or not messages:
@@ -201,18 +373,20 @@ def add_memories(messages: list[dict], user_id: str = "shushu_chat") -> list:
             _merge_memory(existing, fact, now, messages)
             continue
         category = _categorize(fact)
+        visibility = _infer_visibility(fact, category)
         entry = {
             "id": f"mem_{len(all_memories) + len(new_entries) + 1}",
             "content": fact,
             "category": category,
             "importance": _importance(fact, category),
+            "visibility": visibility,
+            "confidence": 0.75,
             "time": now,
             "last_seen": now,
             "seen_count": 1,
-            "source_messages": [
-                {"sender": m["sender"], "content": m["content"][:50], "time": m["time"]}
-                for m in messages
-            ],
+            "embedding_model": _EMBEDDING_MODEL,
+            "embedding": _embed_text(fact) if MEMORY_EMBEDDING_ENABLED else [],
+            "source_messages": _redact_source_messages(messages),
         }
         new_entries.append(entry)
         all_memories.append(entry)
@@ -229,8 +403,13 @@ def add_memories(messages: list[dict], user_id: str = "shushu_chat") -> list:
     return new_entries
 
 
-def search_memories(query: str, user_id: str = "shushu_chat", top_k: int = 5) -> list[str]:
-    """搜索相关记忆。使用关键词匹配。"""
+def search_memories(
+    query: str,
+    user_id: str = "shushu_chat",
+    top_k: int = 5,
+    audience: str = "target",
+) -> list[str]:
+    """Search relevant memories with privacy filtering, embeddings, and agentic rerank."""
     if not MEMORY_ENABLED:
         return []
 
@@ -238,22 +417,109 @@ def search_memories(query: str, user_id: str = "shushu_chat", top_k: int = 5) ->
     if not all_memories:
         return []
 
+    query_embedding = _embed_text(query) if MEMORY_EMBEDDING_ENABLED else []
     scored = []
     for mem in all_memories:
-        text = mem.get("content", "")
-        score = _keyword_score(query, text)
-        # 也搜索 source_messages
-        for sm in mem.get("source_messages", []):
-            score += _keyword_score(query, sm.get("content", "")) * 0.5
+        mem = _normalize_memory_entry(mem)
+        if not _allowed_for_audience(mem, audience):
+            continue
+        score = _memory_score(query, query_embedding, mem)
         if score > 0:
-            score += int(mem.get("importance", 1)) * 0.2
-            score += min(int(mem.get("seen_count", 1)), 5) * 0.1
-            scored.append((score, text))
+            scored.append((score, mem))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    results = [text for _, text in scored[:top_k]]
+    candidates = [mem for _, mem in scored[:max(MEMORY_RAG_CANDIDATES, top_k)]]
+    if not candidates:
+        return []
+    selected = _agentic_select_memories(query, candidates, top_k, audience)
+    return [m.get("content", "") for m in selected[:top_k] if m.get("content")]
 
-    return results
+
+def _agentic_select_memories(query: str, candidates: list[dict], top_k: int, audience: str) -> list[dict]:
+    """Let DeepSeek choose the final context from already privacy-filtered candidates."""
+    if not MEMORY_AGENTIC_RAG_ENABLED or not DEEPSEEK_API_KEY or len(candidates) <= top_k:
+        return candidates[:top_k]
+
+    safe_candidates = [
+        {
+            "id": str(mem.get("id")),
+            "content": mem.get("content", ""),
+            "category": mem.get("category", "note"),
+            "importance": mem.get("importance", 1),
+            "visibility": mem.get("visibility", _VISIBILITY_PUBLIC),
+        }
+        for mem in candidates
+        if _allowed_for_audience(mem, audience)
+    ]
+    if not safe_candidates:
+        return []
+
+    system = (
+        "你是隐私优先的记忆检索器。只能从候选记忆中选择与用户当前问题真正相关的记忆。"
+        "不要扩写、不要编造、不要选择 private 记忆。"
+        "如果候选记忆只是泛泛相关或可能造成隐私泄露，就不要选。"
+        "只输出 JSON 数组，数组元素是记忆 id 字符串。"
+    )
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "query": query,
+                        "audience": audience,
+                        "max_items": top_k,
+                        "candidates": safe_candidates,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        "temperature": 0.0,
+        "max_tokens": 160,
+    }
+    try:
+        resp = requests.post(
+            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        ids = _parse_json_id_list(raw)
+        if not ids:
+            return candidates[:top_k]
+        by_id = {str(mem.get("id")): mem for mem in candidates}
+        selected = [by_id[mid] for mid in ids if mid in by_id and _allowed_for_audience(by_id[mid], audience)]
+        return selected[:top_k] or candidates[:top_k]
+    except Exception as e:
+        print(f"  [memory] agentic rerank 失败: {e}", flush=True)
+        return candidates[:top_k]
+
+
+def _parse_json_id_list(raw: str) -> list[str]:
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    start = text.find("[")
+    end = text.rfind("]")
+    if start >= 0 and end >= start:
+        text = text[start:end + 1]
+    try:
+        data = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item) for item in data if isinstance(item, (str, int))]
 
 
 def get_all_memories(user_id: str = "shushu_chat") -> list[str]:

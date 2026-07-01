@@ -7,6 +7,7 @@ import commit_text
 import external_search
 import local_apps
 import love_note
+import memory
 import notifier
 import passive_assistant
 import profile as bot_profile
@@ -160,6 +161,53 @@ class BotRegressionTests(unittest.TestCase):
         self.assertIn("记得早点来打电话", summary)
         self.assertIn("散步回来就找她", summary)
         assert_public_text_clean(summary)
+
+    def test_memory_visibility_blocks_owner_only_for_target(self):
+        memories = [
+            {
+                "id": "safe",
+                "content": "舒舒喜欢不加糖的饮料。",
+                "category": "preference",
+                "visibility": "public_to_target",
+                "importance": 3,
+                "seen_count": 1,
+            },
+            {
+                "id": "addr",
+                "content": "三哥家住某某小区 71 栋 3 单元。",
+                "category": "person",
+                "visibility": "owner_only",
+                "importance": 5,
+                "seen_count": 1,
+            },
+            {
+                "id": "secret",
+                "content": "DeepSeek API Key 是 sk-abcdefghijklmnop。",
+                "category": "note",
+                "visibility": "private",
+                "importance": 5,
+                "seen_count": 1,
+            },
+        ]
+        with patch.object(memory, "_load_all", return_value=memories), patch.object(
+            memory,
+            "MEMORY_AGENTIC_RAG_ENABLED",
+            False,
+        ):
+            target_results = memory.search_memories("住哪里 不加糖", audience="target", top_k=5)
+            owner_results = memory.search_memories("住哪里 不加糖", audience="owner", top_k=5)
+        self.assertIn("舒舒喜欢不加糖的饮料。", target_results)
+        self.assertNotIn("三哥家住某某小区 71 栋 3 单元。", target_results)
+        self.assertNotIn("DeepSeek API Key 是 sk-abcdefghijklmnop。", owner_results)
+        self.assertNotIn("三哥家住某某小区 71 栋 3 单元。", owner_results)
+
+    def test_memory_entry_gets_local_embedding_and_visibility(self):
+        entry = memory._normalize_memory_entry({"content": "舒舒喜欢晚上散步。"}, 1)
+        self.assertEqual(entry["visibility"], "public_to_target")
+        self.assertEqual(entry["embedding_model"], "local-hash-ngram-v1")
+        self.assertEqual(len(entry["embedding"]), memory.MEMORY_EMBEDDING_DIM)
+        private_entry = memory._normalize_memory_entry({"content": "家住某某小区 71 栋 3 单元。"}, 2)
+        self.assertEqual(private_entry["visibility"], "private")
 
     def test_call_notes_context_uses_summary_cache_shape(self):
         with patch.dict(
