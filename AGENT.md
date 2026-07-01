@@ -211,7 +211,10 @@ https://open.feishu.cn/document/home/index
 `proactive_topic.py` 负责机器人主动开话题。它不是旁听回答问题，而是冷场后轻轻 @ 两个人聊一句。必须同时满足：当天未超过 `PROACTIVE_TOPIC_MAX_PER_DAY`、当前时间在活跃窗口内、最近群聊消息距离现在至少 `PROACTIVE_TOPIC_QUIET_SECONDS`、能读到群聊最近消息。热聊时不要插嘴；读消息失败时不要把空列表当冷场。飞书文本消息 @ 用户使用官方格式 `<at user_id="ou_xxx">名字</at>`，不要混用卡片 `<at id=...>` 语法。
 
 ### 11c-3. 普通聊天优先流式卡片
-普通 DeepSeek 聊天回复默认走 `reply_to_shushu_stream()` + `send_streaming_reply()`。先发带“整理中...”占位的飞书流式卡片，再用 CardKit 更新 `reply_text` 元素。更新时复用 tenant token，并按 `STREAMING_REPLY_UPDATE_INTERVAL_SECONDS` 批量刷新；首个 token 要立即刷新。流式失败必须回退普通 `reply_text/send_text`，不要让用户只看到空卡片。
+普通 DeepSeek 聊天回复默认走 `reply_to_shushu_stream()` + `send_streaming_reply()`。先发带“正在输入...”占位的飞书流式卡片，再用 CardKit 更新 `reply_text` 元素。更新时复用 tenant token，并按 `STREAMING_REPLY_UPDATE_INTERVAL_SECONDS` 批量刷新；首个 token 要立即刷新。流式失败必须回退普通 `reply_text/send_text`，不要让用户只看到空卡片。
+
+### 11c-4. 每次 LLM 调用都要走上下文预算
+`context_manager.py` 负责把最近对话、相关记忆、通话纪要拼成模型上下文。不要在业务代码里无限 append 原文；新增来源时必须给独立预算，并通过 `log_context_stats()` 打出本次实际注入的 section、消息数、记忆数和字符数。最近对话保留最新消息并恢复时间顺序，记忆按检索排序截断，通话纪要只放缓存摘要。
 
 ### 11d. 每日恋爱笔记用局部短评，不污染正文
 `love_note.py` 负责每天读取已有 Wiki/Docx 恋爱笔记正文，只对新增正文生成“嗑到了 / 这也太甜了 / 小弟被可爱到了”风格的短评，再通过飞书 Drive 评论 API 挂到最适合这条短评的正文段落上。它不是总结群聊消息，也不是结构化日报总结，不要再把总结追加成正文块。当前文档：

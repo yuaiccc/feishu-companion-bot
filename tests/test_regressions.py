@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import actions_runner
 import call_notes
+import context_manager
 import commit_text
 import external_search
 import feishu_api
@@ -432,10 +433,39 @@ class BotRegressionTests(unittest.TestCase):
             text = feishu_api.send_streaming_reply(iter(["你", "好", "呀"]), update_interval=10)
         self.assertEqual(text, "你好呀")
         create_mock.assert_called_once()
+        self.assertEqual(create_mock.call_args.kwargs.get("title"), "回复")
+        self.assertEqual(create_mock.call_args.kwargs.get("initial_text"), "正在输入...")
         token_mock.assert_called_once()
         self.assertEqual(updates[0], ("你", 1, "tenant_token"))
         self.assertEqual(updates[-1][0], "你好呀")
         stop_mock.assert_called_once()
+
+    def test_reply_context_is_bounded_and_auditable(self):
+        messages = [
+            {"time": f"07-01 12:{i:02d}", "sender": "舒舒", "content": "消息" + str(i) * 60}
+            for i in range(20)
+        ]
+        memories = [f"记忆{i}" + "很重要" * 80 for i in range(8)]
+        with patch.object(context_manager, "CONTEXT_MAX_CHARS", 1200), patch.object(
+            context_manager,
+            "CONTEXT_CHAT_MAX_CHARS",
+            500,
+        ), patch.object(
+            context_manager,
+            "CONTEXT_MEMORY_MAX_CHARS",
+            400,
+        ), patch.object(
+            context_manager,
+            "CONTEXT_CALL_NOTES_MAX_CHARS",
+            200,
+        ):
+            bundle = context_manager.build_reply_context(messages, memories, "通话纪要" * 200)
+        self.assertLessEqual(len(bundle.text), 1200)
+        self.assertIn("最近对话", bundle.text)
+        self.assertIn("相关记忆", bundle.text)
+        self.assertIn("重要通话纪要上下文", bundle.text)
+        self.assertLess(bundle.stats["chat_messages"], len(messages))
+        self.assertLess(bundle.stats["memories"], len(memories))
 
     def test_call_notes_context_uses_summary_cache_shape(self):
         with patch.dict(

@@ -510,7 +510,7 @@ def _get_token() -> str:
     return resp.json()["tenant_access_token"]
 
 
-def create_streaming_card(title: str = "回复中...", initial_text: str = "整理中...") -> str:
+def create_streaming_card(title: str = "回复", initial_text: str = "正在输入...") -> str:
     """创建一个流式更新模式的卡片实体，返回 card_id。
     卡片包含一个 markdown 组件，element_id='reply_text'。
     """
@@ -635,7 +635,7 @@ def send_streaming_reply(
     full_text_generator,
     title: str = "回复",
     receive_id: str = "",
-    initial_text: str = "整理中...",
+    initial_text: str = "正在输入...",
     update_interval: float = 0.35,
 ) -> str:
     """完整的流式回复流程：

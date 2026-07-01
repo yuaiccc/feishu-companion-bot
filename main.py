@@ -708,9 +708,9 @@ def on_message_received(msg_data: dict):
                 )
                 reply = send_streaming_reply(
                     generator,
-                    title="整理中",
+                    title="回复",
                     receive_id=chat_id,
-                    initial_text="整理中...",
+                    initial_text="正在输入...",
                     update_interval=STREAMING_REPLY_UPDATE_INTERVAL_SECONDS,
                 )
                 replied_via_stream = bool(reply)
