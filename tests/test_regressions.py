@@ -3,11 +3,13 @@ from unittest.mock import patch
 
 import actions_runner
 import call_notes
+import commit_text
 import external_search
 import local_apps
 import love_note
 import notifier
 import passive_assistant
+import profile as bot_profile
 import summarizer
 import state
 from main import _classify_tool_intent
@@ -64,6 +66,42 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(elements[0]["tag"], "table")
         assert_public_text_clean(elements)
 
+    def test_activity_rows_use_lightweight_commit_summary(self):
+        notifier._get_repo_desc = lambda repo: "和舒舒的聊天机器人"
+        with patch.object(
+            commit_text,
+            "_summarize_activity_with_deepseek",
+            return_value="给和舒舒的聊天机器人新增了恋爱笔记评论功能",
+        ):
+            card = notifier.build_message([
+                {
+                    "type": "PushEvent",
+                    "repo": "yuaiccc/project-history",
+                    "created_at": "2026-06-30T08:24:00Z",
+                    "detail": {
+                        "commit_count": 1,
+                        "commit_messages": ["feat: add love note comments"],
+                    },
+                }
+            ])
+        rows = card["card"]["body"]["elements"][0]["rows"]
+        self.assertEqual(rows[0]["activity"], "给和舒舒的聊天机器人新增了恋爱笔记评论功能")
+        self.assertNotIn("feat:", rows[0]["activity"])
+
+    def test_activity_rows_use_lightweight_star_summary(self):
+        actions_runner.fetch_repo_desc = lambda repo: "WCDB is a cross-platform database framework developed by WeChat."
+        with patch.object(commit_text, "_summarize_activity_with_deepseek", return_value=""):
+            card = actions_runner.build_commit_card([
+                {
+                    "type": "WatchEvent",
+                    "repo": {"name": "Tencent/wcdb"},
+                    "created_at": "2026-06-30T08:24:00Z",
+                    "payload": {},
+                }
+            ])
+        rows = card["card"]["body"]["elements"][0]["rows"]
+        self.assertIn("收藏了一个大概和微信跨平台数据库有关的项目", rows[0]["activity"])
+
     def test_tool_intent_separates_status_from_github(self):
         self.assertEqual(_classify_tool_intent("三哥最近活动", "舒舒"), "status")
         self.assertEqual(_classify_tool_intent("三哥最近提交了什么", "舒舒"), "github")
@@ -92,6 +130,25 @@ class BotRegressionTests(unittest.TestCase):
         self.assertIn("同一个人", prompts)
         self.assertIn("不要把两个名字并列说出来", prompts)
         self.assertNotIn("只用舒舒或烨子", prompts)
+
+    def test_default_profile_has_no_private_names(self):
+        with patch.object(bot_profile, "PROFILE_ID", "default"):
+            bot_profile.load_profile.cache_clear()
+            context = bot_profile.relationship_context()
+        self.assertNotIn("三哥", context)
+        self.assertNotIn("舒舒", context)
+        self.assertIn("可配置", context)
+        bot_profile.load_profile.cache_clear()
+
+    def test_sange_profile_supplies_relationship_context(self):
+        with patch.object(bot_profile, "PROFILE_ID", "sange-shushu"):
+            bot_profile.load_profile.cache_clear()
+            context = bot_profile.relationship_context()
+            addressing = bot_profile.target_addressing_instruction()
+        self.assertIn("三哥", context)
+        self.assertIn("舒舒", context)
+        self.assertIn("不要把两个名字并列说出来", addressing)
+        bot_profile.load_profile.cache_clear()
 
     def test_call_notes_fallback_extracts_relationship_context(self):
         transcript = "\n".join([

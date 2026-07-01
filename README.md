@@ -30,6 +30,21 @@ python3 main.py
 
 默认 `DRY_RUN=true` 不会真的发飞书消息。生产运行前把 `.env` 里的 `DRY_RUN=false`，并补齐 DeepSeek、飞书应用、GitHub token 等配置。
 
+## Profile 配置
+
+项目支持用 `PROFILE_ID` 切换人设和关系背景，不需要直接改 prompt 源码。
+
+- `profiles/default.json`：通用陪伴机器人模板。
+- `profiles/sange-shushu.json`：当前“三哥和舒舒”这套人设示例。
+
+开源复用时复制一份 profile JSON，然后在 `.env` 里设置：
+
+```bash
+PROFILE_ID=your-profile-id
+```
+
+记忆会按 profile 分目录保存，例如 `memory_data/sange-shushu/memories.json`，避免不同机器人关系的记忆混在一起。首次启用 profile 分目录时，如果存在旧的 `memory_data/memories.json`，会自动复制一份到当前 profile 目录。
+
 本机长期在线推荐安装 LaunchAgent：
 
 ```bash
@@ -63,12 +78,12 @@ GitHub Actions 使用 Environment `feishu` 下的 secrets，不使用 repository
 - 状态查询和 GitHub 查询分开处理：问"在干嘛/最近活动"默认只看本地窗口状态；明确问 GitHub、提交、代码、仓库时才推 GitHub 卡片。
 - 外部搜索和近期活动分开处理：问"最近B站哪些新番热门/查一下/搜索"走 OpenClaw；问"三哥最近活动/在干嘛"仍走电脑活动。
 - 活动卡片只合并同仓库且组内首尾时间跨度不超过 1 小时的提交；超过 1 小时必须分成多行。
-- 活动卡片里的提交说明会强制改写成中文短句，避免舒舒看到英文 commit 标题看不懂。
+- 活动卡片里的“动态”会强制改写成中文短句：Star 说明大概收藏了什么方向的项目，commit 说明给项目新增/修复了什么能力，避免舒舒看到英文 commit 标题看不懂。
 - 所有发往飞书的文本和卡片都会先经过 `text_safety.py` 统一清洗。
 
 ## 记忆管理
 
-`memory.py` 仍然使用本地 JSON，默认写入 `memory_data/memories.json`。新增记忆会先用 DeepSeek 抽取事实，再做简单归类、重要度评分和去重；重复事实只更新 `last_seen`/`seen_count`，不会无限堆叠。默认最多保留 200 条，可用 `MEMORY_MAX_ITEMS` 调整。
+`memory.py` 仍然使用本地 JSON，默认写入 `memory_data/<PROFILE_ID>/memories.json`。新增记忆会先用 DeepSeek 抽取事实，再做简单归类、重要度评分和去重；重复事实只更新 `last_seen`/`seen_count`，不会无限堆叠。默认最多保留 200 条，可用 `MEMORY_MAX_ITEMS` 调整。
 
 ## 旁听辅助
 

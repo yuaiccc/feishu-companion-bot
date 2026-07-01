@@ -17,7 +17,7 @@ import json
 import time
 from datetime import datetime, timezone, timedelta
 
-from commit_text import brief_commit_messages
+from commit_text import brief_commit_messages, summarize_commit_activity, summarize_star_activity
 from call_notes import build_call_notes_context
 from text_safety import sanitize_card, sanitize_public_text
 
@@ -530,6 +530,7 @@ def build_commit_card(activities: list[dict]) -> dict:
             content = f"提交 {count} 次" + (f": {brief}" if brief else "")
             time_str = _format_time(a.get("created_at", ""))
             desc = fetch_repo_desc(repo)
+            summary = summarize_commit_activity(desc, raw_msgs, count)
         else:
             total_commits = sum(len(g.get("payload", {}).get("commits", [])) for g in group)
             all_msgs = []
@@ -542,7 +543,8 @@ def build_commit_card(activities: list[dict]) -> dict:
             content = f"提交 {total_commits} 次" + (f": {brief}" if brief else "")
             time_str = _format_time(group[0].get("created_at", ""))
             desc = fetch_repo_desc(repo)
-        table_rows.append({"time": time_str, "desc": desc, "content": content})
+            summary = summarize_commit_activity(desc, all_msgs, total_commits)
+        table_rows.append({"time": time_str, "desc": desc, "content": content, "summary": summary})
 
     # 其他活动
     for a in other_activities[:10]:
@@ -555,14 +557,16 @@ def build_commit_card(activities: list[dict]) -> dict:
 
     # Star 合并成一行
     if star_repos:
-        star_descs = []
+        star_items = []
         for r in star_repos:
             short = r.split("/")[-1] if "/" in r else r
-            star_descs.append(f"{short}: {fetch_repo_desc(r)}")
+            star_items.append((short, fetch_repo_desc(r)))
+        star_descs = [f"{short}: {desc}" for short, desc in star_items]
         table_rows.append({
             "time": datetime.now(SHANGHAI).strftime("%m-%d %H:%M"),
             "desc": "; ".join(star_descs),
             "content": f"Star 收藏 {len(star_repos)} 个项目",
+            "summary": summarize_star_activity(star_items),
         })
 
     # 构建 elements
@@ -605,6 +609,10 @@ def _compact_rows(rows: list[dict]) -> list[dict]:
     """把项目介绍和操作合并，避免手机端把时间列压成省略号。"""
     compact = []
     for row in rows:
+        summary = row.get("summary", "")
+        if summary:
+            compact.append({"time": row.get("time", ""), "activity": summary})
+            continue
         desc = row.get("desc", "")
         content = row.get("content", "")
         activity = f"{desc} | {content}" if desc else content

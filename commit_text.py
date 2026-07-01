@@ -91,6 +91,7 @@ _PHRASE_MAP = {
 }
 
 _commit_text_cache: dict[str, str] = {}
+_activity_summary_cache: dict[str, str] = {}
 
 
 def brief_commit_messages(messages: list[str], limit: int = 3) -> str:
@@ -105,6 +106,57 @@ def brief_commit_messages(messages: list[str], limit: int = 3) -> str:
     return "；".join(translated)
 
 
+def summarize_commit_activity(repo_desc: str, messages: list[str], count: int = 1) -> str:
+    """Return one lightweight Chinese sentence for a commit activity row."""
+    brief = brief_commit_messages(messages, limit=3)
+    key = f"commit|{repo_desc}|{count}|{brief}|{'||'.join(messages[:5])}"
+    if key in _activity_summary_cache:
+        return _activity_summary_cache[key]
+
+    prompt = (
+        "把 GitHub 提交活动改写成给非技术读者看的中文短句。"
+        "只输出一句话，不超过42个字，不要解释，不要 markdown。"
+        "不要出现 commit、push、PR、issue、branch、feat、fix 等技术词。"
+        "如果是恋爱机器人，就说清楚新增/修复了什么陪伴能力。"
+        "中文项目介绍较短时，必须保留项目名，句式接近：给某某项目新增了某某能力。"
+    )
+    user = (
+        f"项目介绍：{repo_desc or '一个项目'}\n"
+        f"提交次数：{count}\n"
+        f"提交说明：{brief or '更新了一些内容'}"
+    )
+    summarized = _summarize_activity_with_deepseek(prompt, user)
+    result = _clean_activity_summary(summarized or "")
+    if _should_use_commit_fallback(result, repo_desc):
+        result = _fallback_commit_summary(repo_desc, brief, count)
+    result = _clean_activity_summary(result or _fallback_commit_summary(repo_desc, brief, count))
+    _activity_summary_cache[key] = result
+    return result
+
+
+def summarize_star_activity(repo_summaries: list[tuple[str, str]]) -> str:
+    """Return one lightweight Chinese sentence for one or more starred repos."""
+    normalized = [(name or "", desc or "") for name, desc in repo_summaries if name or desc]
+    if not normalized:
+        return "收藏了一个新项目"
+
+    key = "star|" + "||".join(f"{name}:{desc}" for name, desc in normalized)
+    if key in _activity_summary_cache:
+        return _activity_summary_cache[key]
+
+    joined = "\n".join(f"- {name}: {desc or '无描述'}" for name, desc in normalized[:5])
+    prompt = (
+        "把 GitHub Star 活动改写成给非技术读者看的中文短句。"
+        "只输出一句话，不超过42个字，不要 markdown。"
+        "格式接近：收藏了一个大概和xxx有关的项目。"
+        "不要逐字翻译英文描述，要概括项目方向。"
+    )
+    summarized = _summarize_activity_with_deepseek(prompt, joined)
+    result = _clean_activity_summary(summarized or _fallback_star_summary(normalized))
+    _activity_summary_cache[key] = result
+    return result
+
+
 def translate_commit_message(message: str) -> str:
     """Translate a commit subject into plain Chinese for non-technical readers."""
     subject = (message or "").strip().split("\n")[0].strip()
@@ -117,6 +169,40 @@ def translate_commit_message(message: str) -> str:
     translated = _clean_result(translated)
     _commit_text_cache[subject] = translated
     return translated
+
+
+def _summarize_activity_with_deepseek(system_prompt: str, user_content: str) -> str:
+    try:
+        from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+    except Exception:
+        return ""
+    if not DEEPSEEK_API_KEY:
+        return ""
+
+    try:
+        import requests
+
+        resp = requests.post(
+            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": DEEPSEEK_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 80,
+            },
+            timeout=12,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return ""
 
 
 def _translate_with_deepseek(subject: str) -> str:
@@ -198,4 +284,75 @@ def _clean_result(text: str) -> str:
     text = re.sub(r"\s+", "", text)
     if len(text) > 40:
         text = text[:37] + "..."
+    return text
+
+
+def _fallback_commit_summary(repo_desc: str, brief: str, count: int) -> str:
+    repo = (repo_desc or "这个项目").strip()
+    first = (brief or "").split("；")[0].strip()
+    if not first:
+        return f"给{repo}更新了一点内容"
+    if first.startswith(("新增", "修复", "优化", "补充", "调整", "整理", "更新", "维护", "回退")):
+        return f"给{repo}{first}"
+    if count > 1:
+        return f"给{repo}连续更新了{first}"
+    return f"给{repo}更新了{first}"
+
+
+def _should_use_commit_fallback(summary: str, repo_desc: str) -> bool:
+    if not summary:
+        return True
+    repo = (repo_desc or "").strip()
+    if not repo or len(repo) > 18 or not re.search(r"[\u4e00-\u9fff]", repo):
+        return False
+    return repo not in summary
+
+
+def _fallback_star_summary(repo_summaries: list[tuple[str, str]]) -> str:
+    topics = []
+    for name, desc in repo_summaries[:3]:
+        topic = _infer_project_topic(f"{name} {desc}")
+        if topic and topic not in topics:
+            topics.append(topic)
+    if not topics:
+        if len(repo_summaries) == 1:
+            return f"收藏了 {repo_summaries[0][0]} 这个项目"
+        return f"收藏了 {len(repo_summaries)} 个新项目"
+    if len(repo_summaries) == 1:
+        return f"收藏了一个大概和{topics[0]}有关的项目"
+    return f"收藏了 {len(repo_summaries)} 个项目，大概和{'、'.join(topics)}有关"
+
+
+def _infer_project_topic(text: str) -> str:
+    lower = (text or "").lower()
+    topic_rules = [
+        (("wechat", "weixin", "wcdb"), "微信数据库"),
+        (("database", "sqlite", "db", "storage"), "数据库"),
+        (("framework", "sdk", "library"), "开发框架"),
+        (("ios", "android", "mobile"), "移动端开发"),
+        (("desktop", "cross-platform", "cross platform"), "跨平台开发"),
+        (("ai", "llm", "agent", "deep learning", "machine learning"), "AI"),
+        (("crawler", "spider", "scraper"), "数据采集"),
+        (("anime", "bilibili", "video"), "视频内容"),
+    ]
+    matched = []
+    for keys, label in topic_rules:
+        if any(key in lower for key in keys) and label not in matched:
+            matched.append(label)
+    if not matched:
+        return ""
+    if "微信数据库" in matched:
+        return "微信跨平台数据库"
+    if "数据库" in matched and "开发框架" in matched:
+        return "数据库开发框架"
+    return matched[0]
+
+
+def _clean_activity_summary(text: str) -> str:
+    text = (text or "").strip().strip("\"'“”‘’")
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\b(commit|push|PR|issue|branch|feat|fix)\b", "", text, flags=re.I)
+    text = text.replace("  ", " ").strip(" ，。")
+    if len(text) > 52:
+        text = text[:49].rstrip("，。；") + "..."
     return text

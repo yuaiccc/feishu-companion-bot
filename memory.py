@@ -10,6 +10,7 @@ from config import (
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL,
     MEMORY_ENABLED, MEMORY_DIR,
 )
+from profile import memory_category_keywords, profile_id
 
 import requests
 
@@ -17,7 +18,7 @@ _MEMORY_FILE = None
 _MAX_MEMORIES = int(os.getenv("MEMORY_MAX_ITEMS", "200"))
 _CATEGORY_KEYWORDS = {
     "person": ("生日", "学校", "大学", "本科", "家住", "地址", "家里", "姓名", "小名"),
-    "relationship": ("想你", "爱你", "在一起", "舒舒", "烨子", "秋酿", "三哥", "电话", "晚安", "抱抱"),
+    "relationship": ("想你", "爱你", "在一起", "电话", "晚安", "抱抱"),
     "preference": ("喜欢", "不喜欢", "偏好", "爱喝", "不加糖", "吃", "喝", "散步"),
     "schedule": ("晚上", "早上", "明天", "今天", "最近", "待在", "回家", "学校"),
 }
@@ -27,8 +28,13 @@ def _get_memory_file():
     """获取记忆文件路径。"""
     global _MEMORY_FILE
     if _MEMORY_FILE is None:
-        MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-        _MEMORY_FILE = str(MEMORY_DIR / "memories.json")
+        profile_dir = MEMORY_DIR / profile_id()
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_file = profile_dir / "memories.json"
+        legacy_file = MEMORY_DIR / "memories.json"
+        if not profile_file.exists() and legacy_file.exists():
+            profile_file.write_text(legacy_file.read_text(encoding="utf-8"), encoding="utf-8")
+        _MEMORY_FILE = str(profile_file)
     return _MEMORY_FILE
 
 
@@ -58,7 +64,9 @@ def _normalize_text(text: str) -> str:
 
 
 def _categorize(text: str) -> str:
-    for category, keywords in _CATEGORY_KEYWORDS.items():
+    keywords_by_category = dict(_CATEGORY_KEYWORDS)
+    keywords_by_category.update(memory_category_keywords())
+    for category, keywords in keywords_by_category.items():
         if any(keyword in text for keyword in keywords):
             return category
     return "note"
