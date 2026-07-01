@@ -46,6 +46,10 @@ _PRIVATE_PATTERNS = (
 _OWNER_ONLY_PATTERNS = (
     re.compile(r"[\u4e00-\u9fff]{2,}(省|市|区|县|乡|镇|街道|路|巷)"),
 )
+_QUERY_STOP_TERMS = {
+    "什么", "怎么", "哪里", "在哪", "最近", "一下", "这个", "那个",
+    "她的", "他的", "是不是", "有没有", "可以", "需要",
+}
 
 
 def _get_memory_file():
@@ -272,20 +276,29 @@ def _extract_facts(messages: list[dict]) -> list[str]:
 
 
 def _keyword_score(query: str, text: str) -> float:
-    """简单的关键词匹配评分。返回 0-1 的分数。"""
+    """Keyword score with Chinese ngrams, avoiding noisy single-character hits."""
     if not query or not text:
         return 0.0
-    query_words = set(query.lower().split())
     text_lower = text.lower()
     score = 0.0
-    for word in query_words:
-        if len(word) >= 2 and word in text_lower:
-            score += 1.0
-    # 也做单字匹配（中文）
-    for char in query:
-        if char in text:
-            score += 0.3
+    for term in _query_terms(query):
+        if term in text_lower:
+            score += min(len(term), 6) * 0.25
     return score
+
+
+def _query_terms(query: str) -> set[str]:
+    normalized = _normalize_text(query)
+    terms = set()
+    for token in re.findall(r"[A-Za-z0-9_]{2,}", query.lower()):
+        terms.add(token)
+    for n in (2, 3, 4):
+        if len(normalized) >= n:
+            for i in range(len(normalized) - n + 1):
+                term = normalized[i:i + n]
+                if term not in _QUERY_STOP_TERMS:
+                    terms.add(term)
+    return terms
 
 
 def _embed_text(text: str) -> list[float]:
@@ -394,7 +407,7 @@ def _memory_score(query: str, query_embedding: list[float], mem: dict) -> float:
     semantic = _cosine(query_embedding, mem.get("embedding", [])) if MEMORY_EMBEDDING_ENABLED else 0.0
     importance = int(mem.get("importance", 1)) * 0.12
     repeated = min(int(mem.get("seen_count", 1)), 5) * 0.06
-    return keyword + source_score + max(semantic, 0.0) * 2.0 + importance + repeated
+    return keyword + source_score + max(semantic, 0.0) * 4.0 + importance + repeated
 
 
 def add_memories(messages: list[dict], user_id: str = "shushu_chat") -> list:
@@ -487,10 +500,25 @@ def search_memories(
 
     scored.sort(key=lambda x: x[0], reverse=True)
     candidates = [mem for _, mem in scored[:max(MEMORY_RAG_CANDIDATES, top_k)]]
+    candidates = _dedupe_memory_candidates(candidates)
     if not candidates:
         return []
     selected = _agentic_select_memories(query, candidates, top_k, audience)
     return [m.get("content", "") for m in selected[:top_k] if m.get("content")]
+
+
+def _dedupe_memory_candidates(candidates: list[dict]) -> list[dict]:
+    deduped = []
+    seen = []
+    for mem in candidates:
+        normalized = _normalize_text(mem.get("content", ""))
+        if not normalized:
+            continue
+        if any(normalized == item or normalized in item or item in normalized for item in seen):
+            continue
+        seen.append(normalized)
+        deduped.append(mem)
+    return deduped
 
 
 def _agentic_select_memories(query: str, candidates: list[dict], top_k: int, audience: str) -> list[dict]:
