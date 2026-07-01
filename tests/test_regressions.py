@@ -217,12 +217,16 @@ class BotRegressionTests(unittest.TestCase):
         self.assertIn("今天一起研究飞书", trimmed)
         self.assertNotIn("机器人已经生成过", trimmed)
 
-    def test_love_note_comment_anchor_uses_last_non_empty_text_block(self):
+    def test_love_note_comment_anchor_can_use_middle_sweet_block(self):
         blocks = [
             {"block_id": "root", "page": {"elements": []}},
             {
                 "block_id": "a",
-                "text": {"elements": [{"text_run": {"content": "第一段"}}]},
+                "text": {"elements": [{"text_run": {"content": "第一段普通内容"}}]},
+            },
+            {
+                "block_id": "sweet",
+                "text": {"elements": [{"text_run": {"content": "想和舒舒一起出去玩儿，想永远陪在舒舒身边"}}]},
             },
             {"block_id": "image", "image": {"token": "img"}},
             {
@@ -234,8 +238,34 @@ class BotRegressionTests(unittest.TestCase):
                 "text": {"elements": [{"text_run": {"content": "最后一段"}}]},
             },
         ]
-        with patch.object(love_note, "get_docx_blocks", return_value=blocks):
-            self.assertEqual(love_note.pick_love_note_comment_anchor("doc"), "b")
+        with patch.object(love_note, "get_docx_blocks", return_value=blocks), patch.object(
+            love_note,
+            "_pick_anchor_with_deepseek",
+            return_value="",
+        ):
+            self.assertEqual(love_note.pick_love_note_comment_anchor("doc", "这也太甜了"), "sweet")
+
+    def test_love_note_comment_anchor_accepts_model_middle_choice(self):
+        blocks = [
+            {
+                "block_id": "a",
+                "text": {"elements": [{"text_run": {"content": "第一段"}}]},
+            },
+            {
+                "block_id": "middle",
+                "text": {"elements": [{"text_run": {"content": "中间这一段最适合评论"}}]},
+            },
+            {
+                "block_id": "b",
+                "text": {"elements": [{"text_run": {"content": "最后一段"}}]},
+            },
+        ]
+        with patch.object(love_note, "get_docx_blocks", return_value=blocks), patch.object(
+            love_note,
+            "_pick_anchor_with_deepseek",
+            return_value="middle",
+        ):
+            self.assertEqual(love_note.pick_love_note_comment_anchor("doc", "短评"), "middle")
 
     def test_love_note_comment_elements_escape_and_chunk_text(self):
         elements = love_note._comment_text_elements("<" + "a" * 1200 + ">")

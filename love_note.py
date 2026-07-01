@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -116,7 +117,7 @@ def add_love_note_comment(comment_text: str) -> dict:
     doc_token = LOVE_NOTE_DOC_TOKEN or resolve_wiki_doc_token(LOVE_NOTE_WIKI_TOKEN)
     if not doc_token:
         raise RuntimeError("缺少 LOVE_NOTE_DOC_TOKEN 或 LOVE_NOTE_WIKI_TOKEN")
-    anchor_block_id = pick_love_note_comment_anchor(doc_token)
+    anchor_block_id = pick_love_note_comment_anchor(doc_token, comment_text)
     return create_docx_comment(doc_token, anchor_block_id, comment_text)
 
 
@@ -165,11 +166,17 @@ def get_docx_blocks(doc_token: str) -> list[dict]:
     return data.get("data", {}).get("items", [])
 
 
-def pick_love_note_comment_anchor(doc_token: str) -> str:
-    """Pick the last non-empty text block so the daily comment stays contextual."""
-    for block in reversed(get_docx_blocks(doc_token)):
-        if _block_plain_text(block).strip():
-            return block.get("block_id", "")
+def pick_love_note_comment_anchor(doc_token: str, comment_text: str = "") -> str:
+    """Pick the text block that best matches the short reaction comment."""
+    candidates = _comment_anchor_candidates(get_docx_blocks(doc_token))
+    if not candidates:
+        raise RuntimeError("没有找到可挂评论的正文块")
+    model_choice = _pick_anchor_with_deepseek(candidates, comment_text)
+    if model_choice:
+        return model_choice
+    scored_choice = _pick_anchor_by_score(candidates, comment_text)
+    if scored_choice:
+        return scored_choice
     raise RuntimeError("没有找到可挂评论的正文块")
 
 
@@ -305,6 +312,98 @@ def _block_plain_text(block: dict) -> str:
         run = element.get("text_run") or {}
         pieces.append(run.get("content") or "")
     return "".join(pieces)
+
+
+def _comment_anchor_candidates(blocks: list[dict]) -> list[dict]:
+    candidates = []
+    for block in blocks:
+        text = sanitize_public_text(_block_plain_text(block)).strip()
+        block_id = block.get("block_id", "")
+        if not block_id or not text:
+            continue
+        candidates.append({"block_id": block_id, "text": text})
+    return candidates
+
+
+def _pick_anchor_with_deepseek(candidates: list[dict], comment_text: str) -> str:
+    if not candidates or not DEEPSEEK_API_KEY:
+        return ""
+    compact_candidates = [
+        {"block_id": item["block_id"], "text": item["text"][:160]}
+        for item in candidates[-40:]
+    ]
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": "你负责给飞书恋爱笔记短评选择最适合挂评论的原文段落。只返回 JSON。",
+            },
+            {
+                "role": "user",
+                "content": (
+                    "短评：\n"
+                    f"{comment_text}\n\n"
+                    "候选段落 JSON：\n"
+                    f"{json.dumps(compact_candidates, ensure_ascii=False)}\n\n"
+                    "请选择最能支撑这条短评、最值得嗑糖的段落。"
+                    "只输出 {\"block_id\":\"...\"}，不要解释。"
+                ),
+            },
+        ],
+        "temperature": 0.2,
+        "max_tokens": 80,
+    }
+    try:
+        resp = requests.post(
+            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        selected = json.loads(raw).get("block_id", "")
+    except Exception:
+        return ""
+    valid_ids = {item["block_id"] for item in candidates}
+    return selected if selected in valid_ids else ""
+
+
+def _pick_anchor_by_score(candidates: list[dict], comment_text: str) -> str:
+    sweet_terms = [
+        "想你",
+        "想和",
+        "永远",
+        "陪",
+        "可爱",
+        "萌",
+        "孤独",
+        "在干什么",
+        "在干嘛",
+        "一起",
+        "早点睡",
+        "误会",
+        "喜欢",
+        "得意",
+    ]
+    comment_terms = [term for term in sweet_terms if term in comment_text]
+    best_id = ""
+    best_score = -1
+    for index, item in enumerate(candidates):
+        text = item["text"]
+        score = sum(3 for term in comment_terms if term in text)
+        score += sum(1 for term in sweet_terms if term in text)
+        # Mild recency bias, without forcing the last block.
+        score += min(index, 20) / 100
+        if score > best_score:
+            best_id = item["block_id"]
+            best_score = score
+    return best_id
 
 
 def _comment_text_elements(text: str) -> list[dict]:
