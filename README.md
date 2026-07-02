@@ -4,6 +4,8 @@
 
 项目默认配置是通用版本。机器人应该在“真实的人暂时不在”时提供帮助，不应该伪装成那个人本人。
 
+当前本地目录可能仍叫 `github_activity_generator`，公开仓库建议使用 `feishu-companion-bot` 作为项目名。
+
 ## 功能
 
 - 飞书长连接监听：群里被 @ 时回复，私聊可直接回复。
@@ -15,11 +17,29 @@
 - 服务自检卡片：检查飞书、DeepSeek、记忆库、Ollama、本地搜索和本机状态。
 - 本地私有每日任务扩展：公开仓库只保留加载器，具体私有实现不要提交。
 
+## 目录
+
+```text
+main.py                         # 兼容入口：启动本地长连接服务
+actions_runner.py               # 兼容入口：GitHub Actions 兜底轮询
+cmd/bot/main.py                 # 新版本地服务入口
+cmd/actions/main.py             # 新版 Actions 入口
+cmd/memtool/main.py             # 记忆维护入口
+feishu_companion/app.py         # 本地服务应用层
+feishu_companion/actions_app.py # 云端兜底应用层
+feishu_companion/               # 通用业务模块
+profiles/                       # 可公开的 profile 模板
+docs/                           # 中文部署和设计文档
+tests/                          # 回归测试
+```
+
+根目录两个 Python 文件只做兼容转发，新代码应优先放到 `feishu_companion/` 内。
+
 ## 架构
 
 ```mermaid
 flowchart LR
-  A["飞书事件"] --> B["main.py"]
+  A["飞书事件"] --> B["feishu_companion/app.py"]
   B --> C["意图路由"]
   C --> D["context_manager.py"]
   D --> E["DeepSeek"]
@@ -29,7 +49,7 @@ flowchart LR
   B --> H["memory.py"]
   B --> I["DeerFlow/OpenClaw 搜索"]
   B --> J["call_notes.py"]
-  K["GitHub Actions"] --> L["actions_runner.py"]
+  K["GitHub Actions"] --> L["feishu_companion/actions_app.py"]
   L --> A
 ```
 
@@ -40,10 +60,17 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-python main.py
+python -m feishu_companion
 ```
 
 默认 `DRY_RUN=true`，只打印不真正发飞书消息。配置好飞书、DeepSeek、GitHub 后再改成 `DRY_RUN=false`。
+
+兼容命令仍然可用：
+
+```bash
+python main.py
+python actions_runner.py
+```
 
 ## Profile
 
@@ -133,7 +160,7 @@ python main.py --mem-clean-preview
 python main.py --mem-clean
 ```
 
-也可以在飞书里让机器人打开记忆审计面板。
+也可以在飞书里让机器人打开记忆审计面板。记忆系统的设计细节见 [docs/记忆系统.md](docs/记忆系统.md)。
 
 ## 上下文管理
 
@@ -173,7 +200,7 @@ DEERFLOW_PYTHON=/Users/you/Code/deer-flow/backend/.venv/bin/python
 OPENCLAW_CLI=openclaw
 ```
 
-GitHub Actions 无法访问你的本机 DeerFlow/OpenClaw，所以云端兜底不要依赖本地搜索。
+GitHub Actions 无法访问你的本机 DeerFlow/OpenClaw，所以云端兜底不要依赖本地搜索。飞书配置见 [docs/飞书配置.md](docs/飞书配置.md)，本机常驻见 [docs/本地常驻.md](docs/本地常驻.md)。
 
 ## 本地私有扩展
 
@@ -202,6 +229,7 @@ def preview_daily_job() -> str:
 - 不要把真实地址、私密关系记录、真实 token 写进 tracked profile。
 - 私有部署内容放在未跟踪 profile、未跟踪扩展文件或本地数据目录。
 - 机器人是助手，不是真人的替代品。
+- 公开发布前按 [docs/开源部署.md](docs/开源部署.md) 做一次检查。
 
 ## 测试
 

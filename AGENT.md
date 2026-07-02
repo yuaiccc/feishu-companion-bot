@@ -10,10 +10,16 @@
 
 ## 目录约定
 
-- `main.py`：本地长连接入口，负责启动轮询线程和飞书事件监听。
-- `actions_runner.py`：GitHub Actions 兜底入口。
+- `main.py`：兼容入口，只转发到 `feishu_companion.app`。
+- `actions_runner.py`：兼容入口，只转发到 `feishu_companion.actions_app`。
+- `cmd/bot/main.py`：新版显式本地长连接入口。
+- `cmd/actions/main.py`：新版显式 GitHub Actions 兜底入口。
+- `cmd/memtool/main.py`：记忆维护入口。
 - `feishu_companion/`：通用业务模块。
+- `feishu_companion/app.py`：本地长连接应用层，负责启动轮询线程和飞书事件监听。
+- `feishu_companion/actions_app.py`：GitHub Actions 兜底应用层。
 - `profiles/`：公开的通用 profile 模板。
+- `docs/`：中文配置、部署和设计说明。
 - `tests/`：回归测试。
 - `launchd/`：macOS LaunchAgent 模板。
 
@@ -41,6 +47,7 @@
 - 新增任何 LLM 上下文来源，都要在 `context_manager.py` 里设置明确预算。
 - 所有用户可见飞书文本和卡片都要经过 `text_safety.py`。
 - 不要提交 `.env`、日志、`state.json`、`memory_data/`、二维码、私有 profile、私有本地扩展。
+- 新增业务逻辑优先放在 `feishu_companion/`，根目录入口保持薄包装，避免项目重新散乱。
 
 ## 流式回复
 
@@ -98,7 +105,7 @@ LOCAL_DAILY_JOB_RUN_AT=23:55
 ## 提交前检查
 
 ```bash
-.venv/bin/python -m py_compile main.py actions_runner.py feishu_companion/*.py tests/test_regressions.py
+.venv/bin/python -m py_compile main.py actions_runner.py cmd/bot/main.py cmd/actions/main.py cmd/memtool/main.py feishu_companion/*.py tests/test_regressions.py
 .venv/bin/python -m unittest tests.test_regressions
 git diff --check
 ```

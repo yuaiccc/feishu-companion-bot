@@ -1,4 +1,4 @@
-"""兼容入口：启动本地飞书陪伴机器人服务。"""
+"""允许 `python -m feishu_companion` 启动本地服务。"""
 from feishu_companion.app import main
 
 

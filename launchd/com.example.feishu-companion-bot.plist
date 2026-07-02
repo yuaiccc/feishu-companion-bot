@@ -11,7 +11,8 @@
     <string>/usr/bin/caffeinate</string>
     <string>-dimsu</string>
     <string>/ABSOLUTE/PATH/TO/feishu-companion-bot/.venv/bin/python</string>
-    <string>/ABSOLUTE/PATH/TO/feishu-companion-bot/main.py</string>
+    <string>-m</string>
+    <string>feishu_companion</string>
   </array>
 
   <key>WorkingDirectory</key>

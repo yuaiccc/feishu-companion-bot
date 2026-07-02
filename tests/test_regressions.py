@@ -1,10 +1,11 @@
 import json
+import importlib
 import sys
 import unittest
 from unittest.mock import patch
 
-import actions_runner
-import main as bot_main
+import feishu_companion.actions_app as actions_runner
+import feishu_companion.app as bot_main
 import feishu_companion.call_notes as call_notes
 import feishu_companion.context_manager as context_manager
 import feishu_companion.commit_text as commit_text
@@ -21,11 +22,19 @@ import feishu_companion.proactive_topic as proactive_topic
 import feishu_companion.profile as bot_profile
 import feishu_companion.summarizer as summarizer
 import feishu_companion.state as state
-from main import _classify_tool_intent
+from feishu_companion.app import _classify_tool_intent
 from feishu_companion.text_safety import assert_public_text_clean, sanitize_card, sanitize_public_text
 
 
 class BotRegressionTests(unittest.TestCase):
+    def test_entrypoints_are_thin_importable_wrappers(self):
+        root_main = importlib.import_module("main")
+        root_actions = importlib.import_module("actions_runner")
+        package_main = importlib.import_module("feishu_companion.__main__")
+        self.assertIs(root_main.main, bot_main.main)
+        self.assertIs(root_actions.main, actions_runner.main)
+        self.assertIs(package_main.main, bot_main.main)
+
     def test_public_text_sanitizer_replaces_disallowed_nickname(self):
         self.assertEqual(sanitize_public_text("\u5fae\u91cc宝贝"), "舒舒宝贝")
         self.assertEqual(sanitize_public_text("舒舒和烨子都可以看看"), "舒舒都可以看看")
