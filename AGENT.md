@@ -51,19 +51,19 @@ reply_to_shushu_stream(...)
 send_streaming_reply(...)
 ```
 
-卡片先显示 `正在输入...`，逐步更新 `reply_text`，结束后关闭 `streaming_mode`。群聊默认走普通文本回复，不要把操作按钮塞进群里。
+私聊卡片先显示 `正在输入...`，逐步更新 `reply_text`，结束后关闭 `streaming_mode`。群聊不要使用卡片，使用普通文本消息气泡并编辑同一条消息来近似流式输出。
 
 私聊流式卡片可以按需支持：
 
 - `rephrase`：根据缓存上下文换个说法。
 - `continue`：继续补充一句。
 
-记忆确认使用单独的私聊卡片：
+记忆候选必须先让 DeepSeek 判断，不要用关键词规则硬判。通过后使用单独的私聊卡片：
 
 - `remember_candidate`：owner 确认后写入 owner-only 记忆。
 - `dismiss_candidate`：忽略该候选。
 
-按钮上下文存在 `state.json.streaming_reply_contexts`，必须保持短期、紧凑。普通消息不要自动入库，除非 owner 明确确认。
+按钮上下文存在 `state.json.streaming_reply_contexts`，必须保持短期、紧凑。普通消息不要自动入库，除非 DeepSeek 判断值得记且 owner 明确确认。
 
 ## GitHub 动态
 

@@ -16,6 +16,8 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequest,
     ReplyMessageRequestBody,
     Reaction,
+    UpdateMessageRequest,
+    UpdateMessageRequestBody,
 )
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     CallBackToast,
@@ -182,8 +184,8 @@ def fetch_shushu_messages(chat_id: str = "", limit: int = 20) -> list[dict]:
 
 # ---- 发消息（通过 SDK，以应用机器人身份）----
 
-def send_text(text: str, receive_id: str = "") -> bool:
-    """通过 SDK 机器人发文本消息。dry_run 时只打印。"""
+def send_text(text: str, receive_id: str = "") -> str:
+    """通过 SDK 机器人发文本消息，返回 message_id。dry_run 时只打印。"""
     text = sanitize_public_text(text)
     target = receive_id or FEISHU_CHAT_ID
     if DRY_RUN:
@@ -192,7 +194,7 @@ def send_text(text: str, receive_id: str = "") -> bool:
         print("=" * 56)
         print(f"  [机器人回复] {text}")
         print("=" * 56 + "\n")
-        return True
+        return "dry-run-text-message"
 
     client = _get_client()
     body = (
@@ -211,6 +213,34 @@ def send_text(text: str, receive_id: str = "") -> bool:
     resp = client.im.v1.message.create(req)
     if not resp.success():
         raise RuntimeError(f"发送文本消息失败: code={resp.code} msg={resp.msg}")
+    return resp.data.message_id if resp.data and hasattr(resp.data, "message_id") else ""
+
+
+def update_text_message(message_id: str, text: str) -> bool:
+    """编辑机器人已发送的文本消息。"""
+    text = sanitize_public_text(text)
+    if DRY_RUN:
+        print(f"  [编辑文本消息] {message_id[:20]}... -> {text[:80]}", flush=True)
+        return True
+
+    client = _get_client()
+    body = (
+        UpdateMessageRequestBody.builder()
+        .msg_type("text")
+        .content(json.dumps({"text": text}))
+        .build()
+    )
+    req = (
+        UpdateMessageRequest.builder()
+        .message_id(message_id)
+        .request_body(body)
+        .build()
+    )
+    resp = client.im.v1.message.update(req)
+    if not resp.success():
+        if _is_message_unavailable(resp.code, resp.msg):
+            raise FeishuMessageUnavailable("编辑消息", resp.code, resp.msg)
+        raise RuntimeError(f"编辑消息失败: code={resp.code} msg={resp.msg}")
     return True
 
 
@@ -756,6 +786,45 @@ def send_streaming_reply(
     # 5. 关闭流式模式
     stop_streaming(card_id, sequence, token=token)
 
+    return full_text
+
+
+def send_streaming_text_reply(
+    full_text_generator,
+    receive_id: str = "",
+    initial_text: str = "正在输入...",
+    update_interval: float = 0.35,
+    on_sent=None,
+) -> str:
+    """用普通文本消息气泡做近似流式回复：先发送，再编辑同一条消息。"""
+    if DRY_RUN:
+        full_text = ""
+        print("\n  " + "=" * 56)
+        print("  DRY RUN - 文本气泡流式回复（不会真正发送）")
+        print("=" * 56)
+        for chunk in full_text_generator:
+            full_text += chunk
+            print(chunk, end="", flush=True)
+        print("\n" + "=" * 56 + "\n")
+        return full_text
+
+    message_id = send_text(initial_text, receive_id=receive_id)
+    if on_sent:
+        on_sent(message_id)
+
+    full_text = ""
+    last_update = 0.0
+    for chunk in full_text_generator:
+        full_text += chunk
+        now = time.time()
+        if not full_text.strip():
+            continue
+        if not last_update or now - last_update >= update_interval or chunk.endswith(("。", "！", "？", "\n")):
+            update_text_message(message_id, full_text)
+            last_update = now
+
+    if full_text:
+        update_text_message(message_id, full_text)
     return full_text
 
 

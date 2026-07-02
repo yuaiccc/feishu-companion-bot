@@ -19,7 +19,10 @@ import time
 import importlib
 import hashlib
 import re
+import json
 from datetime import datetime
+
+import requests
 
 # 关键：子进程运行时 stdout 默认块缓冲，print 看不到
 try:
@@ -80,6 +83,7 @@ from feishu_companion.feishu_api import (
     pick_emoji,
     start_event_listener,
     send_streaming_reply,
+    send_streaming_text_reply,
     format_for_deepseek,
     FeishuMessageUnavailable,
 )
@@ -180,26 +184,19 @@ def _save_to_memory(messages: list[dict]):
     add_memories(messages)
 
 
-_MEMORY_CONFIRM_KEYWORDS = (
-    "喜欢", "不喜欢", "讨厌", "偏好", "习惯", "不加糖", "以后", "记住", "记得",
-    "别忘", "不要", "需要", "想要", "在意", "重要", "学校", "大学", "家", "住",
-    "生日", "称呼", "叫我", "叫她", "晚上", "明天", "每天", "计划", "安排",
-    "电话", "散步", "生气", "哄", "心软",
-)
-_LOW_VALUE_MESSAGE_RE = re.compile(r"^(你好|hi|hello|在吗|出来|好的|好|ok|嗯|啊|哈哈哈*|收到)[。！？!,.，～~·\\s]*$", re.I)
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.S)
 
 
 def _memory_candidate_from_message(msg_data: dict) -> dict:
-    """Return a lightweight memory candidate, or {} when the message is not worth asking about."""
+    """Return a DeepSeek-approved memory candidate, or {} when it should not be remembered."""
     content = sanitize_public_text((msg_data.get("content") or "").strip())
-    if not content or len(content) < 6 or len(content) > 180:
+    if not content or len(content) < 2 or len(content) > 500:
         return {}
-    if _LOW_VALUE_MESSAGE_RE.match(content):
-        return {}
-    if not any(keyword in content for keyword in _MEMORY_CONFIRM_KEYWORDS):
+    decision = _decide_memory_candidate_with_deepseek(content, bool(msg_data.get("is_shushu")))
+    if not decision.get("remember"):
         return {}
     sender_name = "舒舒" if msg_data.get("is_shushu") else "三哥"
-    candidate = f"{sender_name}提到：{content}"
+    candidate = sanitize_public_text(decision.get("memory") or f"{sender_name}提到：{content}")
     candidate_hash = hashlib.sha1(candidate.encode("utf-8")).hexdigest()
     return {
         "content": candidate,
@@ -207,6 +204,59 @@ def _memory_candidate_from_message(msg_data: dict) -> dict:
         "sender": sender_name,
         "hash": candidate_hash,
     }
+
+
+def _decide_memory_candidate_with_deepseek(content: str, is_shushu: bool) -> dict:
+    """Ask DeepSeek whether a message deserves owner-confirmed long-term memory."""
+    if not DEEPSEEK_API_KEY:
+        return {"remember": False, "memory": "", "reason": "missing_api_key"}
+    sender_name = "舒舒" if is_shushu else "三哥"
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": """你是飞书陪伴机器人的记忆管家。判断一条聊天消息是否值得进入长期记忆候选。
+只返回 JSON，不要解释。格式：
+{"remember": true/false, "memory": "一句自然中文记忆", "reason": "极短原因"}
+
+判断标准：
+- 记住稳定偏好、重要事实、长期习惯、关系边界、称呼方式、明确承诺、重要计划。
+- 不记普通寒暄、即时情绪、重复废话、临时闲聊、表情语气、已经过时的细枝末节。
+- 不要编造消息里没有的信息。
+- memory 要适合给 owner 私聊确认，简短、克制、可长期复用。""",
+            },
+            {
+                "role": "user",
+                "content": f"发送者：{sender_name}\n消息：{content}",
+            },
+        ],
+        "temperature": 0,
+        "max_tokens": 160,
+        "response_format": {"type": "json_object"},
+    }
+    try:
+        resp = requests.post(
+            f"{DEEPSEEK_BASE_URL}/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        match = _JSON_OBJECT_RE.search(text)
+        data = json.loads(match.group(0) if match else text)
+        return {
+            "remember": bool(data.get("remember")),
+            "memory": sanitize_public_text(str(data.get("memory") or "").strip()),
+            "reason": sanitize_public_text(str(data.get("reason") or "").strip()),
+        }
+    except Exception as e:
+        print(f"  [记忆确认] DeepSeek 判断失败: {e}", flush=True)
+        return {"remember": False, "memory": "", "reason": "deepseek_error"}
 
 
 def _build_memory_confirmation_card(candidate: dict) -> dict:
@@ -838,7 +888,7 @@ def on_message_received(msg_data: dict):
 
         reply = ""
         replied_via_stream = False
-        if STREAMING_REPLY_ENABLED and chat_id and chat_type != "group":
+        if STREAMING_REPLY_ENABLED and chat_id:
             try:
                 generator = reply_to_shushu_stream(
                     recent_messages, memories,
@@ -860,14 +910,22 @@ def on_message_received(msg_data: dict):
                             first_token_seen = True
                         yield chunk
 
-                reply = send_streaming_reply(
-                    _trace_stream(generator),
-                    title="回复",
-                    receive_id=chat_id,
-                    initial_text="正在输入...",
-                    update_interval=STREAMING_REPLY_UPDATE_INTERVAL_SECONDS,
-                    on_sent=_on_stream_sent,
-                )
+                if chat_type == "group":
+                    reply = send_streaming_text_reply(
+                        _trace_stream(generator),
+                        receive_id=chat_id,
+                        initial_text="正在输入...",
+                        update_interval=STREAMING_REPLY_UPDATE_INTERVAL_SECONDS,
+                    )
+                else:
+                    reply = send_streaming_reply(
+                        _trace_stream(generator),
+                        title="回复",
+                        receive_id=chat_id,
+                        initial_text="正在输入...",
+                        update_interval=STREAMING_REPLY_UPDATE_INTERVAL_SECONDS,
+                        on_sent=_on_stream_sent,
+                    )
                 trace.mark("reply_sent")
                 if stream_message_id and reply:
                     state = load_state()

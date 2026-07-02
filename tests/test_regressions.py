@@ -511,9 +511,36 @@ class BotRegressionTests(unittest.TestCase):
         self.assertEqual(len({b["name"] for b in buttons}), len(buttons))
 
     def test_memory_candidate_filters_low_value_messages(self):
-        self.assertEqual(bot_main._memory_candidate_from_message({"content": "你好", "is_shushu": False}), {})
-        candidate = bot_main._memory_candidate_from_message({"content": "以后记得我晚上喜欢去散步", "is_shushu": False})
-        self.assertIn("三哥提到", candidate["content"])
+        with patch.object(bot_main, "_decide_memory_candidate_with_deepseek", return_value={"remember": False}):
+            self.assertEqual(bot_main._memory_candidate_from_message({"content": "你好", "is_shushu": False}), {})
+        with patch.object(
+            bot_main,
+            "_decide_memory_candidate_with_deepseek",
+            return_value={"remember": True, "memory": "三哥晚上喜欢去散步"},
+        ):
+            candidate = bot_main._memory_candidate_from_message({"content": "我晚上喜欢去散步", "is_shushu": False})
+        self.assertEqual(candidate["content"], "三哥晚上喜欢去散步")
+
+    def test_streaming_text_reply_edits_plain_message_bubble(self):
+        updates = []
+        with patch.object(feishu_api, "DRY_RUN", False), patch.object(
+            feishu_api,
+            "send_text",
+            return_value="om_plain",
+        ) as send_mock, patch.object(
+            feishu_api,
+            "update_text_message",
+            side_effect=lambda message_id, text: updates.append((message_id, text)) or True,
+        ), patch.object(
+            feishu_api.time,
+            "time",
+            side_effect=[0.0, 0.1, 0.2, 0.3],
+        ):
+            text = feishu_api.send_streaming_text_reply(iter(["你", "好", "呀"]), receive_id="oc", update_interval=10)
+        self.assertEqual(text, "你好呀")
+        send_mock.assert_called_once_with("正在输入...", receive_id="oc")
+        self.assertEqual(updates[0], ("om_plain", "你"))
+        self.assertEqual(updates[-1], ("om_plain", "你好呀"))
 
     def test_memory_confirmation_card_buttons_are_private_actions(self):
         card = bot_main._build_memory_confirmation_card({"content": "三哥提到：以后喜欢晚上散步"})
