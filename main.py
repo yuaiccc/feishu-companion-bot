@@ -101,10 +101,9 @@ from feishu_companion.local_apps import get_local_status_summary
 from feishu_companion.call_notes import build_call_notes_context
 from feishu_companion.external_search import (
     answer_external_search,
-    build_search_card,
     remember_search_interaction,
     search_web,
-    summarize_search_intro,
+    summarize_search_results,
 )
 from feishu_companion.passive_assistant import PassiveAssistant
 from feishu_companion.health import build_health_card
@@ -825,11 +824,11 @@ def on_message_received(msg_data: dict):
             print("  [工具调用] 用户询问外部实时信息，调用本地搜索后端...", flush=True)
             try:
                 results = search_web(content)
-                card = build_search_card(content, results, summarize_search_intro(content, results))
+                search_reply = summarize_search_results(content, results)
                 if message_id:
-                    reply_card(card, message_id)
+                    reply_text(search_reply, message_id)
                 else:
-                    send_card(card, receive_id=chat_id)
+                    send_text(search_reply, receive_id=chat_id)
                 remember_search_interaction(content, results, actor=sender_name)
             except FeishuMessageUnavailable as e:
                 print(f"  [跳过] 消息不可回复: {e}", flush=True)

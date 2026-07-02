@@ -173,6 +173,13 @@ class BotRegressionTests(unittest.TestCase):
         self.assertNotIn("你是用户本人", prompts)
         self.assertNotIn("用第一人称跟对方说话", prompts)
 
+    def test_search_summary_prompt_relates_results_to_couple_context(self):
+        source = external_search.summarize_search_results.__code__.co_consts
+        prompt_text = "\n".join(str(item) for item in source if isinstance(item, str))
+        self.assertIn("和你俩有关的点", prompt_text)
+        self.assertIn("不要发一堆链接", prompt_text)
+        self.assertIn("不要表格", prompt_text)
+
     def test_aliases_are_one_person_not_parallel_names(self):
         prompts = "\n".join([
             summarizer.RELATIONSHIP_CONTEXT,

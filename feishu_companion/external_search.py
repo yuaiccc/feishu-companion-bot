@@ -272,7 +272,7 @@ def _extract_urls(text: str) -> list[str]:
 
 
 def summarize_search_results(query: str, results: list[dict]) -> str:
-    """Summarize search results with source awareness."""
+    """Summarize search results and relate them to the configured companion context."""
     if not results:
         return "小弟没搜到靠谱结果，换个关键词再试试。"
 
@@ -292,10 +292,11 @@ def summarize_search_results(query: str, results: list[dict]) -> str:
                 "role": "system",
                 "content": f"""你是{bot_role()}，帮{target_name()}或{owner_name()}整理外部搜索结果。
 要求：
-- 简短、可靠，不要把搜索结果当作绝对事实
-- 明确说这是机器人搜到的结果
-- 优先给结论，再列 2-4 个要点
-- 保留来源链接，链接数量不要超过 4 个
+- 不要发一堆链接，不要表格
+- 先用一段自然中文总结这件事，像在群里聊天
+- 然后用“和你俩有关的点：”列 2-3 条，说明这和两个人最近聊天、约会、共同兴趣、情绪陪伴或生活安排可能有什么关系
+- 可以点到来源名称，但不要裸列 URL；只有特别必要时最多给 1 个链接
+- 不要把搜索结果当作绝对事实，涉及新闻和推荐要保留不确定性
 - {target_addressing_instruction()}
 - 不要编造搜索结果里没有的信息""",
             },
@@ -317,17 +318,14 @@ def summarize_search_results(query: str, results: list[dict]) -> str:
         resp.raise_for_status()
         return sanitize_public_text(resp.json()["choices"][0]["message"]["content"].strip())
     except Exception:
-        lines = ["小弟搜到这些结果，可以先参考："]
-        for item in results[:4]:
-            title = item.get("title") or item.get("url") or "搜索结果"
+        lines = ["小弟搜到一些材料，但这次总结模型没接上，我先简单说："]
+        for item in results[:3]:
+            title = item.get("title") or _source_host(item.get("url", "")) or "搜索结果"
             snippet = item.get("snippet") or ""
-            url = item.get("url") or ""
-            line = f"- {title}"
             if snippet:
-                line += f"：{snippet[:90]}"
-            if url:
-                line += f"\n  {url}"
-            lines.append(line)
+                lines.append(f"- {title}：{snippet[:120]}")
+            else:
+                lines.append(f"- {title}")
         return sanitize_public_text("\n".join(lines))
 
 
