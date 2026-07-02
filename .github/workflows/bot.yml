@@ -1,60 +1,58 @@
-name: Feishu Bot
+name: Feishu Companion Bot
 
 on:
   schedule:
-    # 每 5 分钟运行一次
-    - cron: '*/5 * * * *'
-  workflow_dispatch: # 支持手动触发
+    # Every 5 minutes as fallback when local server is offline
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 jobs:
-  run-bot:
+  bot:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    environment: feishu
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          python-version: '3.11'
+          go-version-file: go.mod
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Restore state
+      # Persist the GitHub event dedup state (memory_data/<profile>/state.json)
+      # across runs. Without this, every Actions run starts with an empty state
+      # and re-pushes all GitHub events as new.
+      - name: Restore GitHub state
         uses: actions/cache@v4
         with:
-          path: actions_state.json
-          key: bot-state-${{ github.run_id }}
+          path: memory_data
+          key: gh-state-${{ github.run_id }}
           restore-keys: |
-            bot-state-
+            gh-state-
 
-      - name: Run bot
+      - name: Build bot binary
+        run: go build -o bot ./cmd/bot
+
+      - name: Run GitHub Actions entry
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
-          FEISHU_SHUSHU_OPEN_ID: ${{ secrets.FEISHU_SHUSHU_OPEN_ID }}
-          FEISHU_SANGE_OPEN_ID: ${{ secrets.FEISHU_SANGE_OPEN_ID }}
           FEISHU_BOT_OPEN_ID: ${{ secrets.FEISHU_BOT_OPEN_ID }}
-          FEISHU_BOT_NAME: ${{ secrets.FEISHU_BOT_NAME }}
+          FEISHU_OWNER_OPEN_ID: ${{ secrets.FEISHU_OWNER_OPEN_ID }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
+          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
           GH_USERNAME: ${{ secrets.GH_USERNAME }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GH_PRIVATE_REPOS: ${{ secrets.GH_PRIVATE_REPOS }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          DEEPSEEK_BASE_URL: https://api.deepseek.com
-          DEEPSEEK_MODEL: deepseek-chat
-          CALL_NOTES_ENABLED: ${{ secrets.CALL_NOTES_ENABLED }}
-          FEISHU_MINUTE_TOKENS: ${{ secrets.FEISHU_MINUTE_TOKENS }}
-          CALL_NOTES_MAX_CHARS: ${{ secrets.CALL_NOTES_MAX_CHARS }}
-        run: python -m feishu_companion.actions_app
+          DRY_RUN: "false"
+        run: ./bot --actions
 
-      - name: Save state
+      - name: Save GitHub state
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: actions_state.json
-          key: bot-state-${{ github.run_id }}
+          path: memory_data
+          key: gh-state-${{ github.run_id }}
