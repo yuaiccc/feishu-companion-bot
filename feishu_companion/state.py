@@ -21,6 +21,7 @@ def load_state() -> dict:
         "proactive_topic_sent_dates": {},
         "streaming_reply_contexts": {},
         "streaming_reply_callback_ids": [],
+        "memory_confirmation_hashes": [],
     }
 
 
@@ -218,4 +219,20 @@ def mark_streaming_callback_processed(state: dict, callback_id: str) -> None:
     if callback_id not in ids:
         ids.append(callback_id)
     state["streaming_reply_callback_ids"] = ids[-_MAX_PROCESSED:]
+    save_state(state)
+
+
+# ---- 记忆确认候选去重 ----
+
+def is_memory_confirmation_seen(state: dict, candidate_hash: str) -> bool:
+    return bool(candidate_hash and candidate_hash in set(state.get("memory_confirmation_hashes", [])))
+
+
+def mark_memory_confirmation_seen(state: dict, candidate_hash: str) -> None:
+    if not candidate_hash:
+        return
+    hashes = list(state.get("memory_confirmation_hashes", []) or [])
+    if candidate_hash not in hashes:
+        hashes.append(candidate_hash)
+    state["memory_confirmation_hashes"] = hashes[-_MAX_PROCESSED:]
     save_state(state)

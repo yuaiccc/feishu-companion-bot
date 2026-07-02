@@ -306,6 +306,39 @@ def send_card(card: dict, receive_id: str = "") -> bool:
     return True
 
 
+def send_card_message(card: dict, receive_id: str = "") -> str:
+    """发送卡片消息并返回 message_id。"""
+    card = sanitize_card(card)
+    target = receive_id or FEISHU_CHAT_ID
+    if DRY_RUN:
+        print("\n  " + "=" * 56)
+        print("  DRY RUN - 以下卡片通过机器人发送（不会真正发送）")
+        print("=" * 56)
+        print(json.dumps(card, ensure_ascii=False, indent=2))
+        print("=" * 56 + "\n")
+        return "dry-run-card-message"
+
+    client = _get_client()
+    card_content = json.dumps(card["card"], ensure_ascii=False)
+    body = (
+        CreateMessageRequestBody.builder()
+        .msg_type("interactive")
+        .content(card_content)
+        .receive_id(target)
+        .build()
+    )
+    req = (
+        CreateMessageRequest.builder()
+        .receive_id_type("chat_id")
+        .request_body(body)
+        .build()
+    )
+    resp = client.im.v1.message.create(req)
+    if not resp.success():
+        raise RuntimeError(f"发送卡片消息失败: code={resp.code} msg={resp.msg}")
+    return resp.data.message_id if resp.data and hasattr(resp.data, "message_id") else ""
+
+
 # ---- 表情回复 ----
 
 def react_to_message(message_id: str, emoji_type: str = "THUMBSUP") -> str | None:
@@ -672,6 +705,7 @@ def send_streaming_reply(
     initial_text: str = "正在输入...",
     update_interval: float = 0.35,
     on_sent=None,
+    include_actions: bool = False,
 ) -> str:
     """完整的流式回复流程：
     1. 创建流式卡片实体
@@ -692,7 +726,7 @@ def send_streaming_reply(
         return full_text
 
     # 1. 创建卡片。先带一个占位文本，让群里立即看到机器人接住了。
-    card_id = create_streaming_card(title=title, initial_text=initial_text)
+    card_id = create_streaming_card(title=title, initial_text=initial_text, include_actions=include_actions)
 
     # 2. 发送卡片到目标聊天
     message_id = send_card_entity(card_id, receive_id=receive_id)

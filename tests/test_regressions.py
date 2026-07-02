@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import actions_runner
+import main as bot_main
 import feishu_companion.call_notes as call_notes
 import feishu_companion.context_manager as context_manager
 import feishu_companion.commit_text as commit_text
@@ -477,6 +478,7 @@ class BotRegressionTests(unittest.TestCase):
         create_mock.assert_called_once()
         self.assertEqual(create_mock.call_args.kwargs.get("title"), "回复")
         self.assertEqual(create_mock.call_args.kwargs.get("initial_text"), "正在输入...")
+        self.assertFalse(create_mock.call_args.kwargs.get("include_actions"))
         token_mock.assert_called_once()
         self.assertEqual(updates[0], ("你", 1, "tenant_token"))
         self.assertEqual(updates[-1][0], "你好呀")
@@ -507,6 +509,16 @@ class BotRegressionTests(unittest.TestCase):
             ["rephrase", "continue", "remember", "forget"],
         )
         self.assertEqual(len({b["name"] for b in buttons}), len(buttons))
+
+    def test_memory_candidate_filters_low_value_messages(self):
+        self.assertEqual(bot_main._memory_candidate_from_message({"content": "你好", "is_shushu": False}), {})
+        candidate = bot_main._memory_candidate_from_message({"content": "以后记得我晚上喜欢去散步", "is_shushu": False})
+        self.assertIn("三哥提到", candidate["content"])
+
+    def test_memory_confirmation_card_buttons_are_private_actions(self):
+        card = bot_main._build_memory_confirmation_card({"content": "三哥提到：以后喜欢晚上散步"})
+        buttons = [e for e in card["card"]["body"]["elements"] if e.get("tag") == "button"]
+        self.assertEqual([b["value"]["action"] for b in buttons], ["remember_candidate", "dismiss_candidate"])
 
     def test_reply_context_is_bounded_and_auditable(self):
         messages = [

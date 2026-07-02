@@ -43,6 +43,7 @@ MEMORY_EMBEDDING_PROVIDER = os.getenv("MEMORY_EMBEDDING_PROVIDER", "local_hash")
 MEMORY_OLLAMA_BASE_URL = os.getenv("MEMORY_OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 MEMORY_OLLAMA_EMBED_MODEL = os.getenv("MEMORY_OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
 MEMORY_OLLAMA_TIMEOUT_SECONDS = float(os.getenv("MEMORY_OLLAMA_TIMEOUT_SECONDS", "5"))
+MEMORY_CONFIRMATION_ENABLED = os.getenv("MEMORY_CONFIRMATION_ENABLED", "true").lower() in ("true", "1", "yes")
 
 # ---- 外部搜索（本地 DeerFlow / OpenClaw）----
 EXTERNAL_SEARCH_ENABLED = os.getenv("EXTERNAL_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")

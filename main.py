@@ -17,6 +17,8 @@ import sys
 import threading
 import time
 import importlib
+import hashlib
+import re
 from datetime import datetime
 
 # 关键：子进程运行时 stdout 默认块缓冲，print 看不到
@@ -40,6 +42,7 @@ from feishu_companion.config import (
     FEISHU_STATUS_CHAT_ID,
     STATUS_NOTIFY_COOLDOWN_SECONDS,
     MEMORY_ENABLED,
+    MEMORY_CONFIRMATION_ENABLED,
     LOCAL_DAILY_JOB_MODULE,
     LOCAL_DAILY_JOB_RUN_AT,
     DEEPSEEK_API_KEY,
@@ -62,11 +65,14 @@ from feishu_companion.state import (
     get_streaming_reply_context,
     is_streaming_callback_processed,
     mark_streaming_callback_processed,
+    is_memory_confirmation_seen,
+    mark_memory_confirmation_seen,
 )
 from feishu_companion.feishu_api import (
     fetch_chat_messages,
     send_text,
     send_card,
+    send_card_message,
     reply_text,
     reply_card,
     react_to_message,
@@ -172,6 +178,98 @@ def _save_to_memory(messages: list[dict]):
         return
     print("  正在存入记忆...")
     add_memories(messages)
+
+
+_MEMORY_CONFIRM_KEYWORDS = (
+    "喜欢", "不喜欢", "讨厌", "偏好", "习惯", "不加糖", "以后", "记住", "记得",
+    "别忘", "不要", "需要", "想要", "在意", "重要", "学校", "大学", "家", "住",
+    "生日", "称呼", "叫我", "叫她", "晚上", "明天", "每天", "计划", "安排",
+    "电话", "散步", "生气", "哄", "心软",
+)
+_LOW_VALUE_MESSAGE_RE = re.compile(r"^(你好|hi|hello|在吗|出来|好的|好|ok|嗯|啊|哈哈哈*|收到)[。！？!,.，～~·\\s]*$", re.I)
+
+
+def _memory_candidate_from_message(msg_data: dict) -> dict:
+    """Return a lightweight memory candidate, or {} when the message is not worth asking about."""
+    content = sanitize_public_text((msg_data.get("content") or "").strip())
+    if not content or len(content) < 6 or len(content) > 180:
+        return {}
+    if _LOW_VALUE_MESSAGE_RE.match(content):
+        return {}
+    if not any(keyword in content for keyword in _MEMORY_CONFIRM_KEYWORDS):
+        return {}
+    sender_name = "舒舒" if msg_data.get("is_shushu") else "三哥"
+    candidate = f"{sender_name}提到：{content}"
+    candidate_hash = hashlib.sha1(candidate.encode("utf-8")).hexdigest()
+    return {
+        "content": candidate,
+        "raw": content,
+        "sender": sender_name,
+        "hash": candidate_hash,
+    }
+
+
+def _build_memory_confirmation_card(candidate: dict) -> dict:
+    content = sanitize_public_text(candidate.get("content", ""))
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "schema": "2.0",
+            "config": {"update_multi": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "候选记忆"},
+                "template": "turquoise",
+                "padding": "12px 12px 12px 12px",
+            },
+            "body": {
+                "direction": "vertical",
+                "padding": "12px 12px 12px 12px",
+                "elements": [
+                    {"tag": "markdown", "content": f"这条可能值得长期记住：\n\n{content}"},
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "记住"},
+                        "type": "primary",
+                        "width": "default",
+                        "name": "memory_confirm_remember",
+                        "value": {"action": "remember_candidate"},
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "不要记"},
+                        "type": "danger",
+                        "width": "default",
+                        "name": "memory_confirm_dismiss",
+                        "value": {"action": "dismiss_candidate"},
+                    },
+                ],
+            },
+        },
+    }
+
+
+def _maybe_send_memory_confirmation(msg_data: dict) -> None:
+    if not (MEMORY_ENABLED and MEMORY_CONFIRMATION_ENABLED and FEISHU_STATUS_CHAT_ID):
+        return
+    candidate = _memory_candidate_from_message(msg_data)
+    if not candidate:
+        return
+    state = load_state()
+    candidate_hash = candidate.get("hash", "")
+    if is_memory_confirmation_seen(state, candidate_hash):
+        return
+    try:
+        card = _build_memory_confirmation_card(candidate)
+        message_id = send_card_message(card, receive_id=FEISHU_STATUS_CHAT_ID)
+        if message_id:
+            remember_streaming_reply_context(state, message_id, {
+                "candidate_memory": candidate.get("content", ""),
+                "candidate_hash": candidate_hash,
+            })
+            mark_memory_confirmation_seen(state, candidate_hash)
+        print("  [记忆确认] 已私聊发送候选记忆", flush=True)
+    except Exception as e:
+        print(f"  [记忆确认] 发送失败: {e}", flush=True)
 
 
 def _search_relevant_memories(query: str, audience: str = "target") -> list[str]:
@@ -528,13 +626,6 @@ def on_message_received(msg_data: dict):
     """长连接收到消息时的回调。三哥和舒舒的消息都回复。"""
     trace = LatencyTrace("chat_reply")
     try:
-        # 存入记忆
-        if MEMORY_ENABLED:
-            try:
-                _save_to_memory([msg_data])
-            except Exception as e:
-                print(f"  [警告] 存入记忆失败: {e}", flush=True)
-
         # 跳过自己（机器人）发的消息，避免死循环
         sender = msg_data.get("sender", "")
         if sender not in ("三哥", "舒舒"):
@@ -747,7 +838,7 @@ def on_message_received(msg_data: dict):
 
         reply = ""
         replied_via_stream = False
-        if STREAMING_REPLY_ENABLED and chat_id:
+        if STREAMING_REPLY_ENABLED and chat_id and chat_type != "group":
             try:
                 generator = reply_to_shushu_stream(
                     recent_messages, memories,
@@ -847,6 +938,8 @@ def on_message_received(msg_data: dict):
                 pass
             except Exception as e:
                 print(f"  [警告] 添加内容表情失败: {e}", flush=True)
+        if reply:
+            _maybe_send_memory_confirmation(msg_data)
         trace.log()
 
     except Exception as e:
@@ -873,6 +966,14 @@ def on_card_action(action_data: dict) -> str:
     context = get_streaming_reply_context(state, message_id)
     if not context:
         return "这条回复太早了，已经找不到上下文"
+
+    if action == "remember_candidate":
+        content = context.get("candidate_memory", "")
+        entry = add_manual_memory(content, category="note", visibility="owner_only", source_type="owner_confirmed")
+        return "已写入记忆" if entry else "这条内容价值不高，没写入"
+
+    if action == "dismiss_candidate":
+        return "好，这条不记"
 
     chat_id = context.get("chat_id") or action_data.get("chat_id") or FEISHU_CHAT_ID
     messages = context.get("messages") or []
