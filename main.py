@@ -1,6 +1,0 @@
-"""兼容入口：启动本地飞书陪伴机器人服务。"""
-from feishu_companion.app import main
-
-
-if __name__ == "__main__":
-    main()

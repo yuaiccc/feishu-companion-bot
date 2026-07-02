@@ -7,24 +7,46 @@ call_notes_cache.json
 *.log
 activity.txt
 
-# Python
+# Python (legacy)
 __pycache__/
 *.pyc
 *.pyo
 venv/
 .venv/
+local_*.py
+*_private.py
+
+# Memory data (local vector store + dedup state)
+memory_data/
+
+# Profiles — real personal profiles stay local
+profiles/sange-*.json
+profiles/my-*.json
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+bot
+cmd/bot/bot
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
 
 # OS
 .DS_Store
+Thumbs.db
 
 # Uploads
 .uploads/
 
-# Memory data (mem0 / Qdrant local storage)
-memory_data/
-profiles/sange-shushu.json
-local_*.py
-*_private.py
+# Local dev docs (private, not for public repo)
+重写计划书.md
+AGENT.md
 
 # Temp files
 feishu_login_qr.png
