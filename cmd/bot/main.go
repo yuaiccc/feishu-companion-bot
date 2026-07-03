@@ -27,6 +27,7 @@ import (
 	"feishu-companion-bot/internal/localapps"
 	"feishu-companion-bot/internal/memory"
 	"feishu-companion-bot/internal/profile"
+	"feishu-companion-bot/internal/safety"
 	"feishu-companion-bot/internal/search"
 	"feishu-companion-bot/internal/state"
 )
@@ -379,7 +380,11 @@ func buildChatMessages(prof *profile.Profile, recentMsgs []feishu.Message, memor
 	msgs = append(msgs, llm.Message{Role: "system", Content: buildSystemPrompt(prof)})
 
 	if len(memories) > 0 {
-		memText := budget.Add("memories", strings.Join(memories, "\n"))
+		safeMemories := make([]string, 0, len(memories))
+		for _, memory := range memories {
+			safeMemories = append(safeMemories, safety.SanitizeForLLM(memory))
+		}
+		memText := budget.Add("memories", strings.Join(safeMemories, "\n"))
 		if memText != "" {
 			msgs = append(msgs, llm.Message{Role: "system", Content: "相关记忆：\n" + memText})
 		}
@@ -389,7 +394,7 @@ func buildChatMessages(prof *profile.Profile, recentMsgs []feishu.Message, memor
 	if len(recentMsgs) > 0 {
 		var ctxLines []string
 		for _, m := range recentMsgs {
-			ctxLines = append(ctxLines, fmt.Sprintf("[%s] %s: %s", m.Time, m.Sender, m.Content))
+			ctxLines = append(ctxLines, fmt.Sprintf("[%s] %s: %s", m.Time, m.Sender, safety.SanitizeForLLM(m.Content)))
 		}
 		ctxText := budget.Add("recent_messages", strings.Join(ctxLines, "\n"))
 		if ctxText != "" {
@@ -401,8 +406,13 @@ func buildChatMessages(prof *profile.Profile, recentMsgs []feishu.Message, memor
 		msgs = append(msgs, llm.Message{Role: "system", Content: extraInstructions})
 	}
 
-	budget.Add("current_message", recentMsgs[len(recentMsgs)-1].Content)
-	msgs = append(msgs, llm.Message{Role: "user", Content: recentMsgs[len(recentMsgs)-1].Content})
+	currentMessage := ""
+	if len(recentMsgs) > 0 {
+		currentMessage = recentMsgs[len(recentMsgs)-1].Content
+	}
+	safeCurrentMessage := safety.SanitizeForLLM(currentMessage)
+	budget.Add("current_message", safeCurrentMessage)
+	msgs = append(msgs, llm.Message{Role: "user", Content: safeCurrentMessage})
 
 	budget.Log()
 	return msgs
