@@ -1,85 +1,197 @@
 # feishu-companion-bot
 
-飞书陪伴机器人 — Go 重写版。
+一个通用、公开安全、隐私优先的飞书 / Lark 陪伴机器人框架，Go 实现。
 
-一个通用、公开安全、隐私优先的飞书陪伴机器人框架。支持：
+机器人定位是 **owner 的小弟 / 助手**：在 owner 不在时帮忙解释、提醒、整理、搜索、维护记忆，但**不伪装成 owner 本人**。默认配置是通用版本（owner 称"老板"），不带任何真实人名。
 
-- 飞书长连接即时响应
-- GitHub Actions 兜底轮询
-- DeepSeek 总结
-- 本地 profile 隔离记忆
-- 外部搜索（DeerFlow / OpenClaw）
+## 功能
+
+- **CardKit 官方流式回复** — 私聊走飞书 CardKit 流式卡片接口，打字机效果；权限没开通时自动降级为「发文本 + 编辑」
+- **飞书长连接即时响应** — 本机 WebSocket 长连接，群聊 @ 机器人回复，私聊直接回复
+- **GitHub Actions 兜底** — 本机离线时每 5 分钟轮询，`state` 走 `actions/cache` 持久化，幂等去重不重复推送
+- **DeepSeek 总结** — GitHub 动态、主动话题等走轻量总结，一句话说重点
+- **profile 隔离记忆** — `memory_data/<profile>/`，可见性分 `private` / `owner_only` / `public_to_target`
+- **隐私脱敏** — 用户消息进 LLM 前过滤手机号 / 邮箱 / 群 ID / 用户 ID / API key
+- **外部搜索** — DeerFlow / OpenClaw 后端可选
+- **卡片交互** — 候选记忆确认、健康状态等用交互卡片
+
+## 前置条件
+
+- **Go 1.26+**（`go.mod` 声明 `go 1.26.2`）
+- **飞书企业自建应用**，开通机器人能力
+- **DeepSeek API key**
+- 可选：**Ollama**（本地 embedding，不开通则用 hash fallback）
+
+## 飞书应用配置
+
+在飞书开放平台「权限管理」开通：
+
+```
+im:message
+im:message:send_as_bot
+im:message:readonly
+im:message.reactions:write
+im:resource
+cardkit:card:write        # CardKit 流式回复需要，不开通则自动降级
+```
+
+事件订阅：
+
+- `im.message.receive_v1` — 接收消息
+- `card.action.trigger` — 卡片按钮回调
+
+详细步骤见 [`docs/飞书配置.md`](docs/飞书配置.md)。
 
 ## 快速开始
 
 ```bash
-cd go
+# 编译
 go build -o bot ./cmd/bot
 
-# 配置环境变量
+# 配置
 cp .env.example .env
-# 编辑 .env 填入飞书和 DeepSeek 配置
+# 编辑 .env 填入飞书 / DeepSeek / GitHub 配置
 
-# DRY RUN 模式（不真正发消息）
+# DRY RUN（只打印，不真正发消息）
 ./bot
 
-# 正式运行
+# 正式运行（本地长连接）
 DRY_RUN=false ./bot
+```
+
+## 运行模式
+
+### 本地长连接（默认）
+
+```bash
+./bot
+```
+
+WebSocket 长连接即时响应。群聊只有 @ 机器人时回复，私聊直接回复。这是日常使用的主模式。
+
+### GitHub Actions 兜底
+
+```bash
+./bot --actions
+```
+
+单次 GitHub 轮询后退出，用于本机离线时兜底。`.github/workflows/bot.yml` 已配好每 5 分钟 `schedule`，`memory_data` 通过 `actions/cache` 跨 run 持久化，事件按 ID + commit sha 幂等去重。需在仓库 Settings → Secrets 配好 `FEISHU_*` / `DEEPSEEK_*` / `GH_*`。
+
+## smoke 测试
+
+真实飞书 API 验证，**发真实消息**，本地手动跑、不进 CI：
+
+```bash
+go run ./cmd/smoke               # 全部三项
+go run ./cmd/smoke -mode stream  # CardKit 流式全链路
+go run ./cmd/smoke -mode group   # 普通文本发送
+go run ./cmd/smoke -mode github  # GitHub 一句话推送
+```
+
+读 `.env`，开始前 3 秒倒计时。cardkit 权限是否真开通，跑一次 `stream` 就知道。
+
+## memtool — 记忆维护
+
+```bash
+go run ./cmd/memtool -list                # 列出所有记忆
+go run ./cmd/memtool -search "关键词"      # 搜索
+go run ./cmd/memtool -show-vis            # 显示可见性标签
+go run ./cmd/memtool -clean               # 清洗重复/过时记忆
+go run ./cmd/memtool -clean -dry-run=false # 真正执行删除
+go run ./cmd/memtool -migrate-json        # 将 JSON 记忆迁移到数据库后端
 ```
 
 ## 项目结构
 
 ```text
-go/
-  cmd/
-    bot/           本地长连接入口
-                  也支持 --actions 单次兜底轮询
-    memtool/       记忆维护 CLI
-  internal/
-    config/        环境变量加载
-    feishu/        飞书 API、长连接、消息卡片
-    llm/           DeepSeek client、流式
-    memory/        结构化记忆、可见性过滤
-    context/       上下文预算管理
-    github/        GitHub events、幂等去重
-    health/        服务健康检查
-    latency/       延迟 span 日志
-    profile/       人设模板加载
-  profiles/        profile 模板
-  docs/            部署文档
+cmd/
+  bot/        本地长连接入口（--actions 单次兜底）
+  memtool/    记忆维护 CLI
+  smoke/      真实飞书链路验证
+internal/
+  config/     环境变量加载
+  feishu/     飞书 API、WebSocket、CardKit 流式、消息卡片
+  llm/        DeepSeek client、SSE 流式
+  memory/     结构化记忆、embedding、可见性过滤
+  context/    上下文预算管理
+  github/     GitHub events、幂等去重
+  safety/     隐私脱敏（SanitizeForLLM）
+  state/      事件去重 state（HasSent/MarkSent/FilterNew）
+  profile/    人设模板加载
+  search/     外部搜索后端
+  health/     服务健康检查
+  notes/      云文档评论（通用工具包）
+  localapps/  本机窗口/空闲状态读取（macOS）
+profiles/     profile 模板（default / example-couple）
+docs/         部署文档
 ```
 
 ## Profile
 
 ```bash
-cd go
 cp profiles/example-couple.json profiles/my-profile.json
-# 编辑 my-profile.json
-export PROFILE_ID=my-profile
-export PROFILES_DIR=.
-# 运行
-./bot
+# 编辑 my-profile.json（owner_name / target_name / bot_role 等）
+
+PROFILE_ID=my-profile PROFILES_DIR=. ./bot
 ```
+
+`profiles/default.json` 是通用占位（owner_name 为"老板"），可直接用。真实 profile 不会被提交（`.gitignore` 忽略 `profiles/sange-*.json` / `profiles/my-*.json`）。
 
 ## 记忆系统
 
-- `memory_data/<PROFILE_ID>/memories.json`
-- 可见性：`private` / `owner_only` / `public_to_target`
-- 候选记忆由 DeepSeek 判断，owner 私聊确认后落库
+- 默认存储路径：`memory_data/<PROFILE_ID>/memories.json`
+- 可选数据库后端：配置 `MEMORY_DATABASE_DSN` 后使用 OceanBase/MySQL 表 `bot_memories`
+- 可选聊天归档源：`MEMORY_INCLUDE_CHAT_ARCHIVE=true` 时，将同库 `shuye_message_chunks` 作为只读长期聊天记忆参与检索
+- 可见性：`private`（绝不进 prompt）/ `owner_only`（只给 owner 回复用）/ `public_to_target`（可对目标用户用）
+- 候选记忆由 DeepSeek 判断，发卡片到 owner 私聊确认后落库
+- 群聊消息不靠关键词直接写记忆
+
+OceanBase 示例：
+
+```env
+MEMORY_DATABASE_DSN=jdbc:mysql://127.0.0.1:2881/shuye_chat
+MEMORY_INCLUDE_CHAT_ARCHIVE=true
+MEMORY_CHAT_ARCHIVE_VISIBILITY=owner_only
+```
+
+`MEMORY_CHAT_ARCHIVE_VISIBILITY` 默认 `owner_only`，避免把私密聊天归档直接用于对外回复；确认双方都可见后再改为 `public_to_target`。
+
+## 隐私脱敏
+
+用户消息、近期对话、相关记忆进 DeepSeek prompt 前，统一过 `safety.SanitizeForLLM`：
+
+- 手机号（11 位、带分隔符）
+- 邮箱
+- `oc.xxx`（群 ID）、`ou_xxx`（用户 ID）
+- `sk-xxx`（API key）
+
+匹配到的替换为 `[敏感信息]`，不会原样发到 DeepSeek。
 
 ## 环境变量
+
+完整列表见 [`.env.example`](.env.example)，关键项：
 
 ```env
 # 飞书
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=xxx
-FEISHU_CHAT_ID=oc_xxx
+FEISHU_CHAT_ID=oc_xxx              # 目标会话（群或私聊 chat_id）
 FEISHU_BOT_OPEN_ID=ou_xxx
+FEISHU_OWNER_OPEN_ID=ou_xxx        # owner 的 open_id，用于身份判断
 
 # DeepSeek
 DEEPSEEK_API_KEY=sk-xxx
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat
+
+# Ollama（可选，embedding）
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=nomic-embed-text
+
+# 记忆数据库（可选，OceanBase/MySQL）
+MEMORY_DATABASE_DSN=
+MEMORY_INCLUDE_CHAT_ARCHIVE=false
+MEMORY_CHAT_ARCHIVE_VISIBILITY=owner_only
 
 # GitHub
 GH_USERNAME=your_username
@@ -87,7 +199,29 @@ GH_TOKEN=ghp_xxx
 GH_PRIVATE_REPOS=owner/repo1,owner/repo2
 
 # 行为
-DRY_RUN=true
+DRY_RUN=true                       # true 只打印不发送
+STREAMING_REPLY_ENABLED=true       # 私聊走 CardKit 流式（需 cardkit:card:write）
+STREAMING_REPLY_UPDATE_INTERVAL_SECONDS=0.35
 MEMORY_ENABLED=true
 MEMORY_CONFIRMATION_ENABLED=true
+
+# Profile
+PROFILE_ID=default
+PROFILES_DIR=.
+
+# 轮询
+POLL_INTERVAL_SECONDS=300
 ```
+
+`GH_USERNAME` / `GH_TOKEN` / `GH_PRIVATE_REPOS` 也兼容 `GITHUB_USERNAME` / `GITHUB_TOKEN` / `GITHUB_PRIVATE_REPOS` 旧名（fallback）。
+
+## 开源说明
+
+- 机器人是 owner 的助手，不是 owner 本人的分身
+- 默认 profile 是通用占位，不含真实人名 / 地址 / token
+- `.env` / `state.json` / `memory_data/` / 真实 profile / 日志均不提交（见 `.gitignore`）
+- 私有恋爱笔记逻辑已剥离，`internal/notes` 只保留通用云文档评论工具包
+
+## 许可
+
+MIT

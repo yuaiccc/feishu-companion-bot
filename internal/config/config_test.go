@@ -57,3 +57,11 @@ func TestSplitEnv(t *testing.T) {
 		t.Errorf("splitEnv with spaces len = %d, want 3", len(got))
 	}
 }
+
+func TestNormalizeJDBCMySQLDSN(t *testing.T) {
+	got := normalizeJDBCMySQLDSN("jdbc:mysql://127.0.0.1:2881/shuye_chat")
+	want := "root@tcp(127.0.0.1:2881)/shuye_chat?parseTime=true&charset=utf8mb4"
+	if got != want {
+		t.Errorf("normalizeJDBCMySQLDSN = %q, want %q", got, want)
+	}
+}

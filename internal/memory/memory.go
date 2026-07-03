@@ -3,6 +3,7 @@ package memory
 import (
 	"crypto/sha1"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,8 +12,8 @@ import (
 type Visibility string
 
 const (
-	VisPrivate      Visibility = "private"
-	VisOwnerOnly    Visibility = "owner_only"
+	VisPrivate        Visibility = "private"
+	VisOwnerOnly      Visibility = "owner_only"
 	VisPublicToTarget Visibility = "public_to_target"
 )
 
@@ -29,9 +30,9 @@ type Memory struct {
 }
 
 type Store struct {
-	mu     sync.RWMutex
-	path   string
-	Items  []Memory `json:"memories"`
+	mu    sync.RWMutex
+	path  string
+	Items []Memory `json:"memories"`
 }
 
 func NewStore(profileID, dataDir string) (*Store, error) {
@@ -122,5 +123,5 @@ var _ MemoryStore = (*SearchStore)(nil)
 
 func HashContent(content string) string {
 	h := sha1.Sum([]byte(content))
-	return string(h[:])
+	return fmt.Sprintf("%x", h[:])
 }

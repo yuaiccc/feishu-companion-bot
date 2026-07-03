@@ -1,8 +1,11 @@
 package config
 
 import (
+	"fmt"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,37 +24,40 @@ type Config struct {
 	DeepSeekModel   string
 
 	// Ollama (for embeddings)
-	OllamaBaseURL   string
-	OllamaModel     string
+	OllamaBaseURL string
+	OllamaModel   string
 
 	// GitHub
-	GitHubUsername    string
-	GitHubToken       string
+	GitHubUsername     string
+	GitHubToken        string
 	GitHubPrivateRepos []string
-	PollInterval      time.Duration
+	PollInterval       time.Duration
 
 	// Memory
-	MemoryEnabled           bool
+	MemoryEnabled             bool
 	MemoryConfirmationEnabled bool
+	MemoryDatabaseDSN         string
+	MemoryIncludeChatArchive  bool
+	MemoryChatVisibility      string
 
 	// Profile
 	ProfileID string
 
 	// Behavior
-	DryRun                          bool
-	StreamingReplyEnabled           bool
-	StreamingReplyUpdateInterval    time.Duration
-	ProactiveTopicEnabled           bool
-	ProactiveTopicCheckInterval     time.Duration
-	ProactiveTopicCooldown          time.Duration
+	DryRun                       bool
+	StreamingReplyEnabled        bool
+	StreamingReplyUpdateInterval time.Duration
+	ProactiveTopicEnabled        bool
+	ProactiveTopicCheckInterval  time.Duration
+	ProactiveTopicCooldown       time.Duration
 
 	// External search
-	ExternalSearchEnabled       bool
-	ExternalSearchBackend       string
-	ExternalSearchFallbackOC    bool
-	DeerFlowBackendDir          string
-	DeerFlowPython              string
-	OpenClawCLI                 string
+	ExternalSearchEnabled    bool
+	ExternalSearchBackend    string
+	ExternalSearchFallbackOC bool
+	DeerFlowBackendDir       string
+	DeerFlowPython           string
+	OpenClawCLI              string
 
 	// Local daily job
 	LocalDailyJobModule string
@@ -66,12 +72,12 @@ type Config struct {
 
 func Load() *Config {
 	c := &Config{
-		FeishuAppID:     getEnv("FEISHU_APP_ID", ""),
-		FeishuAppSecret: getEnv("FEISHU_APP_SECRET", ""),
-		FeishuChatID:    getEnv("FEISHU_CHAT_ID", ""),
+		FeishuAppID:       getEnv("FEISHU_APP_ID", ""),
+		FeishuAppSecret:   getEnv("FEISHU_APP_SECRET", ""),
+		FeishuChatID:      getEnv("FEISHU_CHAT_ID", ""),
 		FeishuBotOpenID:   getEnv("FEISHU_BOT_OPEN_ID", ""),
 		FeishuOwnerOpenID: getEnv("FEISHU_OWNER_OPEN_ID", ""),
-		FeishuReadMsg:   getEnvBool("FEISHU_READ_MESSAGES", true),
+		FeishuReadMsg:     getEnvBool("FEISHU_READ_MESSAGES", true),
 
 		DeepSeekAPIKey:  getEnv("DEEPSEEK_API_KEY", ""),
 		DeepSeekBaseURL: getEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
@@ -84,24 +90,27 @@ func Load() *Config {
 		GitHubToken:    getEnv("GH_TOKEN", getEnv("GITHUB_TOKEN", "")),
 		PollInterval:   getEnvDuration("POLL_INTERVAL_SECONDS", 10*time.Minute),
 
-		MemoryEnabled:           getEnvBool("MEMORY_ENABLED", true),
+		MemoryEnabled:             getEnvBool("MEMORY_ENABLED", true),
 		MemoryConfirmationEnabled: getEnvBool("MEMORY_CONFIRMATION_ENABLED", true),
+		MemoryDatabaseDSN:         normalizeJDBCMySQLDSN(getEnv("MEMORY_DATABASE_DSN", "")),
+		MemoryIncludeChatArchive:  getEnvBool("MEMORY_INCLUDE_CHAT_ARCHIVE", false),
+		MemoryChatVisibility:      getEnv("MEMORY_CHAT_ARCHIVE_VISIBILITY", "owner_only"),
 
 		ProfileID: getEnv("PROFILE_ID", "default"),
 
-		DryRun:               getEnvBool("DRY_RUN", true),
-		StreamingReplyEnabled: getEnvBool("STREAMING_REPLY_ENABLED", true),
+		DryRun:                       getEnvBool("DRY_RUN", true),
+		StreamingReplyEnabled:        getEnvBool("STREAMING_REPLY_ENABLED", true),
 		StreamingReplyUpdateInterval: getEnvDuration("STREAMING_REPLY_UPDATE_INTERVAL_SECONDS", 350*time.Millisecond),
-		ProactiveTopicEnabled: getEnvBool("PROACTIVE_TOPIC_ENABLED", true),
-		ProactiveTopicCheckInterval: getEnvDuration("PROACTIVE_TOPIC_CHECK_INTERVAL_SECONDS", 5*time.Minute),
-		ProactiveTopicCooldown: getEnvDuration("PROACTIVE_TOPIC_COOLDOWN_HOURS", 24*time.Hour),
+		ProactiveTopicEnabled:        getEnvBool("PROACTIVE_TOPIC_ENABLED", true),
+		ProactiveTopicCheckInterval:  getEnvDuration("PROACTIVE_TOPIC_CHECK_INTERVAL_SECONDS", 5*time.Minute),
+		ProactiveTopicCooldown:       getEnvDuration("PROACTIVE_TOPIC_COOLDOWN_HOURS", 24*time.Hour),
 
-		ExternalSearchEnabled: getEnvBool("EXTERNAL_SEARCH_ENABLED", false),
-		ExternalSearchBackend: getEnv("EXTERNAL_SEARCH_BACKEND", "deerflow"),
+		ExternalSearchEnabled:    getEnvBool("EXTERNAL_SEARCH_ENABLED", false),
+		ExternalSearchBackend:    getEnv("EXTERNAL_SEARCH_BACKEND", "deerflow"),
 		ExternalSearchFallbackOC: getEnvBool("EXTERNAL_SEARCH_FALLBACK_OPENCLAW", true),
-		DeerFlowBackendDir:   getEnv("DEERFLOW_BACKEND_DIR", ""),
-		DeerFlowPython:       getEnv("DEERFLOW_PYTHON", "python"),
-		OpenClawCLI:          getEnv("OPENCLAW_CLI", "openclaw"),
+		DeerFlowBackendDir:       getEnv("DEERFLOW_BACKEND_DIR", ""),
+		DeerFlowPython:           getEnv("DEERFLOW_PYTHON", "python"),
+		OpenClawCLI:              getEnv("OPENCLAW_CLI", "openclaw"),
 
 		LocalDailyJobModule: getEnv("LOCAL_DAILY_JOB_MODULE", ""),
 		LocalDailyJobRunAt:  getEnv("LOCAL_DAILY_JOB_RUN_AT", "23:55"),
@@ -189,4 +198,39 @@ func trimString(s string) string {
 		j--
 	}
 	return s[i : j+1]
+}
+
+func normalizeJDBCMySQLDSN(dsn string) string {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return ""
+	}
+	const jdbcPrefix = "jdbc:mysql://"
+	if strings.HasPrefix(dsn, jdbcPrefix) {
+		return mysqlURLToGoDSN("mysql://" + strings.TrimPrefix(dsn, jdbcPrefix))
+	}
+	if strings.HasPrefix(dsn, "mysql://") {
+		return mysqlURLToGoDSN(dsn)
+	}
+	return dsn
+}
+
+func mysqlURLToGoDSN(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	user := "root"
+	if u.User != nil {
+		user = u.User.Username()
+		if password, ok := u.User.Password(); ok {
+			user = fmt.Sprintf("%s:%s", user, password)
+		}
+	}
+	dbName := strings.TrimPrefix(u.Path, "/")
+	query := u.RawQuery
+	if query == "" {
+		query = "parseTime=true&charset=utf8mb4"
+	}
+	return fmt.Sprintf("%s@tcp(%s)/%s?%s", user, u.Host, dbName, query)
 }

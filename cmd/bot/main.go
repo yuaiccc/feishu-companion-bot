@@ -577,20 +577,34 @@ func runBotMode() {
 
 	prof := loadProfile(cfg)
 
-	var memStore *memory.SearchStore
+	var memStore memory.MemoryStore
 	var err error
 	if cfg.MemoryEnabled {
-		var embedder memory.Embedder
-		if cfg.OllamaModel != "" {
-			embedder = memory.NewOllamaEmbedder(cfg.OllamaBaseURL, cfg.OllamaModel)
-			log.Printf("[记忆] 使用 Ollama embedding: %s/%s", cfg.OllamaBaseURL, cfg.OllamaModel)
+		if cfg.MemoryDatabaseDSN != "" {
+			memStore, err = memory.NewDatabaseStore(memory.DatabaseOptions{
+				DSN:                cfg.MemoryDatabaseDSN,
+				ProfileID:          cfg.ProfileID,
+				IncludeChatArchive: cfg.MemoryIncludeChatArchive,
+				ChatVisibility:     memory.Visibility(cfg.MemoryChatVisibility),
+			})
+			if err != nil {
+				log.Printf("初始化数据库记忆库失败: %v", err)
+			} else {
+				log.Printf("[记忆] 使用 OceanBase/MySQL: profile=%s include_chat_archive=%v", cfg.ProfileID, cfg.MemoryIncludeChatArchive)
+			}
 		} else {
-			embedder = &memory.HashEmbedder{}
-			log.Println("[记忆] 使用 Hash embedding (本地 fallback)")
-		}
-		memStore, err = memory.NewSearchStore(cfg.ProfileID, "memory_data", embedder)
-		if err != nil {
-			log.Printf("初始化记忆库失败: %v", err)
+			var embedder memory.Embedder
+			if cfg.OllamaModel != "" {
+				embedder = memory.NewOllamaEmbedder(cfg.OllamaBaseURL, cfg.OllamaModel)
+				log.Printf("[记忆] 使用 Ollama embedding: %s/%s", cfg.OllamaBaseURL, cfg.OllamaModel)
+			} else {
+				embedder = &memory.HashEmbedder{}
+				log.Println("[记忆] 使用 Hash embedding (本地 fallback)")
+			}
+			memStore, err = memory.NewSearchStore(cfg.ProfileID, "memory_data", embedder)
+			if err != nil {
+				log.Printf("初始化记忆库失败: %v", err)
+			}
 		}
 	}
 
