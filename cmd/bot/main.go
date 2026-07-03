@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -398,6 +399,10 @@ func buildSystemPrompt(prof *profile.Profile) string {
 	}
 	b.WriteString(" 你不是owner本人，只是小弟/助手。语气轻松自然，克制不腻。")
 	b.WriteString(" 不要在回复末尾加\"正在输入\"或\"整理中\"这类占位文字。")
+	if persona, ok := prof.Config["persona"].(string); ok && persona != "" {
+		b.WriteString(" ")
+		b.WriteString(persona)
+	}
 	return b.String()
 }
 
@@ -560,6 +565,37 @@ var (
 var (
 	flagActions = flag.Bool("actions", false, "Run in GitHub Actions mode (no WebSocket listener)")
 )
+
+// processedMsgIDs tracks recently handled message IDs so redelivered messages
+// (Feishu retries when the handler is slow to ACK) are skipped instead of
+// answered twice.
+var (
+	processedMsgIDs = make(map[string]time.Time)
+	processedMu     sync.Mutex
+)
+
+const processedMsgTTL = 30 * time.Minute
+
+// alreadyProcessed records msgID and reports whether it was already seen
+// recently. An empty msgID is never considered a duplicate.
+func alreadyProcessed(msgID string) bool {
+	if msgID == "" {
+		return false
+	}
+	processedMu.Lock()
+	defer processedMu.Unlock()
+	now := time.Now()
+	for id, t := range processedMsgIDs {
+		if now.Sub(t) > processedMsgTTL {
+			delete(processedMsgIDs, id)
+		}
+	}
+	if _, ok := processedMsgIDs[msgID]; ok {
+		return true
+	}
+	processedMsgIDs[msgID] = now
+	return false
+}
 
 func main() {
 	flag.Parse()
@@ -841,7 +877,7 @@ func decideGitHubActivityPush(ctx stdctx.Context, llmClient *llm.Client, activit
 要求：
 1. 只返回 JSON：{"send":true/false,"text":"..."}。
 2. 如果是零碎、重复、无信息量的动态，可以 send=false。
-3. 如果值得发，text 必须是一句自然中文，必须包含时间和"%s"的活动，不要表格、不要 Markdown、不要链接。
+3. 如果值得发，text 必须是一句自然中文，必须包含具体时间点（时:分，如 14:30，不能只写日期）和"%s"的活动，不要表格、不要 Markdown、不要链接。
 4. %s
 5. %s
 
@@ -954,6 +990,14 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	defer trace.Log()
 
 	log.Printf("[收到消息] %s: %s", msg.Sender, msg.Content)
+
+	// Idempotency: Feishu redelivers a message if the handler is slow to ACK
+	// (e.g. LLM + image upload takes a few seconds). Skip redeliveries we've
+	// already processed, so the user never gets duplicate replies.
+	if alreadyProcessed(msg.MessageID) {
+		log.Printf("[收到消息] 跳过重复投递: %s", msg.MessageID)
+		return
+	}
 
 	// Add thinking reaction
 	var thinkReactID string
@@ -1139,6 +1183,7 @@ func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.Memory
 	}
 
 	results := searcher.SearchMedia(msg.Content, audienceForMessage(msg), 3)
+	log.Printf("[图片记忆] 查询=%q audience=%s 命中=%d", msg.Content, audienceForMessage(msg), len(results))
 	if len(results) == 0 {
 		fs.ReplyText(ctx, "我在图片记忆里还没翻到相关内容。可以换个更具体的词，比如地点、截图里的文字、物品或大概时间。", msg.MessageID)
 		cleanupReaction(ctx, fs, msg, reactID)
@@ -1154,10 +1199,15 @@ func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.Memory
 	if len(results) > 1 {
 		reply += fmt.Sprintf("\n（还有 %d 张相关的，要看全部就说一声。）", len(results)-1)
 	}
+	log.Printf("[图片记忆] 回复: %q", reply)
 	if msg.MessageID != "" {
-		fs.ReplyText(ctx, reply, msg.MessageID)
+		if err := fs.ReplyText(ctx, reply, msg.MessageID); err != nil {
+			log.Printf("[图片记忆] ReplyText 失败: %v", err)
+		}
 	} else {
-		fs.SendText(ctx, reply, msg.ChatID)
+		if _, err := fs.SendText(ctx, reply, msg.ChatID); err != nil {
+			log.Printf("[图片记忆] SendText 失败: %v", err)
+		}
 	}
 
 	if cfg.MemoryMediaSendImage {
@@ -1241,7 +1291,7 @@ func summarizeMediaResults(ctx stdctx.Context, llmClient *llm.Client, query stri
 	prompt := fmt.Sprintf(`用户想从图片记忆里找内容。请根据检索到的图片记录，用中文回复 JSON。
 要求：
 1. 只返回 JSON：{"summary":"一小段自然中文总结","pick":<要发的那张的序号>}。
-2. summary 直接说翻到了什么、发的是哪张，带上大概时间；不要暴露本地文件路径，不要编造未出现的细节。
+2. summary 直接说翻到了什么、发的是哪张，带上具体时间点（时:分，不能只写日期）；不要暴露本地文件路径，不要编造未出现的细节。
 3. pick 是你最想发出去的那张的序号（0~%d），必须与 summary 描述呼应。
 4. 如果像情侣日常回忆，可以温柔一点，但不要腻。
 

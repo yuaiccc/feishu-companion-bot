@@ -14,6 +14,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
 
 var mentionRegex = regexp.MustCompile(`@_user_\d+`)
@@ -385,9 +390,118 @@ func (c *Client) ListMessages(ctx context.Context, chatID string, limit int) ([]
 // ---- WebSocket ----
 
 // StartListening starts the Feishu WebSocket long connection.
+// StartListening connects to Feishu via the official long-connection (WebSocket)
+// SDK and dispatches message / card-action events to the registered handlers.
+// The SDK handles the protobuf framing, pings, and reconnection; we only adapt
+// its typed events into the bot's Message / CardAction shapes.
 func (c *Client) StartListening(ctx context.Context, handlers Handlers) error {
-	ws := NewWSClient(c.appID, c.appSecret, c.botOpenID, c.ownerOpenID, c.targetOpenID, handlers)
-	return ws.Start(ctx)
+	d := dispatcher.NewEventDispatcher("", "")
+
+	d.OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+		msg, ok := adaptMessageEvent(event, c)
+		if !ok {
+			return nil
+		}
+		// In groups the bot only acts when @-mentioned; otherwise the message
+		// is passive context (used for activity tracking).
+		if msg.ChatType == "group" && !msg.IsMentioned {
+			if handlers.OnPassiveMsg != nil {
+				handlers.OnPassiveMsg(msg)
+			}
+			return nil
+		}
+		if handlers.OnMessage != nil {
+			handlers.OnMessage(msg)
+		}
+		return nil
+	})
+
+	d.OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+		if handlers.OnCardAction != nil {
+			handlers.OnCardAction(adaptCardActionEvent(event))
+		}
+		return &callback.CardActionTriggerResponse{}, nil
+	})
+
+	wsCli := larkws.NewClient(c.appID, c.appSecret, larkws.WithEventHandler(d))
+	return wsCli.Start(ctx)
+}
+
+// adaptMessageEvent converts an SDK message event into the bot's Message.
+func adaptMessageEvent(event *larkim.P2MessageReceiveV1, c *Client) (Message, bool) {
+	if event == nil || event.Event == nil || event.Event.Message == nil || event.Event.Sender == nil {
+		return Message{}, false
+	}
+	em := event.Event.Message
+	es := event.Event.Sender
+
+	msgType := derefStr(em.MessageType)
+	content := TrimMention(ExtractText(msgType, derefStr(em.Content)))
+	if content == "" {
+		content = "只叫了你一声"
+	}
+
+	chatType := derefStr(em.ChatType)
+	senderOpenID := ""
+	if es.SenderId != nil {
+		senderOpenID = derefStr(es.SenderId.OpenId)
+	}
+
+	isMentioned := chatType != "group"
+	if chatType == "group" {
+		for _, m := range em.Mentions {
+			if m != nil && m.Id != nil && derefStr(m.Id.OpenId) == c.botOpenID {
+				isMentioned = true
+				break
+			}
+		}
+	}
+
+	return Message{
+		MessageID:   derefStr(em.MessageId),
+		Time:        FormatTime(derefStr(em.CreateTime)),
+		Content:     content,
+		Sender:      senderOpenID,
+		IsOwner:     senderOpenID == c.ownerOpenID,
+		ChatID:      derefStr(em.ChatId),
+		ChatType:    chatType,
+		IsMentioned: isMentioned,
+	}, true
+}
+
+// adaptCardActionEvent converts an SDK card-action event into the bot's CardAction.
+func adaptCardActionEvent(event *callback.CardActionTriggerEvent) CardAction {
+	if event == nil || event.Event == nil {
+		return CardAction{}
+	}
+	req := event.Event
+	action := CardAction{Token: req.Token}
+	if req.Action != nil {
+		action.Action = getMapString(req.Action.Value, "action")
+		action.ActionValue = req.Action.Value
+	}
+	if req.Operator != nil {
+		action.OperatorID = req.Operator.OpenID
+	}
+	if req.Context != nil {
+		action.MessageID = req.Context.OpenMessageID
+		action.ChatID = req.Context.OpenChatID
+	}
+	return action
+}
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+func getMapString(m map[string]interface{}, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
 }
 
 // ---- Helpers ----
