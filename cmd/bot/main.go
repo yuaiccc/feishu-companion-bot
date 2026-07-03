@@ -1146,9 +1146,13 @@ func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.Memory
 		return
 	}
 
-	reply := summarizeMediaResults(ctx, llmClient, msg.Content, results, prof)
+	reply, pickIdx := summarizeMediaResults(ctx, llmClient, msg.Content, results, prof)
 	if reply == "" {
 		reply = fallbackMediaSummary(results)
+		pickIdx = 0
+	}
+	if len(results) > 1 {
+		reply += fmt.Sprintf("\n（还有 %d 张相关的，要看全部就说一声。）", len(results)-1)
 	}
 	if msg.MessageID != "" {
 		fs.ReplyText(ctx, reply, msg.MessageID)
@@ -1157,7 +1161,17 @@ func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.Memory
 	}
 
 	if cfg.MemoryMediaSendImage {
-		for _, result := range results {
+		// Try the LLM-picked image first; fall back to the others if it's
+		// missing or not a decodable image.
+		order := make([]int, 0, len(results))
+		order = append(order, pickIdx)
+		for i := range results {
+			if i != pickIdx {
+				order = append(order, i)
+			}
+		}
+		for _, idx := range order {
+			result := results[idx]
 			if result.FilePath == "" {
 				continue
 			}
@@ -1212,33 +1226,52 @@ func isLikelyImage(path string) bool {
 	return false
 }
 
-func summarizeMediaResults(ctx stdctx.Context, llmClient *llm.Client, query string, results []memory.MediaResult, prof *profile.Profile) string {
+// summarizeMediaResults asks the LLM to summarize the matched images and pick
+// the one most relevant to the query to send, so the summary text and the
+// emitted image always agree. Returns (summary, pickIndex); on any failure it
+// returns ("", 0) so the caller falls back to the first result.
+func summarizeMediaResults(ctx stdctx.Context, llmClient *llm.Client, query string, results []memory.MediaResult, prof *profile.Profile) (string, int) {
 	if llmClient == nil {
-		return ""
+		return "", 0
 	}
 	var lines []string
-	for _, result := range results {
-		lines = append(lines, safety.SanitizeForLLM(result.ContextText()))
+	for i, result := range results {
+		lines = append(lines, fmt.Sprintf("[%d] %s", i, safety.SanitizeForLLM(result.ContextText())))
 	}
-	prompt := fmt.Sprintf(`用户想从图片记忆里找内容。请根据检索到的图片记录，用中文回复一小段自然总结。
+	prompt := fmt.Sprintf(`用户想从图片记忆里找内容。请根据检索到的图片记录，用中文回复 JSON。
 要求：
-1. 直接说翻到了什么，带上大概时间。
-2. 如果像情侣日常回忆，可以温柔一点，但不要腻。
-3. 不要暴露本地文件路径，不要编造未出现的细节。
-4. 最后可以说“我把最相关的一张也发出来”。
+1. 只返回 JSON：{"summary":"一小段自然中文总结","pick":<要发的那张的序号>}。
+2. summary 直接说翻到了什么、发的是哪张，带上大概时间；不要暴露本地文件路径，不要编造未出现的细节。
+3. pick 是你最想发出去的那张的序号（0~%d），必须与 summary 描述呼应。
+4. 如果像情侣日常回忆，可以温柔一点，但不要腻。
 
 用户问题：%s
 图片记录：
-%s`, safety.SanitizeForLLM(query), strings.Join(lines, "\n"))
+%s`, len(results)-1, safety.SanitizeForLLM(query), strings.Join(lines, "\n"))
 	reply, err := llmClient.Chat(ctx, []llm.Message{
 		{Role: "system", Content: buildSystemPrompt(prof)},
 		{Role: "user", Content: prompt},
 	}, llm.WithTemperature(0.5), llm.WithMaxTokens(300))
 	if err != nil {
 		log.Printf("[图片记忆] DeepSeek 总结失败: %v", err)
-		return ""
+		return "", 0
 	}
-	return strings.TrimSpace(reply)
+	m := regexp.MustCompile(`\{.*\}`).FindString(reply)
+	if m == "" {
+		return strings.TrimSpace(reply), 0
+	}
+	var parsed struct {
+		Summary string `json:"summary"`
+		Pick    int    `json:"pick"`
+	}
+	if err := json.Unmarshal([]byte(m), &parsed); err != nil || strings.TrimSpace(parsed.Summary) == "" {
+		return strings.TrimSpace(reply), 0
+	}
+	pick := parsed.Pick
+	if pick < 0 || pick >= len(results) {
+		pick = 0
+	}
+	return strings.TrimSpace(parsed.Summary), pick
 }
 
 func fallbackMediaSummary(results []memory.MediaResult) string {
@@ -1256,7 +1289,7 @@ func fallbackMediaSummary(results []memory.MediaResult) string {
 		}
 		lines = append(lines, fmt.Sprintf("%s %s：%s", result.SentAt, result.Sender, desc))
 	}
-	return "我翻到这些图片记忆：\n" + strings.Join(lines, "\n") + "\n我把最相关的一张也发出来。"
+	return "我翻到这些图片记忆：\n" + strings.Join(lines, "\n") + "\n我先发一张看看。"
 }
 
 func handleSearchIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message, reactID string, llmClient *llm.Client, prof *profile.Profile) {

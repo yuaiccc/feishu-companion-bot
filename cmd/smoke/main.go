@@ -5,6 +5,7 @@
 //	go run ./cmd/smoke -mode stream # just CardKit streaming
 //	go run ./cmd/smoke -mode group  # just plain text
 //	go run ./cmd/smoke -mode github # just GitHub activity push
+//	go run ./cmd/smoke -mode image  # send a real image (media archive or -image)
 //
 // Reads secrets from .env in the repo root.
 package main
@@ -21,11 +22,13 @@ import (
 	"feishu-companion-bot/internal/config"
 	"feishu-companion-bot/internal/feishu"
 	"feishu-companion-bot/internal/github"
+	"feishu-companion-bot/internal/memory"
 )
 
 func main() {
-	mode := flag.String("mode", "all", "check mode: all|stream|group|github")
+	mode := flag.String("mode", "all", "check mode: all|stream|group|github|image")
 	chat := flag.String("chat", "", "override FeishuChatID (receive_id) for this run")
+	imageFlag := flag.String("image", "", "image file path to send (image mode); empty = pick latest from media archive")
 	flag.Parse()
 
 	loadDotEnv(".env")
@@ -58,6 +61,9 @@ func main() {
 	}
 	if runAll || *mode == "github" {
 		ok = testGitHub(ctx, cfg, fs, receiveID) && ok
+	}
+	if *mode == "image" {
+		ok = testImage(ctx, cfg, fs, receiveID, *imageFlag) && ok
 	}
 
 	fmt.Println()
@@ -161,6 +167,52 @@ func testGitHub(ctx context.Context, cfg *config.Config, fs *feishu.Client, rece
 		log.Printf("SendText 失败: %v", err)
 		return false
 	}
+	return true
+}
+
+// testImage sends a real image to verify the upload + send path used by the
+// media-memory feature. Image source: -image flag, else the latest real image
+// from the configured media archive.
+func testImage(ctx context.Context, cfg *config.Config, fs *feishu.Client, receiveID, imageFlag string) bool {
+	fmt.Println("\n=== [image] 真实图片发送 ===")
+	path := imageFlag
+	if path == "" {
+		if cfg.MemoryDatabaseDSN == "" || !cfg.MemoryIncludeMediaArchive {
+			fmt.Println("  跳过：未配置 MEMORY_DATABASE_DSN / MEMORY_INCLUDE_MEDIA_ARCHIVE；可用 -image <path> 指定")
+			return true
+		}
+		store, err := memory.NewDatabaseStore(memory.DatabaseOptions{
+			DSN:                 cfg.MemoryDatabaseDSN,
+			ProfileID:           cfg.ProfileID,
+			IncludeMediaArchive: true,
+			MediaVisibility:     memory.VisOwnerOnly,
+			MediaArchiveTable:   cfg.MemoryMediaArchiveTable,
+			MediaOCRColumn:      cfg.MemoryMediaOCRColumn,
+			MediaCaptionColumn:  cfg.MemoryMediaCaptionColumn,
+			MediaTimeColumn:     cfg.MemoryMediaTimeColumn,
+			MediaSenderColumn:   cfg.MemoryMediaSenderColumn,
+			MediaFilePathColumn: cfg.MemoryMediaFilePathColumn,
+			MediaMsgIDColumn:    cfg.MemoryMediaMsgIDColumn,
+		})
+		if err != nil {
+			log.Printf("初始化媒体库失败: %v", err)
+			return false
+		}
+		defer store.Close()
+		results := store.SearchMedia("", "owner", 1)
+		if len(results) == 0 || results[0].FilePath == "" {
+			fmt.Println("  媒体库无可用图片")
+			return false
+		}
+		path = results[0].FilePath
+	}
+	fmt.Println("  图片:", path)
+	msgID, err := fs.SendImage(ctx, path, receiveID)
+	if err != nil {
+		log.Printf("SendImage 失败: %v", err)
+		return false
+	}
+	fmt.Println("  message_id:", msgID)
 	return true
 }
 
