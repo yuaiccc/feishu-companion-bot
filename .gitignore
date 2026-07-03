@@ -19,9 +19,10 @@ local_*.py
 # Memory data (local vector store + dedup state)
 memory_data/
 
-# Profiles — real personal profiles stay local
-profiles/sange-*.json
-profiles/my-*.json
+# Profiles — ignore everything except the shipped templates
+profiles/*
+!profiles/default.json
+!profiles/example-couple.json
 
 # Build artifacts
 *.exe

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -27,6 +28,28 @@ type Memory struct {
 	SourceType string     `json:"source_type"`
 	Hash       string     `json:"hash"`
 	CreatedAt  int64      `json:"created_at"`
+}
+
+type MediaResult struct {
+	MessageID string
+	MsgID     string
+	Sender    string
+	SentAt    string
+	FilePath  string
+	OCRText   string
+	Caption   string
+	HasText   bool
+}
+
+func (m MediaResult) ContextText() string {
+	parts := []string{fmt.Sprintf("[图片记录 %s %s]", m.SentAt, m.Sender)}
+	if m.Caption != "" {
+		parts = append(parts, "描述："+m.Caption)
+	}
+	if m.OCRText != "" {
+		parts = append(parts, "文字："+m.OCRText)
+	}
+	return strings.Join(parts, " ")
 }
 
 type Store struct {

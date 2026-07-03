@@ -59,8 +59,8 @@ func TestSplitEnv(t *testing.T) {
 }
 
 func TestNormalizeJDBCMySQLDSN(t *testing.T) {
-	got := normalizeJDBCMySQLDSN("jdbc:mysql://127.0.0.1:2881/shuye_chat")
-	want := "root@tcp(127.0.0.1:2881)/shuye_chat?parseTime=true&charset=utf8mb4"
+	got := normalizeJDBCMySQLDSN("jdbc:mysql://127.0.0.1:2881/companion_memory")
+	want := "root@tcp(127.0.0.1:2881)/companion_memory?parseTime=true&charset=utf8mb4"
 	if got != want {
 		t.Errorf("normalizeJDBCMySQLDSN = %q, want %q", got, want)
 	}

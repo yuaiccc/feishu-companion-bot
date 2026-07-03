@@ -14,13 +14,38 @@ type DatabaseOptions struct {
 	ProfileID          string
 	IncludeChatArchive bool
 	ChatVisibility     Visibility
+	// Chat archive source (read-only). Defaults are applied in NewDatabaseStore.
+	ChatArchiveTable      string
+	ChatArchiveTextColumn string
+	ChatArchiveTimeColumn string
+	IncludeMediaArchive   bool
+	MediaVisibility       Visibility
+	MediaArchiveTable     string
+	MediaOCRColumn        string
+	MediaCaptionColumn    string
+	MediaTimeColumn       string
+	MediaSenderColumn     string
+	MediaFilePathColumn   string
+	MediaMsgIDColumn      string
 }
 
 type DatabaseStore struct {
-	db                 *sql.DB
-	profileID          string
-	includeChatArchive bool
-	chatVisibility     Visibility
+	db                    *sql.DB
+	profileID             string
+	includeChatArchive    bool
+	chatVisibility        Visibility
+	chatArchiveTable      string
+	chatArchiveTextColumn string
+	chatArchiveTimeColumn string
+	includeMediaArchive   bool
+	mediaVisibility       Visibility
+	mediaArchiveTable     string
+	mediaOCRColumn        string
+	mediaCaptionColumn    string
+	mediaTimeColumn       string
+	mediaSenderColumn     string
+	mediaFilePathColumn   string
+	mediaMsgIDColumn      string
 }
 
 func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
@@ -32,6 +57,39 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 	}
 	if opts.ChatVisibility == "" {
 		opts.ChatVisibility = VisOwnerOnly
+	}
+	if opts.MediaVisibility == "" {
+		opts.MediaVisibility = VisOwnerOnly
+	}
+	if !isSafeIdentifier(opts.ChatArchiveTable) {
+		opts.ChatArchiveTable = "chat_message_chunks"
+	}
+	if !isSafeIdentifier(opts.ChatArchiveTextColumn) {
+		opts.ChatArchiveTextColumn = "chunk_text"
+	}
+	if !isSafeIdentifier(opts.ChatArchiveTimeColumn) {
+		opts.ChatArchiveTimeColumn = "end_time"
+	}
+	if !isSafeIdentifier(opts.MediaArchiveTable) {
+		opts.MediaArchiveTable = "media_assets"
+	}
+	if !isSafeIdentifier(opts.MediaOCRColumn) {
+		opts.MediaOCRColumn = "ocr_text"
+	}
+	if !isSafeIdentifier(opts.MediaCaptionColumn) {
+		opts.MediaCaptionColumn = "caption"
+	}
+	if !isSafeIdentifier(opts.MediaTimeColumn) {
+		opts.MediaTimeColumn = "sent_at"
+	}
+	if !isSafeIdentifier(opts.MediaSenderColumn) {
+		opts.MediaSenderColumn = "sender"
+	}
+	if !isSafeIdentifier(opts.MediaFilePathColumn) {
+		opts.MediaFilePathColumn = "file_path"
+	}
+	if !isSafeIdentifier(opts.MediaMsgIDColumn) {
+		opts.MediaMsgIDColumn = "msgid"
 	}
 	db, err := sql.Open("mysql", opts.DSN)
 	if err != nil {
@@ -45,10 +103,22 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 		return nil, err
 	}
 	store := &DatabaseStore{
-		db:                 db,
-		profileID:          opts.ProfileID,
-		includeChatArchive: opts.IncludeChatArchive,
-		chatVisibility:     opts.ChatVisibility,
+		db:                    db,
+		profileID:             opts.ProfileID,
+		includeChatArchive:    opts.IncludeChatArchive,
+		chatVisibility:        opts.ChatVisibility,
+		chatArchiveTable:      opts.ChatArchiveTable,
+		chatArchiveTextColumn: opts.ChatArchiveTextColumn,
+		chatArchiveTimeColumn: opts.ChatArchiveTimeColumn,
+		includeMediaArchive:   opts.IncludeMediaArchive,
+		mediaVisibility:       opts.MediaVisibility,
+		mediaArchiveTable:     opts.MediaArchiveTable,
+		mediaOCRColumn:        opts.MediaOCRColumn,
+		mediaCaptionColumn:    opts.MediaCaptionColumn,
+		mediaTimeColumn:       opts.MediaTimeColumn,
+		mediaSenderColumn:     opts.MediaSenderColumn,
+		mediaFilePathColumn:   opts.MediaFilePathColumn,
+		mediaMsgIDColumn:      opts.MediaMsgIDColumn,
 	}
 	if err := store.ensureSchema(); err != nil {
 		db.Close()
@@ -135,6 +205,11 @@ func (s *DatabaseStore) Search(query string, audience string) []string {
 	if s.includeChatArchive && s.chatVisibleTo(audience) {
 		results = append(results, s.searchChatArchive(query, 5)...)
 	}
+	if s.includeMediaArchive && s.mediaVisibleTo(audience) {
+		for _, media := range s.SearchMedia(query, audience, 3) {
+			results = append(results, media.ContextText())
+		}
+	}
 	if len(results) > 8 {
 		return results[:8]
 	}
@@ -185,14 +260,34 @@ func (s *DatabaseStore) searchChatArchive(query string, limit int) []string {
 	if strings.TrimSpace(query) == "" {
 		return nil
 	}
-	rows, err := s.db.Query(`
-SELECT CONCAT('[聊天记录 ', DATE_FORMAT(start_time, '%Y-%m-%d %H:%i'), ' - ', DATE_FORMAT(end_time, '%H:%i'), '] ', chunk_text)
-FROM shuye_message_chunks
-WHERE MATCH(chunk_text) AGAINST (? IN NATURAL LANGUAGE MODE) OR chunk_text LIKE ?
-ORDER BY end_time DESC
-LIMIT ?`, query, "%"+query+"%", limit)
+	// Table/column names can't be parameterized; they are validated as safe
+	// identifiers in NewDatabaseStore, so interpolation here is bounded.
+	rows, err := s.db.Query(fmt.Sprintf(`
+SELECT CONCAT('[聊天记录 ', DATE_FORMAT(%s, '%%Y-%%m-%%d %%H:%%i'), '] ', %s)
+FROM %s
+WHERE MATCH(%s) AGAINST (? IN NATURAL LANGUAGE MODE) OR %s LIKE ?
+ORDER BY %s DESC
+LIMIT ?`,
+		s.chatArchiveTimeColumn, s.chatArchiveTextColumn,
+		s.chatArchiveTable,
+		s.chatArchiveTextColumn, s.chatArchiveTextColumn,
+		s.chatArchiveTimeColumn,
+	), query, "%"+query+"%", limit)
 	if err != nil {
-		return nil
+		rows, err = s.db.Query(fmt.Sprintf(`
+SELECT CONCAT('[聊天记录 ', DATE_FORMAT(%s, '%%Y-%%m-%%d %%H:%%i'), '] ', %s)
+FROM %s
+WHERE %s LIKE ?
+ORDER BY %s DESC
+LIMIT ?`,
+			s.chatArchiveTimeColumn, s.chatArchiveTextColumn,
+			s.chatArchiveTable,
+			s.chatArchiveTextColumn,
+			s.chatArchiveTimeColumn,
+		), "%"+query+"%", limit)
+		if err != nil {
+			return nil
+		}
 	}
 	defer rows.Close()
 
@@ -206,8 +301,171 @@ LIMIT ?`, query, "%"+query+"%", limit)
 	return out
 }
 
+func (s *DatabaseStore) SearchMedia(query string, audience string, limit int) []MediaResult {
+	if !s.includeMediaArchive || !s.mediaVisibleTo(audience) {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 3
+	}
+	if limit > 10 {
+		limit = 10
+	}
+	term := cleanMediaQuery(query)
+	if term == "" {
+		return s.recentMedia(limit)
+	}
+	results := s.searchMediaFullText(term, limit)
+	if len(results) == 0 {
+		results = s.searchMediaLike(term, limit)
+	}
+	if len(results) == 0 && isVagueMediaQuery(query) {
+		results = s.recentMedia(limit)
+	}
+	return results
+}
+
+func (s *DatabaseStore) searchMediaFullText(query string, limit int) []MediaResult {
+	rows, err := s.db.Query(fmt.Sprintf(`
+SELECT COALESCE(%s, ''), COALESCE(%s, ''), DATE_FORMAT(%s, '%%Y-%%m-%%d %%H:%%i'),
+       COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(has_text, 0)
+FROM %s
+WHERE MATCH(%s, %s) AGAINST (? IN NATURAL LANGUAGE MODE)
+ORDER BY %s DESC
+LIMIT ?`,
+		s.mediaMsgIDColumn, s.mediaSenderColumn, s.mediaTimeColumn,
+		s.mediaFilePathColumn, s.mediaOCRColumn, s.mediaCaptionColumn, s.mediaMsgIDColumn,
+		s.mediaArchiveTable,
+		s.mediaOCRColumn, s.mediaCaptionColumn,
+		s.mediaTimeColumn,
+	), query, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	return scanMediaRows(rows)
+}
+
+func (s *DatabaseStore) searchMediaLike(query string, limit int) []MediaResult {
+	terms := strings.Fields(query)
+	if len(terms) == 0 {
+		terms = []string{query}
+	}
+	clauses := make([]string, 0, len(terms)*2)
+	args := make([]interface{}, 0, len(terms)*2+1)
+	for _, term := range terms {
+		pattern := "%" + term + "%"
+		clauses = append(clauses, fmt.Sprintf("%s LIKE ?", s.mediaOCRColumn), fmt.Sprintf("%s LIKE ?", s.mediaCaptionColumn))
+		args = append(args, pattern, pattern)
+	}
+	args = append(args, limit)
+	rows, err := s.db.Query(fmt.Sprintf(`
+SELECT COALESCE(%s, ''), COALESCE(%s, ''), DATE_FORMAT(%s, '%%Y-%%m-%%d %%H:%%i'),
+       COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(has_text, 0)
+FROM %s
+WHERE %s
+ORDER BY %s DESC
+LIMIT ?`,
+		s.mediaMsgIDColumn, s.mediaSenderColumn, s.mediaTimeColumn,
+		s.mediaFilePathColumn, s.mediaOCRColumn, s.mediaCaptionColumn, s.mediaMsgIDColumn,
+		s.mediaArchiveTable,
+		strings.Join(clauses, " OR "),
+		s.mediaTimeColumn,
+	), args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	return scanMediaRows(rows)
+}
+
+func (s *DatabaseStore) recentMedia(limit int) []MediaResult {
+	rows, err := s.db.Query(fmt.Sprintf(`
+SELECT COALESCE(%s, ''), COALESCE(%s, ''), DATE_FORMAT(%s, '%%Y-%%m-%%d %%H:%%i'),
+       COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(has_text, 0)
+FROM %s
+ORDER BY %s DESC
+LIMIT ?`,
+		s.mediaMsgIDColumn, s.mediaSenderColumn, s.mediaTimeColumn,
+		s.mediaFilePathColumn, s.mediaOCRColumn, s.mediaCaptionColumn, s.mediaMsgIDColumn,
+		s.mediaArchiveTable,
+		s.mediaTimeColumn,
+	), limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	return scanMediaRows(rows)
+}
+
+func scanMediaRows(rows *sql.Rows) []MediaResult {
+	var out []MediaResult
+	for rows.Next() {
+		var result MediaResult
+		var hasText int
+		if err := rows.Scan(&result.MsgID, &result.Sender, &result.SentAt, &result.FilePath, &result.OCRText, &result.Caption, &result.MessageID, &hasText); err == nil {
+			result.HasText = hasText != 0
+			out = append(out, result)
+		}
+	}
+	return out
+}
+
+func cleanMediaQuery(query string) string {
+	q := strings.TrimSpace(query)
+	replacer := strings.NewReplacer(
+		"图片", " ", "照片", " ", "截图", " ", "图", " ",
+		"找一下", " ", "找找", " ", "找", " ", "搜一下", " ", "搜索", " ",
+		"发我", " ", "发一下", " ", "看看", " ", "看一下", " ",
+		"回忆", " ", "我们", " ", "做了什么", " ", "干了什么", " ",
+		"那张", " ", "那个", " ", "这个", " ", "一下", " ",
+	)
+	q = replacer.Replace(q)
+	q = strings.Join(strings.Fields(q), " ")
+	return q
+}
+
+func isVagueMediaQuery(query string) bool {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return true
+	}
+	return strings.Contains(q, "回忆") || strings.Contains(q, "做了什么") || strings.Contains(q, "干了什么")
+}
+
+// isSafeIdentifier guards interpolated table/column names against SQL injection.
+// Only bare SQL identifiers (letters, digits, underscore, leading non-digit) pass.
+func isSafeIdentifier(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			continue
+		}
+		if i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (s *DatabaseStore) chatVisibleTo(audience string) bool {
 	switch s.chatVisibility {
+	case VisPrivate:
+		return false
+	case VisOwnerOnly:
+		return audience == "owner"
+	case VisPublicToTarget:
+		return audience == "owner" || audience == "target"
+	default:
+		return false
+	}
+}
+
+func (s *DatabaseStore) mediaVisibleTo(audience string) bool {
+	switch s.mediaVisibility {
 	case VisPrivate:
 		return false
 	case VisOwnerOnly:

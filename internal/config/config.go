@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bufio"
 	"fmt"
 	"net/url"
 	"os"
@@ -39,6 +40,22 @@ type Config struct {
 	MemoryDatabaseDSN         string
 	MemoryIncludeChatArchive  bool
 	MemoryChatVisibility      string
+	// Chat archive source (read-only long-term chat memory). Table/column
+	// names are configurable so other deployments can point at their own
+	// chat-archive schema without editing code.
+	MemoryChatArchiveTable      string
+	MemoryChatArchiveTextColumn string
+	MemoryChatArchiveTimeColumn string
+	MemoryIncludeMediaArchive   bool
+	MemoryMediaVisibility       string
+	MemoryMediaArchiveTable     string
+	MemoryMediaOCRColumn        string
+	MemoryMediaCaptionColumn    string
+	MemoryMediaTimeColumn       string
+	MemoryMediaSenderColumn     string
+	MemoryMediaFilePathColumn   string
+	MemoryMediaMsgIDColumn      string
+	MemoryMediaSendImage        bool
 
 	// Profile
 	ProfileID string
@@ -71,6 +88,7 @@ type Config struct {
 }
 
 func Load() *Config {
+	loadDotEnv(".env")
 	c := &Config{
 		FeishuAppID:       getEnv("FEISHU_APP_ID", ""),
 		FeishuAppSecret:   getEnv("FEISHU_APP_SECRET", ""),
@@ -95,6 +113,20 @@ func Load() *Config {
 		MemoryDatabaseDSN:         normalizeJDBCMySQLDSN(getEnv("MEMORY_DATABASE_DSN", "")),
 		MemoryIncludeChatArchive:  getEnvBool("MEMORY_INCLUDE_CHAT_ARCHIVE", false),
 		MemoryChatVisibility:      getEnv("MEMORY_CHAT_ARCHIVE_VISIBILITY", "owner_only"),
+
+		MemoryChatArchiveTable:      getEnv("MEMORY_CHAT_ARCHIVE_TABLE", "chat_message_chunks"),
+		MemoryChatArchiveTextColumn: getEnv("MEMORY_CHAT_ARCHIVE_TEXT_COLUMN", "chunk_text"),
+		MemoryChatArchiveTimeColumn: getEnv("MEMORY_CHAT_ARCHIVE_TIME_COLUMN", "end_time"),
+		MemoryIncludeMediaArchive:   getEnvBool("MEMORY_INCLUDE_MEDIA_ARCHIVE", false),
+		MemoryMediaVisibility:       getEnv("MEMORY_MEDIA_ARCHIVE_VISIBILITY", "owner_only"),
+		MemoryMediaArchiveTable:     getEnv("MEMORY_MEDIA_ARCHIVE_TABLE", "media_assets"),
+		MemoryMediaOCRColumn:        getEnv("MEMORY_MEDIA_OCR_COLUMN", "ocr_text"),
+		MemoryMediaCaptionColumn:    getEnv("MEMORY_MEDIA_CAPTION_COLUMN", "caption"),
+		MemoryMediaTimeColumn:       getEnv("MEMORY_MEDIA_TIME_COLUMN", "sent_at"),
+		MemoryMediaSenderColumn:     getEnv("MEMORY_MEDIA_SENDER_COLUMN", "sender"),
+		MemoryMediaFilePathColumn:   getEnv("MEMORY_MEDIA_FILE_PATH_COLUMN", "file_path"),
+		MemoryMediaMsgIDColumn:      getEnv("MEMORY_MEDIA_MSGID_COLUMN", "msgid"),
+		MemoryMediaSendImage:        getEnvBool("MEMORY_MEDIA_SEND_IMAGE", true),
 
 		ProfileID: getEnv("PROFILE_ID", "default"),
 
@@ -125,6 +157,29 @@ func Load() *Config {
 	}
 
 	return c
+}
+
+func loadDotEnv(path string) {
+	file, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		key := strings.TrimSpace(parts[0])
+		value := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		if key == "" || os.Getenv(key) != "" {
+			continue
+		}
+		os.Setenv(key, value)
+	}
 }
 
 func getEnv(key, defaultVal string) string {

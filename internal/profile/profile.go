@@ -37,6 +37,22 @@ func (p *Profile) BotRoleText() string {
 	return "飞书陪伴机器人小弟"
 }
 
+// OwnerDisplay returns the owner's display name, falling back to a generic
+// "老板" so callers never emit an empty owner name in user-facing text.
+func (p *Profile) OwnerDisplay() string {
+	if p.OwnerName != "" {
+		return p.OwnerName
+	}
+	return "老板"
+}
+
+// TargetDisplay returns the target's display name, or "" when no intimate
+// target is configured. Callers use the empty result to gate target-specific
+// behavior (intimate emojis, target-aware phrasing).
+func (p *Profile) TargetDisplay() string {
+	return p.TargetName
+}
+
 func (p *Profile) TargetAddressingHint() string {
 	return ""
 }

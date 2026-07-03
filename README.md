@@ -135,13 +135,14 @@ cp profiles/example-couple.json profiles/my-profile.json
 PROFILE_ID=my-profile PROFILES_DIR=. ./bot
 ```
 
-`profiles/default.json` 是通用占位（owner_name 为"老板"），可直接用。真实 profile 不会被提交（`.gitignore` 忽略 `profiles/sange-*.json` / `profiles/my-*.json`）。
+`profiles/default.json` 是通用占位（owner_name 为"老板"），可直接用。真实 profile 不会被提交（`.gitignore` 用白名单：忽略 `profiles/*`，只保留 `default.json` / `example-couple.json`）。
 
 ## 记忆系统
 
 - 默认存储路径：`memory_data/<PROFILE_ID>/memories.json`
 - 可选数据库后端：配置 `MEMORY_DATABASE_DSN` 后使用 OceanBase/MySQL 表 `bot_memories`
-- 可选聊天归档源：`MEMORY_INCLUDE_CHAT_ARCHIVE=true` 时，将同库 `shuye_message_chunks` 作为只读长期聊天记忆参与检索
+- 可选聊天归档源：`MEMORY_INCLUDE_CHAT_ARCHIVE=true` 时，将同库聊天归档表（默认 `chat_message_chunks`，可用 `MEMORY_CHAT_ARCHIVE_TABLE` / `MEMORY_CHAT_ARCHIVE_TEXT_COLUMN` / `MEMORY_CHAT_ARCHIVE_TIME_COLUMN` 配置）作为只读长期聊天记忆参与检索
+- 可选图片归档源：`MEMORY_INCLUDE_MEDIA_ARCHIVE=true` 时，将同库图片 OCR/caption 表（默认 `media_assets`，可配置表名和列名）作为只读图片记忆参与检索；用户明确问图片、截图、照片、回忆时，机器人会先总结，再按 `MEMORY_MEDIA_SEND_IMAGE` 决定是否发回最相关的一张图
 - 可见性：`private`（绝不进 prompt）/ `owner_only`（只给 owner 回复用）/ `public_to_target`（可对目标用户用）
 - 候选记忆由 DeepSeek 判断，发卡片到 owner 私聊确认后落库
 - 群聊消息不靠关键词直接写记忆
@@ -149,12 +150,27 @@ PROFILE_ID=my-profile PROFILES_DIR=. ./bot
 OceanBase 示例：
 
 ```env
-MEMORY_DATABASE_DSN=jdbc:mysql://127.0.0.1:2881/shuye_chat
+MEMORY_DATABASE_DSN=jdbc:mysql://127.0.0.1:2881/companion_memory
 MEMORY_INCLUDE_CHAT_ARCHIVE=true
 MEMORY_CHAT_ARCHIVE_VISIBILITY=owner_only
+# 聊天归档表/列名（接自己的聊天库时按 schema 改）
+MEMORY_CHAT_ARCHIVE_TABLE=chat_message_chunks
+MEMORY_CHAT_ARCHIVE_TEXT_COLUMN=chunk_text
+MEMORY_CHAT_ARCHIVE_TIME_COLUMN=end_time
+MEMORY_INCLUDE_MEDIA_ARCHIVE=true
+MEMORY_MEDIA_ARCHIVE_VISIBILITY=owner_only
+MEMORY_MEDIA_ARCHIVE_TABLE=media_assets
+MEMORY_MEDIA_OCR_COLUMN=ocr_text
+MEMORY_MEDIA_CAPTION_COLUMN=caption
+MEMORY_MEDIA_TIME_COLUMN=sent_at
+MEMORY_MEDIA_SENDER_COLUMN=sender
+MEMORY_MEDIA_FILE_PATH_COLUMN=file_path
+MEMORY_MEDIA_MSGID_COLUMN=msgid
+MEMORY_MEDIA_SEND_IMAGE=true
 ```
 
 `MEMORY_CHAT_ARCHIVE_VISIBILITY` 默认 `owner_only`，避免把私密聊天归档直接用于对外回复；确认双方都可见后再改为 `public_to_target`。
+`MEMORY_MEDIA_ARCHIVE_VISIBILITY` 同样默认 `owner_only`。如果要让目标用户也能查到图片回忆，先确认图片内容适合共享，再改成 `public_to_target`。发图能力依赖飞书图片上传接口，需要应用具备图片上传和消息发送相关权限。
 
 ## 隐私脱敏
 
@@ -192,6 +208,19 @@ OLLAMA_MODEL=nomic-embed-text
 MEMORY_DATABASE_DSN=
 MEMORY_INCLUDE_CHAT_ARCHIVE=false
 MEMORY_CHAT_ARCHIVE_VISIBILITY=owner_only
+MEMORY_CHAT_ARCHIVE_TABLE=chat_message_chunks
+MEMORY_CHAT_ARCHIVE_TEXT_COLUMN=chunk_text
+MEMORY_CHAT_ARCHIVE_TIME_COLUMN=end_time
+MEMORY_INCLUDE_MEDIA_ARCHIVE=false
+MEMORY_MEDIA_ARCHIVE_VISIBILITY=owner_only
+MEMORY_MEDIA_ARCHIVE_TABLE=media_assets
+MEMORY_MEDIA_OCR_COLUMN=ocr_text
+MEMORY_MEDIA_CAPTION_COLUMN=caption
+MEMORY_MEDIA_TIME_COLUMN=sent_at
+MEMORY_MEDIA_SENDER_COLUMN=sender
+MEMORY_MEDIA_FILE_PATH_COLUMN=file_path
+MEMORY_MEDIA_MSGID_COLUMN=msgid
+MEMORY_MEDIA_SEND_IMAGE=true
 
 # GitHub
 GH_USERNAME=your_username

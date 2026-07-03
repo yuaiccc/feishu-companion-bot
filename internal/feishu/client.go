@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,25 +38,25 @@ type Handlers struct {
 }
 
 type CardAction struct {
-	Action     string
+	Action      string
 	ActionValue map[string]interface{}
-	OperatorID string
-	MessageID  string
-	ChatID     string
-	Token      string
+	OperatorID  string
+	MessageID   string
+	ChatID      string
+	Token       string
 }
 
 // ---- Client ----
 
 type Client struct {
-	appID       string
-	appSecret   string
-	botOpenID   string
+	appID        string
+	appSecret    string
+	botOpenID    string
 	ownerOpenID  string
 	targetOpenID string
-	httpCli     *http.Client
-	token       string
-	tokenTime   time.Time
+	httpCli      *http.Client
+	token        string
+	tokenTime    time.Time
 }
 
 func NewClient(appID, appSecret, botOpenID string) *Client {
@@ -168,6 +171,88 @@ func (c *Client) ReplyText(ctx context.Context, text string, messageID string) e
 	return err
 }
 
+func (c *Client) UploadImage(ctx context.Context, filePath string) (string, error) {
+	if err := c.refreshToken(ctx); err != nil {
+		return "", err
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("image_type", "message"); err != nil {
+		return "", err
+	}
+	part, err := writer.CreateFormFile("image", filepath.Base(filePath))
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://open.feishu.cn/open-apis/im/v1/images", &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := c.httpCli.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			ImageKey string `json:"image_key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("parse image upload response: %s", string(data))
+	}
+	if result.Code != 0 {
+		snippet := string(data)
+		if len(snippet) > 800 {
+			snippet = snippet[:800]
+		}
+		return "", fmt.Errorf("upload image api %d: %s (resp: %s)", result.Code, result.Msg, snippet)
+	}
+	return result.Data.ImageKey, nil
+}
+
+func (c *Client) ReplyImage(ctx context.Context, filePath string, messageID string) error {
+	imageKey, err := c.UploadImage(ctx, filePath)
+	if err != nil {
+		return err
+	}
+	_, err = c.do(ctx, "POST", fmt.Sprintf("/im/v1/messages/%s/reply", messageID),
+		map[string]interface{}{
+			"msg_type": "image",
+			"content":  jsonMarshal(map[string]string{"image_key": imageKey}),
+		})
+	return err
+}
+
+func (c *Client) SendImage(ctx context.Context, filePath string, receiveID string) (string, error) {
+	imageKey, err := c.UploadImage(ctx, filePath)
+	if err != nil {
+		return "", err
+	}
+	return c.sendMsg(ctx, receiveID, "image", map[string]string{"image_key": imageKey})
+}
+
 func (c *Client) UpdateTextMessage(ctx context.Context, messageID string, text string) error {
 	_, err := c.do(ctx, "PATCH", fmt.Sprintf("/im/v1/messages/%s", messageID),
 		map[string]interface{}{
@@ -209,7 +294,9 @@ func (c *Client) sendMsgToIDType(ctx context.Context, receiveID, msgType string,
 	if err != nil {
 		return "", err
 	}
-	var result struct{ MessageID string `json:"message_id"` }
+	var result struct {
+		MessageID string `json:"message_id"`
+	}
 	json.Unmarshal(respData, &result)
 	return result.MessageID, nil
 }
@@ -222,7 +309,9 @@ func (c *Client) AddReaction(ctx context.Context, messageID string, emojiType st
 	if err != nil {
 		return "", err
 	}
-	var result struct{ ReactionID string `json:"reaction_id"` }
+	var result struct {
+		ReactionID string `json:"reaction_id"`
+	}
 	json.Unmarshal(respData, &result)
 	return result.ReactionID, nil
 }
@@ -249,12 +338,16 @@ func (c *Client) ListMessages(ctx context.Context, chatID string, limit int) ([]
 	}
 	var result struct {
 		Items []struct {
-			MessageID   string `json:"message_id"`
-			CreateTime  string `json:"create_time"`
-			MsgType     string `json:"msg_type"`
-			Body        struct{ Content string `json:"content"` } `json:"body"`
-			Sender      struct {
-				SenderID struct{ OpenID string `json:"open_id"` } `json:"sender_id"`
+			MessageID  string `json:"message_id"`
+			CreateTime string `json:"create_time"`
+			MsgType    string `json:"msg_type"`
+			Body       struct {
+				Content string `json:"content"`
+			} `json:"body"`
+			Sender struct {
+				SenderID struct {
+					OpenID string `json:"open_id"`
+				} `json:"sender_id"`
 				SenderType string `json:"sender_type"`
 			} `json:"sender"`
 		} `json:"items"`

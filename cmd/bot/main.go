@@ -62,7 +62,12 @@ const (
 	IntentMemoryAudit Intent = "memory_audit"
 	IntentSearch      Intent = "search"
 	IntentStatus      Intent = "status"
+	IntentMedia       Intent = "media"
 )
+
+type mediaMemoryStore interface {
+	SearchMedia(query string, audience string, limit int) []memory.MediaResult
+}
 
 var (
 	statusKeywords = []string{
@@ -77,6 +82,11 @@ var (
 	searchKeywords = []string{
 		"搜索", "搜一下", "查一下", "网上", "外部", "最新", "热门",
 		"排行", "排行榜", "新闻", "b站", "B站", "bilibili", "新番", "动漫",
+	}
+	mediaKeywords = []string{
+		"图片", "照片", "截图", "那张图", "找图", "发图", "相册",
+		"回忆", "我们做了什么", "之前做了什么", "以前做了什么",
+		"票据", "地图", "聊天截图",
 	}
 	healthKeywords = []string{
 		"健康检查", "服务状态", "自检", "机器人状态", "状态面板",
@@ -104,6 +114,11 @@ func classifyIntent(content string) Intent {
 	for _, kw := range githubKeywords {
 		if strings.Contains(lower, kw) {
 			return IntentGitHub
+		}
+	}
+	for _, kw := range mediaKeywords {
+		if strings.Contains(content, kw) || strings.Contains(lower, strings.ToLower(kw)) {
+			return IntentMedia
 		}
 	}
 	for _, kw := range searchKeywords {
@@ -159,9 +174,11 @@ func (p *PassiveAssistant) MarkTopicSent() {
 
 // ---- Emoji picker ----
 
-func pickEmoji(content string, isShushu bool) string {
+func pickEmoji(content string, fromOwner bool, prof *profile.Profile) string {
 	lower := strings.ToLower(content)
-	if isShushu {
+	// Intimate emojis only apply when an intimate target is configured; generic
+	// profiles (no target_name) fall through to the casual branch below.
+	if !fromOwner && prof.TargetDisplay() != "" {
 		if strings.ContainsAny(lower, "想你爱你喜欢亲抱宝贝么么mua") {
 			return "KISS"
 		}
@@ -176,7 +193,7 @@ func pickEmoji(content string, isShushu bool) string {
 		}
 		return "SMOOCH"
 	}
-	// owner messages
+	// owner / generic messages
 	if strings.ContainsAny(lower, "哈哈搞笑笑死") {
 		return "LOL"
 	}
@@ -200,11 +217,20 @@ func pickEmoji(content string, isShushu bool) string {
 
 // ---- Memory candidate decision ----
 
-func shouldRememberViaLLM(ctx stdctx.Context, content string, isShushu bool, llmClient *llm.Client) (bool, string) {
+func shouldRememberViaLLM(ctx stdctx.Context, content string, fromOwner bool, prof *profile.Profile, llmClient *llm.Client) (bool, string) {
 	if llmClient == nil || content == "" || len(content) < 3 || len(content) > 500 {
 		return false, ""
 	}
-	sender := map[bool]string{true: "舒舒", false: "三哥"}[isShushu]
+	// Label the sender from the profile. fromOwner maps to the owner name;
+	// otherwise the target name, or a generic "对方" when no target is set.
+	sender := prof.OwnerDisplay()
+	if !fromOwner {
+		if t := prof.TargetDisplay(); t != "" {
+			sender = t
+		} else {
+			sender = "对方"
+		}
+	}
 	systemPrompt := `你是飞书陪伴机器人的记忆管家。判断一条聊天消息是否值得进入长期记忆候选。
 只返回 JSON，不要解释。格式：
 {"remember": true/false, "memory": "一句自然中文记忆", "reason": "极短原因"}
@@ -582,15 +608,27 @@ func runBotMode() {
 	if cfg.MemoryEnabled {
 		if cfg.MemoryDatabaseDSN != "" {
 			memStore, err = memory.NewDatabaseStore(memory.DatabaseOptions{
-				DSN:                cfg.MemoryDatabaseDSN,
-				ProfileID:          cfg.ProfileID,
-				IncludeChatArchive: cfg.MemoryIncludeChatArchive,
-				ChatVisibility:     memory.Visibility(cfg.MemoryChatVisibility),
+				DSN:                   cfg.MemoryDatabaseDSN,
+				ProfileID:             cfg.ProfileID,
+				IncludeChatArchive:    cfg.MemoryIncludeChatArchive,
+				ChatVisibility:        memory.Visibility(cfg.MemoryChatVisibility),
+				ChatArchiveTable:      cfg.MemoryChatArchiveTable,
+				ChatArchiveTextColumn: cfg.MemoryChatArchiveTextColumn,
+				ChatArchiveTimeColumn: cfg.MemoryChatArchiveTimeColumn,
+				IncludeMediaArchive:   cfg.MemoryIncludeMediaArchive,
+				MediaVisibility:       memory.Visibility(cfg.MemoryMediaVisibility),
+				MediaArchiveTable:     cfg.MemoryMediaArchiveTable,
+				MediaOCRColumn:        cfg.MemoryMediaOCRColumn,
+				MediaCaptionColumn:    cfg.MemoryMediaCaptionColumn,
+				MediaTimeColumn:       cfg.MemoryMediaTimeColumn,
+				MediaSenderColumn:     cfg.MemoryMediaSenderColumn,
+				MediaFilePathColumn:   cfg.MemoryMediaFilePathColumn,
+				MediaMsgIDColumn:      cfg.MemoryMediaMsgIDColumn,
 			})
 			if err != nil {
 				log.Printf("初始化数据库记忆库失败: %v", err)
 			} else {
-				log.Printf("[记忆] 使用 OceanBase/MySQL: profile=%s include_chat_archive=%v", cfg.ProfileID, cfg.MemoryIncludeChatArchive)
+				log.Printf("[记忆] 使用 OceanBase/MySQL: profile=%s include_chat_archive=%v include_media_archive=%v", cfg.ProfileID, cfg.MemoryIncludeChatArchive, cfg.MemoryIncludeMediaArchive)
 			}
 		} else {
 			var embedder memory.Embedder
@@ -750,7 +788,7 @@ func checkGitHub(ctx stdctx.Context, cfg *config.Config, gh *github.Client, fs *
 		activities = append(activities, github.ParseActivity(e))
 	}
 
-	shouldSend, text := decideGitHubActivityPush(ctx, llmClient, activities, prof.OwnerName)
+	shouldSend, text := decideGitHubActivityPush(ctx, llmClient, activities, prof)
 
 	for _, e := range newEvents {
 		if err := st.MarkSent(e.ID); err != nil {
@@ -775,7 +813,8 @@ type githubPushDecision struct {
 	Text string `json:"text"`
 }
 
-func decideGitHubActivityPush(ctx stdctx.Context, llmClient *llm.Client, activities []github.Activity, ownerName string) (bool, string) {
+func decideGitHubActivityPush(ctx stdctx.Context, llmClient *llm.Client, activities []github.Activity, prof *profile.Profile) (bool, string) {
+	ownerName := prof.OwnerDisplay()
 	fallback := buildGitHubActivitySentence(activities, ownerName)
 	if len(activities) == 0 {
 		return false, ""
@@ -785,16 +824,29 @@ func decideGitHubActivityPush(ctx stdctx.Context, llmClient *llm.Client, activit
 	}
 
 	payload, _ := json.Marshal(activities)
-	prompt := fmt.Sprintf(`你是飞书陪伴机器人“小弟”，需要判断一批 GitHub 新动态是否值得主动推送给群里。
+
+	// Target-aware phrasing: when no intimate target is configured, keep the
+	// GitHub activity summary neutral for generic deployments.
+	targetName := prof.TargetDisplay()
+	rule4 := "commit 要转成自然易懂的话，比如\"给飞书陪伴机器人新增了记忆审核入口\"；star 要说明大概收藏了什么项目。"
+	if targetName != "" {
+		rule4 = fmt.Sprintf("commit 要转成%s能看懂的话，比如\"给飞书陪伴机器人新增了记忆审核入口\"；star 要说明大概收藏了什么项目。", targetName)
+	}
+	rule5 := fmt.Sprintf("语气轻量，不要腻，不要自称%s。", ownerName)
+	if targetName != "" {
+		rule5 = fmt.Sprintf("语气轻量，不要腻，不要自称%s，不要给%s起配置之外的称呼。", ownerName, targetName)
+	}
+
+	prompt := fmt.Sprintf(`你是飞书陪伴机器人"小弟"，需要判断一批 GitHub 新动态是否值得主动推送给群里。
 要求：
 1. 只返回 JSON：{"send":true/false,"text":"..."}。
 2. 如果是零碎、重复、无信息量的动态，可以 send=false。
-3. 如果值得发，text 必须是一句自然中文，必须包含时间和“三哥”的活动，不要表格、不要 Markdown、不要链接。
-4. commit 要转成舒舒能看懂的话，比如“给飞书陪伴机器人新增了记忆审核入口”；star 要说明大概收藏了什么项目。
-5. 语气轻量，不要腻，不要自称三哥，不要叫舒舒微里。
+3. 如果值得发，text 必须是一句自然中文，必须包含时间和"%s"的活动，不要表格、不要 Markdown、不要链接。
+4. %s
+5. %s
 
 GitHub 动态 JSON：
-%s`, string(payload))
+%s`, ownerName, rule4, rule5, string(payload))
 
 	resp, err := llmClient.Chat(ctx, []llm.Message{
 		{Role: "system", Content: "你只输出严格 JSON，不要解释。"},
@@ -924,10 +976,13 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 		handleMemoryAuditIntent(ctx, cfg, mem, fs, msg, thinkReactID)
 		return
 	case IntentSearch:
-		handleSearchIntent(ctx, cfg, fs, msg, thinkReactID, llmClient)
+		handleSearchIntent(ctx, cfg, fs, msg, thinkReactID, llmClient, prof)
 		return
 	case IntentStatus:
-		handleStatusIntent(ctx, cfg, fs, msg, thinkReactID, llmClient)
+		handleStatusIntent(ctx, cfg, fs, msg, thinkReactID, llmClient, prof)
+		return
+	case IntentMedia:
+		handleMediaIntent(ctx, cfg, mem, fs, msg, thinkReactID, llmClient, prof)
 		return
 	}
 
@@ -939,10 +994,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	var memories []string
 	if mem != nil {
 		trace.Span("search_memory")
-		audience := "target"
-		if msg.IsOwner {
-			audience = "owner"
-		}
+		audience := audienceForMessage(msg)
 		memories = mem.Search(msg.Content, audience)
 		if len(memories) > 0 {
 			log.Printf("[记忆] 找到 %d 条相关记忆", len(memories))
@@ -997,12 +1049,12 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	// Cleanup thinking reaction and add content emoji
 	cleanupReaction(ctx, fs, msg, thinkReactID)
 	if msg.MessageID != "" {
-		fs.AddReaction(ctx, msg.MessageID, pickEmoji(msg.Content, msg.IsOwner))
+		fs.AddReaction(ctx, msg.MessageID, pickEmoji(msg.Content, msg.IsOwner, prof))
 	}
 
 	// Memory confirmation check
 	if cfg.MemoryConfirmationEnabled && mem != nil {
-		shouldRemember, candidate := shouldRememberViaLLM(ctx, msg.Content, msg.IsOwner, llmClient)
+		shouldRemember, candidate := shouldRememberViaLLM(ctx, msg.Content, msg.IsOwner, prof, llmClient)
 		if shouldRemember && candidate != "" {
 			saveMemoryCandidate(ctx, cfg, fs, mem, candidate, msg.MessageID)
 		}
@@ -1035,12 +1087,12 @@ func handleGitHubIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 		activities = append(activities, github.ParseActivity(e))
 	}
 
-	_, reply := decideGitHubActivityPush(ctx, llmClient, activities, prof.OwnerName)
+	_, reply := decideGitHubActivityPush(ctx, llmClient, activities, prof)
 	if reply == "" {
 		reply = buildGitHubActivitySentence(activities, prof.OwnerName)
 	}
 	if reply == "" {
-		reply = "暂时没拉到三哥最近的 GitHub 动态。"
+		reply = fmt.Sprintf("暂时没拉到%s最近的 GitHub 动态。", prof.OwnerDisplay())
 	}
 	if msg.MessageID != "" {
 		fs.ReplyText(ctx, reply, msg.MessageID)
@@ -1077,10 +1129,140 @@ func handleMemoryAuditIntent(ctx stdctx.Context, cfg *config.Config, mem memory.
 	fs.AddReaction(ctx, msg.MessageID, "DONE")
 }
 
-func handleSearchIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message, reactID string, llmClient *llm.Client) {
+func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.MemoryStore, fs *feishu.Client, msg feishu.Message, reactID string, llmClient *llm.Client, prof *profile.Profile) {
+	searcher, ok := mem.(mediaMemoryStore)
+	if !ok || !cfg.MemoryIncludeMediaArchive {
+		fs.ReplyText(ctx, "图片回忆还没接到记忆库里，等图片索引跑完并打开 MEMORY_INCLUDE_MEDIA_ARCHIVE 后就能找。", msg.MessageID)
+		cleanupReaction(ctx, fs, msg, reactID)
+		fs.AddReaction(ctx, msg.MessageID, "DONE")
+		return
+	}
+
+	results := searcher.SearchMedia(msg.Content, audienceForMessage(msg), 3)
+	if len(results) == 0 {
+		fs.ReplyText(ctx, "我在图片记忆里还没翻到相关内容。可以换个更具体的词，比如地点、截图里的文字、物品或大概时间。", msg.MessageID)
+		cleanupReaction(ctx, fs, msg, reactID)
+		fs.AddReaction(ctx, msg.MessageID, "DONE")
+		return
+	}
+
+	reply := summarizeMediaResults(ctx, llmClient, msg.Content, results, prof)
+	if reply == "" {
+		reply = fallbackMediaSummary(results)
+	}
+	if msg.MessageID != "" {
+		fs.ReplyText(ctx, reply, msg.MessageID)
+	} else {
+		fs.SendText(ctx, reply, msg.ChatID)
+	}
+
+	if cfg.MemoryMediaSendImage {
+		for _, result := range results {
+			if result.FilePath == "" {
+				continue
+			}
+			if _, err := os.Stat(result.FilePath); err != nil {
+				log.Printf("[图片记忆] 文件不存在: %s: %v", result.FilePath, err)
+				continue
+			}
+			if !isLikelyImage(result.FilePath) {
+				log.Printf("[图片记忆] 跳过非图片/坏图文件: %s", result.FilePath)
+				continue
+			}
+			if msg.MessageID != "" {
+				if err := fs.ReplyImage(ctx, result.FilePath, msg.MessageID); err != nil {
+					log.Printf("[图片记忆] 发送图片失败: %v", err)
+				}
+			} else if _, err := fs.SendImage(ctx, result.FilePath, msg.ChatID); err != nil {
+				log.Printf("[图片记忆] 发送图片失败: %v", err)
+			}
+			break
+		}
+	}
+
+	cleanupReaction(ctx, fs, msg, reactID)
+	fs.AddReaction(ctx, msg.MessageID, "DONE")
+}
+
+// isLikelyImage reports whether the file starts with a recognized image magic
+// header. It's a cheap pre-check so the bot never uploads a corrupt or
+// non-image file (e.g. WeChat export placeholders that PIL can't decode) to
+// Feishu — such files would either be rejected by the upload API or render as
+// broken images. Bad-image rows can still surface from the archive when the
+// indexer hasn't filtered them, so this guards the send path regardless.
+func isLikelyImage(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var head [12]byte
+	n, _ := io.ReadFull(f, head[:])
+	b := head[:n]
+	switch {
+	case len(b) >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF: // JPEG
+		return true
+	case len(b) >= 8 && string(b[:8]) == "\x89PNG\r\n\x1a\n": // PNG
+		return true
+	case len(b) >= 6 && (string(b[:6]) == "GIF87a" || string(b[:6]) == "GIF89a"): // GIF
+		return true
+	case len(b) >= 12 && string(b[:4]) == "RIFF" && string(b[8:12]) == "WEBP": // WebP
+		return true
+	}
+	return false
+}
+
+func summarizeMediaResults(ctx stdctx.Context, llmClient *llm.Client, query string, results []memory.MediaResult, prof *profile.Profile) string {
+	if llmClient == nil {
+		return ""
+	}
+	var lines []string
+	for _, result := range results {
+		lines = append(lines, safety.SanitizeForLLM(result.ContextText()))
+	}
+	prompt := fmt.Sprintf(`用户想从图片记忆里找内容。请根据检索到的图片记录，用中文回复一小段自然总结。
+要求：
+1. 直接说翻到了什么，带上大概时间。
+2. 如果像情侣日常回忆，可以温柔一点，但不要腻。
+3. 不要暴露本地文件路径，不要编造未出现的细节。
+4. 最后可以说“我把最相关的一张也发出来”。
+
+用户问题：%s
+图片记录：
+%s`, safety.SanitizeForLLM(query), strings.Join(lines, "\n"))
+	reply, err := llmClient.Chat(ctx, []llm.Message{
+		{Role: "system", Content: buildSystemPrompt(prof)},
+		{Role: "user", Content: prompt},
+	}, llm.WithTemperature(0.5), llm.WithMaxTokens(300))
+	if err != nil {
+		log.Printf("[图片记忆] DeepSeek 总结失败: %v", err)
+		return ""
+	}
+	return strings.TrimSpace(reply)
+}
+
+func fallbackMediaSummary(results []memory.MediaResult) string {
+	var lines []string
+	for i, result := range results {
+		if i >= 3 {
+			break
+		}
+		desc := result.Caption
+		if desc == "" {
+			desc = result.OCRText
+		}
+		if desc == "" {
+			desc = "一张聊天图片"
+		}
+		lines = append(lines, fmt.Sprintf("%s %s：%s", result.SentAt, result.Sender, desc))
+	}
+	return "我翻到这些图片记忆：\n" + strings.Join(lines, "\n") + "\n我把最相关的一张也发出来。"
+}
+
+func handleSearchIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message, reactID string, llmClient *llm.Client, prof *profile.Profile) {
 	results, err := webSearch(msg.Content, cfg)
 	if err != nil || len(results) == 0 {
-		fs.ReplyText(ctx, "小弟这边外部搜索暂时没接通，等三哥电脑上的本地搜索服务稳一下再查。", msg.MessageID)
+		fs.ReplyText(ctx, fmt.Sprintf("小弟这边外部搜索暂时没接通，等%s电脑上的本地搜索服务稳一下再查。", prof.OwnerDisplay()), msg.MessageID)
 	} else {
 		summary := summarizeSearch(msg.Content, results, llmClient)
 		fs.ReplyText(ctx, summary, msg.MessageID)
@@ -1089,12 +1271,12 @@ func handleSearchIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 	fs.AddReaction(ctx, msg.MessageID, "DONE")
 }
 
-func handleStatusIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message, reactID string, llmClient *llm.Client) {
+func handleStatusIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message, reactID string, llmClient *llm.Client, prof *profile.Profile) {
 	statusReader := localapps.NewReader()
 	status, err := statusReader.GetStatus()
 	if err != nil {
 		log.Printf("[状态] 获取失败: %v", err)
-		fs.ReplyText(ctx, "小弟这边暂时没有获取到三哥的详细状态，等配置好了再告诉你～", msg.MessageID)
+		fs.ReplyText(ctx, fmt.Sprintf("小弟这边暂时没有获取到%s的详细状态，等配置好了再告诉你～", prof.OwnerDisplay()), msg.MessageID)
 	} else {
 		statusText := localapps.InterpretStatus(status)
 		fs.ReplyText(ctx, statusText, msg.MessageID)
@@ -1107,6 +1289,13 @@ func cleanupReaction(ctx stdctx.Context, fs *feishu.Client, msg feishu.Message, 
 	if reactID != "" && msg.MessageID != "" {
 		fs.DeleteReaction(ctx, msg.MessageID, reactID)
 	}
+}
+
+func audienceForMessage(msg feishu.Message) string {
+	if msg.IsOwner {
+		return "owner"
+	}
+	return "target"
 }
 
 func saveMemoryCandidate(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, mem memory.MemoryStore, content, replyToMsgID string) {
