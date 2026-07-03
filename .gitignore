@@ -28,8 +28,7 @@ profiles/my-*.json
 *.dll
 *.so
 *.dylib
-bot
-cmd/bot/bot
+/bot
 
 # IDE
 .idea/
