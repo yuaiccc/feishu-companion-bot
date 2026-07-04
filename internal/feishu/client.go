@@ -3,6 +3,7 @@ package feishu
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
@@ -29,7 +31,9 @@ var mentionRegex = regexp.MustCompile(`@_user_\d+`)
 type Message struct {
 	MessageID   string
 	Time        string
+	MsgType     string
 	Content     string
+	ImageKey    string
 	Sender      string
 	IsOwner     bool
 	ChatID      string
@@ -63,6 +67,12 @@ type Client struct {
 	httpCli      *http.Client
 	token        string
 	tokenTime    time.Time
+	// lastSent tracks the most recent message_id the bot sent per chat (or
+	// receive_id), so the bot can recall its own wrong reply.
+	lastSent        map[string]string
+	lastSentMu      sync.Mutex
+	ocrMu           sync.Mutex
+	ocrBlockedUntil time.Time
 }
 
 func NewClient(appID, appSecret, botOpenID string) *Client {
@@ -71,6 +81,7 @@ func NewClient(appID, appSecret, botOpenID string) *Client {
 		appSecret: appSecret,
 		botOpenID: botOpenID,
 		httpCli:   &http.Client{Timeout: 30 * time.Second},
+		lastSent:  make(map[string]string),
 	}
 }
 
@@ -205,13 +216,52 @@ func (c *Client) SendText(ctx context.Context, text string, receiveID string) (s
 	return c.sendMsg(ctx, receiveID, "text", map[string]string{"text": text})
 }
 
-func (c *Client) ReplyText(ctx context.Context, text string, messageID string) error {
-	_, err := c.do(ctx, "POST", fmt.Sprintf("/im/v1/messages/%s/reply", messageID),
+func (c *Client) ReplyText(ctx context.Context, text string, messageID string) (string, error) {
+	data, err := c.do(ctx, "POST", fmt.Sprintf("/im/v1/messages/%s/reply", messageID),
 		map[string]interface{}{
 			"msg_type": "text",
 			"content":  jsonMarshal(map[string]string{"text": text}),
 		})
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		MessageID string `json:"message_id"`
+	}
+	json.Unmarshal(data, &resp)
+	return resp.MessageID, nil
+}
+
+// RecallMessage recalls (撤回) a message the bot sent. Feishu allows recalling
+// a message within a time window after sending; used so the bot can take back a
+// reply it sent in error.
+func (c *Client) RecallMessage(ctx context.Context, messageID string) error {
+	_, err := c.do(ctx, "DELETE", fmt.Sprintf("/im/v1/messages/%s", messageID), nil)
 	return err
+}
+
+// NoteSent records a sent message_id for a chat (or receive_id), so the bot can
+// recall its last reply. Public so ReplyText callers (which reply by message_id
+// and don't go through sendMsg) can record the chat mapping themselves.
+func (c *Client) NoteSent(chatID, messageID string) {
+	if chatID == "" || messageID == "" {
+		return
+	}
+	c.lastSentMu.Lock()
+	defer c.lastSentMu.Unlock()
+	c.lastSent[chatID] = messageID
+}
+
+// RecallLastSent recalls the bot's most recent message in the given chat.
+// Returns nil if there's nothing recorded to recall.
+func (c *Client) RecallLastSent(ctx context.Context, chatID string) error {
+	c.lastSentMu.Lock()
+	messageID := c.lastSent[chatID]
+	c.lastSentMu.Unlock()
+	if messageID == "" {
+		return fmt.Errorf("no recent bot message to recall in this chat")
+	}
+	return c.RecallMessage(ctx, messageID)
 }
 
 func (c *Client) UploadImage(ctx context.Context, filePath string) (string, error) {
@@ -296,6 +346,113 @@ func (c *Client) SendImage(ctx context.Context, filePath string, receiveID strin
 	return c.sendMsg(ctx, receiveID, "image", map[string]string{"image_key": imageKey})
 }
 
+func (c *Client) DownloadImage(ctx context.Context, imageKey string) ([]byte, error) {
+	if imageKey == "" {
+		return nil, fmt.Errorf("empty image key")
+	}
+	if err := c.refreshToken(ctx); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://open.feishu.cn/open-apis/im/v1/images/"+url.PathEscape(imageKey), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.httpCli.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		snippet := string(data)
+		if len(snippet) > 800 {
+			snippet = snippet[:800]
+		}
+		return nil, fmt.Errorf("download image http %d: %s", resp.StatusCode, snippet)
+	}
+	if strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
+		var result struct {
+			Code int    `json:"code"`
+			Msg  string `json:"msg"`
+		}
+		if json.Unmarshal(data, &result) == nil && result.Code != 0 {
+			return nil, fmt.Errorf("download image api %d: %s", result.Code, result.Msg)
+		}
+	}
+	return data, nil
+}
+
+func (c *Client) RecognizeImageText(ctx context.Context, image []byte, cooldown time.Duration) ([]string, error) {
+	if len(image) == 0 {
+		return nil, fmt.Errorf("empty image")
+	}
+	c.ocrMu.Lock()
+	if time.Now().Before(c.ocrBlockedUntil) {
+		until := c.ocrBlockedUntil
+		c.ocrMu.Unlock()
+		return nil, fmt.Errorf("feishu ocr cooldown until %s", until.Format(time.RFC3339))
+	}
+	c.ocrMu.Unlock()
+
+	body := map[string]string{"image": base64.StdEncoding.EncodeToString(image)}
+	data, err := c.doOCR(ctx, body)
+	if err != nil {
+		if IsRateLimitError(err) && cooldown > 0 {
+			c.ocrMu.Lock()
+			c.ocrBlockedUntil = time.Now().Add(cooldown)
+			c.ocrMu.Unlock()
+		}
+		return nil, err
+	}
+	return extractOCRTexts(data), nil
+}
+
+func (c *Client) doOCR(ctx context.Context, body interface{}) (json.RawMessage, error) {
+	marshaled, _ := json.Marshal(body)
+	if err := c.refreshToken(ctx); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://open.feishu.cn/open-apis/optical_char_recognition/v1/image/basic_recognize", bytes.NewReader(marshaled))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpCli.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Code int             `json:"code"`
+		Msg  string          `json:"msg"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("parse ocr response: %s", string(data))
+	}
+	if result.Code != 0 {
+		snippet := string(data)
+		if len(snippet) > 800 {
+			snippet = snippet[:800]
+		}
+		return nil, fmt.Errorf("ocr api %d: %s (resp: %s)", result.Code, result.Msg, snippet)
+	}
+	return result.Data, nil
+}
+
+func IsRateLimitError(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "99991400") || strings.Contains(err.Error(), "frequency limit"))
+}
+
 func (c *Client) UpdateTextMessage(ctx context.Context, messageID string, text string) error {
 	_, err := c.do(ctx, "PATCH", fmt.Sprintf("/im/v1/messages/%s", messageID),
 		map[string]interface{}{
@@ -341,6 +498,7 @@ func (c *Client) sendMsgToIDType(ctx context.Context, receiveID, msgType string,
 		MessageID string `json:"message_id"`
 	}
 	json.Unmarshal(respData, &result)
+	c.NoteSent(receiveID, result.MessageID)
 	return result.MessageID, nil
 }
 
@@ -423,6 +581,9 @@ func (c *Client) ListMessages(ctx context.Context, chatID string, limit int) ([]
 				content = "（消息已撤回）"
 			} else {
 				content = ExtractText(item.MsgType, item.Body.Content)
+				if content == "" && item.MsgType == "image" {
+					content = "发来了一张图片"
+				}
 				if content == "" {
 					continue
 				}
@@ -441,7 +602,9 @@ func (c *Client) ListMessages(ctx context.Context, chatID string, limit int) ([]
 			out = append(out, Message{
 				MessageID: item.MessageID,
 				Time:      FormatTime(item.CreateTime),
+				MsgType:   item.MsgType,
 				Content:   content,
+				ImageKey:  ExtractImageKey(item.MsgType, item.Body.Content),
 				Sender:    senderID,
 				IsOwner:   senderID == c.ownerOpenID,
 				ChatID:    chatID,
@@ -498,7 +661,11 @@ func adaptMessageEvent(event *larkim.P2MessageReceiveV1, c *Client) (Message, bo
 	msgType := derefStr(em.MessageType)
 	content := TrimMention(ExtractText(msgType, derefStr(em.Content)))
 	if content == "" {
-		content = "只叫了你一声"
+		if msgType == "image" {
+			content = "发来了一张图片"
+		} else {
+			content = "只叫了你一声"
+		}
 	}
 
 	chatType := derefStr(em.ChatType)
@@ -520,7 +687,9 @@ func adaptMessageEvent(event *larkim.P2MessageReceiveV1, c *Client) (Message, bo
 	return Message{
 		MessageID:   derefStr(em.MessageId),
 		Time:        FormatTime(derefStr(em.CreateTime)),
+		MsgType:     msgType,
 		Content:     content,
+		ImageKey:    ExtractImageKey(msgType, derefStr(em.Content)),
 		Sender:      senderOpenID,
 		IsOwner:     senderOpenID == c.ownerOpenID,
 		ChatID:      derefStr(em.ChatId),
@@ -633,6 +802,68 @@ func ExtractText(msgType, content string) string {
 	default:
 		return ""
 	}
+}
+
+func ExtractImageKey(msgType, content string) string {
+	if msgType != "image" || content == "" {
+		return ""
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(content), &m); err != nil {
+		return ""
+	}
+	for _, key := range []string{"image_key", "imageKey", "key"} {
+		if v, ok := m[key].(string); ok {
+			return v
+		}
+	}
+	if image, ok := m["image"].(map[string]interface{}); ok {
+		for _, key := range []string{"image_key", "imageKey", "key"} {
+			if v, ok := image[key].(string); ok {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+func extractOCRTexts(data json.RawMessage) []string {
+	var root interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil
+	}
+	var texts []string
+	var walk func(interface{})
+	walk = func(v interface{}) {
+		switch x := v.(type) {
+		case map[string]interface{}:
+			for _, key := range []string{"text", "content", "words"} {
+				if s, ok := x[key].(string); ok && strings.TrimSpace(s) != "" {
+					texts = append(texts, strings.TrimSpace(s))
+				}
+			}
+			for _, child := range x {
+				walk(child)
+			}
+		case []interface{}:
+			for _, child := range x {
+				walk(child)
+			}
+		}
+	}
+	walk(root)
+	if len(texts) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(texts))
+	uniq := make([]string, 0, len(texts))
+	for _, text := range texts {
+		if !seen[text] {
+			seen[text] = true
+			uniq = append(uniq, text)
+		}
+	}
+	return uniq
 }
 
 // CleanHistoryText removes @ mentions from message content.

@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -962,6 +964,17 @@ func hasMediaFollowupWord(s string) bool {
 	return false
 }
 
+// isRecallCommand reports whether the message asks the bot to recall its last
+// reply. Kept to short messages to avoid matching "撤回" inside normal sentences.
+func isRecallCommand(s string) bool {
+	s = strings.TrimSpace(s)
+	if len([]rune(s)) > 10 {
+		return false
+	}
+	lower := strings.ToLower(s)
+	return strings.Contains(s, "撤回") || strings.Contains(s, "发错了") || strings.Contains(s, "收回") || strings.Contains(lower, "recall")
+}
+
 // interpretMediaRequest uses the LLM to understand, in conversation context,
 // what images the user wants and whether they want all of them — resolving
 // follow-up references like "再/那张/全部" against recent messages. Returns
@@ -1015,6 +1028,89 @@ func sendOneMediaImage(ctx stdctx.Context, fs *feishu.Client, msg feishu.Message
 	} else if _, err := fs.SendImage(ctx, path, msg.ChatID); err != nil {
 		log.Printf("[图片记忆] 发送图片失败: %v", err)
 	}
+}
+
+func understandIncomingImage(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message) string {
+	if msg.ImageKey == "" {
+		log.Printf("[图片理解] 图片消息没有 image_key: message_id=%s", msg.MessageID)
+		return ""
+	}
+	image, err := fs.DownloadImage(ctx, msg.ImageKey)
+	if err != nil {
+		log.Printf("[图片理解] 下载飞书图片失败: %v", err)
+		return ""
+	}
+	var parts []string
+	if cfg.FeishuOCREnabled {
+		texts, err := fs.RecognizeImageText(ctx, image, cfg.FeishuOCRCooldown)
+		if err != nil {
+			if feishu.IsRateLimitError(err) {
+				log.Printf("[图片理解] 飞书 OCR 触发限流，进入冷却并改用本地视觉模型: %v", err)
+			} else {
+				log.Printf("[图片理解] 飞书 OCR 失败，改用本地视觉模型: %v", err)
+			}
+		} else if len(texts) > 0 {
+			parts = append(parts, "OCR文字："+strings.Join(texts, " / "))
+		}
+	}
+	if cfg.LocalVisionEnabled && cfg.OllamaVisionModel != "" {
+		if desc, err := describeImageWithOllama(ctx, cfg, image); err != nil {
+			log.Printf("[图片理解] 本地视觉模型失败: %v", err)
+		} else if desc != "" {
+			parts = append(parts, "视觉描述："+desc)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func describeImageWithOllama(ctx stdctx.Context, cfg *config.Config, image []byte) (string, error) {
+	if len(image) == 0 {
+		return "", fmt.Errorf("empty image")
+	}
+	baseURL := strings.TrimRight(cfg.OllamaBaseURL, "/")
+	body := map[string]interface{}{
+		"model":  cfg.OllamaVisionModel,
+		"prompt": "请用中文简洁描述这张图片。如果图片里有文字，请尽量逐字读出来；如果是聊天截图，也说清楚关键信息。不要编造看不见的细节。",
+		"images": []string{base64.StdEncoding.EncodeToString(image)},
+		"stream": false,
+		"options": map[string]interface{}{
+			"temperature": 0.1,
+			"num_predict": 220,
+		},
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/api/generate", bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		snippet := string(respData)
+		if len(snippet) > 800 {
+			snippet = snippet[:800]
+		}
+		return "", fmt.Errorf("ollama http %d: %s", resp.StatusCode, snippet)
+	}
+	var parsed struct {
+		Response string `json:"response"`
+	}
+	if err := json.Unmarshal(respData, &parsed); err != nil {
+		return "", fmt.Errorf("parse ollama response: %w", err)
+	}
+	return strings.TrimSpace(parsed.Response), nil
 }
 
 func main() {
@@ -1429,6 +1525,22 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 		log.Printf("[收到消息] 跳过重复投递: %s", msg.MessageID)
 		return
 	}
+	if msg.MsgType == "image" {
+		trace.Span("image_understanding")
+		if desc := understandIncomingImage(ctx, cfg, fs, msg); desc != "" {
+			msg.Content = strings.TrimSpace(msg.Content + "\n图片理解：" + desc)
+			log.Printf("[图片理解] %s", desc)
+		}
+	}
+	if isRecallCommand(msg.Content) {
+		if err := fs.RecallLastSent(ctx, msg.ChatID); err != nil {
+			log.Printf("[撤回] %v", err)
+			fs.ReplyText(ctx, "没找到能撤回的消息呀", msg.MessageID)
+		} else {
+			fs.ReplyText(ctx, "已撤回～", msg.MessageID)
+		}
+		return
+	}
 	st := convoState.UpdateMessage(msg, audience)
 	passiveAssistant.OnMessage(msg)
 
@@ -1540,7 +1652,9 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 			reply = emptyReplyPlaceholder
 		}
 		if msg.MessageID != "" {
-			fs.ReplyText(ctx, reply, msg.MessageID)
+			if m, _ := fs.ReplyText(ctx, reply, msg.MessageID); m != "" {
+				fs.NoteSent(msg.ChatID, m)
+			}
 		} else {
 			fs.SendText(ctx, reply, msg.ChatID)
 		}
@@ -1596,7 +1710,9 @@ func handleGitHubIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 		reply = fmt.Sprintf("暂时没拉到%s最近的 GitHub 动态。", prof.OwnerDisplay())
 	}
 	if msg.MessageID != "" {
-		fs.ReplyText(ctx, reply, msg.MessageID)
+		if m, _ := fs.ReplyText(ctx, reply, msg.MessageID); m != "" {
+			fs.NoteSent(msg.ChatID, m)
+		}
 	} else {
 		fs.SendText(ctx, reply, msg.ChatID)
 	}
@@ -1683,7 +1799,7 @@ func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.Memory
 	}
 	log.Printf("[图片记忆] 回复: %q", reply)
 	if msg.MessageID != "" {
-		if err := fs.ReplyText(ctx, reply, msg.MessageID); err != nil {
+		if _, err := fs.ReplyText(ctx, reply, msg.MessageID); err != nil {
 			log.Printf("[图片记忆] ReplyText 失败: %v", err)
 		}
 	} else {

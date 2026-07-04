@@ -26,8 +26,14 @@ type Config struct {
 	DeepSeekModel   string
 
 	// Ollama (for embeddings)
-	OllamaBaseURL string
-	OllamaModel   string
+	OllamaBaseURL     string
+	OllamaModel       string
+	OllamaVisionModel string
+
+	// Image understanding
+	FeishuOCREnabled   bool
+	FeishuOCRCooldown  time.Duration
+	LocalVisionEnabled bool
 
 	// GitHub
 	GitHubUsername     string
@@ -103,8 +109,12 @@ func Load() *Config {
 		DeepSeekBaseURL: getEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 		DeepSeekModel:   getEnv("DEEPSEEK_MODEL", "deepseek-chat"),
 
-		OllamaBaseURL: getEnv("OLLAMA_BASE_URL", getEnv("MEMORY_OLLAMA_BASE_URL", "http://localhost:11434")),
-		OllamaModel:   getEnv("OLLAMA_MODEL", getEnv("MEMORY_OLLAMA_EMBED_MODEL", "nomic-embed-text")),
+		OllamaBaseURL:      getEnv("OLLAMA_BASE_URL", getEnv("MEMORY_OLLAMA_BASE_URL", "http://localhost:11434")),
+		OllamaModel:        getEnv("OLLAMA_MODEL", getEnv("MEMORY_OLLAMA_EMBED_MODEL", "nomic-embed-text")),
+		OllamaVisionModel:  getEnv("OLLAMA_VISION_MODEL", "qwen2.5vl:3b"),
+		FeishuOCREnabled:   getEnvBool("FEISHU_OCR_ENABLED", true),
+		FeishuOCRCooldown:  getEnvDuration("FEISHU_OCR_COOLDOWN_SECONDS", 5*time.Minute),
+		LocalVisionEnabled: getEnvBool("LOCAL_VISION_ENABLED", true),
 
 		GitHubUsername: getEnv("GH_USERNAME", getEnv("GITHUB_USERNAME", "")),
 		GitHubToken:    getEnv("GH_TOKEN", getEnv("GITHUB_TOKEN", "")),
