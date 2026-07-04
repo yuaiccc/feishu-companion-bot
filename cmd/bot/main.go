@@ -70,6 +70,125 @@ type mediaMemoryStore interface {
 	SearchMedia(query string, audience string, limit int) []memory.MediaResult
 }
 
+type replyPlan struct {
+	ShouldReply bool
+	UseMemory   bool
+	UseMedia    bool
+	ReplyStyle  string
+	MaxTokens   int
+	Reason      string
+}
+
+type conversationState struct {
+	ChatID           string
+	RecentTopic      string
+	LastImageQuery   string
+	LastEmotion      string
+	LastActiveAt     time.Time
+	LastOwnerAt      time.Time
+	LastTargetAt     time.Time
+	LastBotReplyAt   time.Time
+	MessagesSinceBot int
+}
+
+type stateManager struct {
+	mu    sync.Mutex
+	items map[string]*conversationState
+}
+
+func newStateManager() *stateManager {
+	return &stateManager{items: make(map[string]*conversationState)}
+}
+
+func (m *stateManager) UpdateMessage(msg feishu.Message, audience string) *conversationState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	st := m.items[msg.ChatID]
+	if st == nil {
+		st = &conversationState{ChatID: msg.ChatID}
+		m.items[msg.ChatID] = st
+	}
+	st.LastActiveAt = now
+	st.MessagesSinceBot++
+	switch audience {
+	case "owner":
+		st.LastOwnerAt = now
+	case "target":
+		st.LastTargetAt = now
+	}
+	if topic := inferTopic(msg.Content); topic != "" {
+		st.RecentTopic = topic
+	}
+	if emotion := inferEmotion(msg.Content); emotion != "" {
+		st.LastEmotion = emotion
+	}
+	return st.Clone()
+}
+
+func (m *stateManager) MarkBotReply(chatID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.items[chatID]
+	if st == nil {
+		st = &conversationState{ChatID: chatID}
+		m.items[chatID] = st
+	}
+	st.MessagesSinceBot = 0
+	st.LastActiveAt = time.Now()
+	st.LastBotReplyAt = st.LastActiveAt
+}
+
+func (m *stateManager) MarkMediaSearch(chatID, query string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.items[chatID]
+	if st == nil {
+		st = &conversationState{ChatID: chatID}
+		m.items[chatID] = st
+	}
+	st.LastImageQuery = query
+	st.RecentTopic = "图片回忆：" + query
+	st.LastActiveAt = time.Now()
+}
+
+func (m *stateManager) Get(chatID string) conversationState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if st := m.items[chatID]; st != nil {
+		return *st.Clone()
+	}
+	return conversationState{ChatID: chatID}
+}
+
+func (s *conversationState) Clone() *conversationState {
+	if s == nil {
+		return &conversationState{}
+	}
+	copied := *s
+	return &copied
+}
+
+func (s conversationState) PromptText() string {
+	var parts []string
+	if s.RecentTopic != "" {
+		parts = append(parts, "最近话题："+s.RecentTopic)
+	}
+	if s.LastImageQuery != "" {
+		parts = append(parts, "上次图片搜索："+s.LastImageQuery)
+	}
+	if s.LastEmotion != "" {
+		parts = append(parts, "最近情绪："+s.LastEmotion)
+	}
+	if s.MessagesSinceBot > 0 {
+		parts = append(parts, fmt.Sprintf("机器人上次回复后已有 %d 条新消息", s.MessagesSinceBot))
+	}
+	if !s.LastBotReplyAt.IsZero() {
+		parts = append(parts, fmt.Sprintf("机器人上次回复距今约 %d 分钟", int(time.Since(s.LastBotReplyAt).Minutes())))
+	}
+	return strings.Join(parts, "\n")
+}
+
 var (
 	statusKeywords = []string{
 		"在干嘛", "在干啥", "干嘛", "干啥", "忙什么", "忙啥",
@@ -135,6 +254,161 @@ func classifyIntent(content string) Intent {
 		}
 	}
 	return IntentNone
+}
+
+func inferTopic(content string) string {
+	text := strings.TrimSpace(content)
+	if text == "" || text == "只叫了你一声" {
+		return ""
+	}
+	if len([]rune(text)) > 36 {
+		runes := []rune(text)
+		text = string(runes[:36]) + "..."
+	}
+	return text
+}
+
+func inferEmotion(content string) string {
+	switch {
+	case strings.ContainsAny(content, "难过哭委屈烦累崩溃疼痛"):
+		return "低落或需要安慰"
+	case strings.ContainsAny(content, "生气气死讨厌"):
+		return "生气"
+	case strings.ContainsAny(content, "开心哈哈嘻喜欢爱亲抱"):
+		return "开心或亲近"
+	case strings.ContainsAny(content, "困睡晚安"):
+		return "困倦"
+	default:
+		return ""
+	}
+}
+
+func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, intent Intent, st conversationState, prof *profile.Profile, senderLabel string) replyPlan {
+	plan := defaultReplyPlan(msg, intent, st)
+	passiveGroup := msg.ChatType == "group" && !msg.IsMentioned
+	if passiveGroup && llmClient == nil {
+		plan.ShouldReply = false
+		plan.Reason = "passive_no_llm"
+		return plan
+	}
+	if llmClient == nil || (intent != IntentNone && !passiveGroup) {
+		return plan
+	}
+	stateText := st.PromptText()
+	if stateText == "" {
+		stateText = "暂无"
+	}
+	prompt := fmt.Sprintf(`你是飞书陪伴机器人的回复前决策器。只返回 JSON：
+{"should_reply":true/false,"use_memory":true/false,"use_media":true/false,"reply_style":"short|normal|comfort|detailed","max_tokens":120,"reason":"极短原因"}
+
+判断规则：
+- 群聊中被 @ 时通常要回复；私聊通常要回复。
+- 群聊未 @ 时必须由你理解语义后决定是否插话，不能按关键词机械匹配；只有你确实能帮上忙、接住情绪、回答问题、补充图片/记忆时才插话。
+- 群聊未 @ 且机器人刚回复过时，要更克制，除非用户明显在接着问你或需要帮助。
+- 当前发言人是 %s。不要把当前发言人和被提到的人混淆；不要把当前发言人叫成另一个成员。
+- 如果用户只是寒暄、确认、短句，short。
+- 如果用户表达低落/生气/累，comfort，并查记忆。
+- 如果问题涉及过去、回忆、偏好、关系、图片、截图，查记忆；涉及图片再 use_media。
+- 不要为了所有消息都查记忆。
+
+会话状态：
+%s
+
+用户消息：%s`, senderLabel, stateText, safety.SanitizeForLLM(msg.Content))
+	reply, err := llmClient.Chat(ctx, []llm.Message{
+		{Role: "system", Content: buildSystemPrompt(prof)},
+		{Role: "user", Content: prompt},
+	}, llm.WithTemperature(0), llm.WithMaxTokens(160))
+	if err != nil {
+		log.Printf("[回复决策] LLM 失败，使用默认计划: %v", err)
+		if passiveGroup {
+			plan.ShouldReply = false
+			plan.Reason = "passive_llm_error"
+		}
+		return plan
+	}
+	var parsed struct {
+		ShouldReply bool   `json:"should_reply"`
+		UseMemory   bool   `json:"use_memory"`
+		UseMedia    bool   `json:"use_media"`
+		ReplyStyle  string `json:"reply_style"`
+		MaxTokens   int    `json:"max_tokens"`
+		Reason      string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(extractJSON(reply)), &parsed); err != nil {
+		log.Printf("[回复决策] JSON 解析失败，使用默认计划: %v raw=%q", err, reply)
+		if passiveGroup {
+			plan.ShouldReply = false
+			plan.Reason = "passive_plan_parse_error"
+		}
+		return plan
+	}
+	if parsed.MaxTokens <= 0 {
+		parsed.MaxTokens = plan.MaxTokens
+	}
+	if parsed.MaxTokens > 700 {
+		parsed.MaxTokens = 700
+	}
+	if parsed.ReplyStyle == "" {
+		parsed.ReplyStyle = plan.ReplyStyle
+	}
+	return replyPlan{
+		ShouldReply: parsed.ShouldReply,
+		UseMemory:   parsed.UseMemory,
+		UseMedia:    parsed.UseMedia,
+		ReplyStyle:  parsed.ReplyStyle,
+		MaxTokens:   parsed.MaxTokens,
+		Reason:      parsed.Reason,
+	}
+}
+
+func defaultReplyPlan(msg feishu.Message, intent Intent, st conversationState) replyPlan {
+	plan := replyPlan{ShouldReply: true, UseMemory: false, UseMedia: false, ReplyStyle: "normal", MaxTokens: 350, Reason: "default"}
+	if msg.ChatType == "group" && !msg.IsMentioned {
+		plan.ShouldReply = false
+		plan.Reason = "passive_wait_llm"
+		return plan
+	}
+	if intent != IntentNone {
+		plan.UseMemory = intent == IntentMedia || intent == IntentStatus
+		plan.UseMedia = intent == IntentMedia
+		plan.MaxTokens = 300
+		plan.Reason = "intent"
+		return plan
+	}
+	content := msg.Content
+	if len([]rune(content)) <= 8 {
+		plan.ReplyStyle = "short"
+		plan.MaxTokens = 160
+	}
+	if inferEmotion(content) != "" || st.LastEmotion == "低落或需要安慰" || st.LastEmotion == "生气" {
+		plan.UseMemory = true
+		plan.ReplyStyle = "comfort"
+		plan.MaxTokens = 320
+		plan.Reason = "emotion"
+	}
+	return plan
+}
+
+func replyStyleInstruction(plan replyPlan, st conversationState) string {
+	var parts []string
+	if stateText := st.PromptText(); stateText != "" {
+		parts = append(parts, "会话状态：\n"+stateText)
+	}
+	switch plan.ReplyStyle {
+	case "short":
+		parts = append(parts, "回复要短，1-3 句即可。")
+	case "comfort":
+		parts = append(parts, "优先安慰和接住情绪，先表明态度，再轻轻回应事情本身。")
+	case "detailed":
+		parts = append(parts, "可以稍微展开，但保持自然，不要写成报告。")
+	default:
+		parts = append(parts, "回复自然，不要过长。")
+	}
+	if plan.Reason != "" {
+		parts = append(parts, "回复前决策原因："+plan.Reason)
+	}
+	return strings.Join(parts, "\n")
 }
 
 // ---- Passive Assistant ----
@@ -284,8 +558,9 @@ func streamingReply(
 	fsClient *feishu.Client,
 	msg feishu.Message,
 	updateInterval time.Duration,
+	maxTokens int,
 ) (string, error) {
-	fullText, sent, err := streamingCardReply(ctx, llmClient, msgs, fsClient, msg, updateInterval)
+	fullText, sent, err := streamingCardReply(ctx, llmClient, msgs, fsClient, msg, updateInterval, maxTokens)
 	if err == nil {
 		return fullText, nil
 	}
@@ -294,7 +569,7 @@ func streamingReply(
 		return fullText, err
 	}
 	log.Printf("[流式] CardKit 流式失败，回退文本编辑: %v", err)
-	return streamingTextReply(ctx, llmClient, msgs, fsClient, msg, updateInterval)
+	return streamingTextReply(ctx, llmClient, msgs, fsClient, msg, updateInterval, maxTokens)
 }
 
 // streamingCardReply drives the CardKit streaming flow: create a streaming card
@@ -308,6 +583,7 @@ func streamingCardReply(
 	fsClient *feishu.Client,
 	msg feishu.Message,
 	updateInterval time.Duration,
+	maxTokens int,
 ) (fullText string, sent bool, err error) {
 	cardJSON := feishu.BuildStreamingCardJSON("")
 	cardID, err := fsClient.CreateStreamingCard(ctx, cardJSON)
@@ -331,7 +607,7 @@ func streamingCardReply(
 			fsClient.StreamUpdateCardText(ctx, cardID, feishu.StreamingCardElementID, fullText, seq)
 			lastUpdate = now
 		}
-	})
+	}, llm.WithMaxTokens(maxTokens))
 	// Final flush + close streaming regardless of stream error.
 	if fullText == "" {
 		fullText = emptyReplyPlaceholder
@@ -354,6 +630,7 @@ func streamingTextReply(
 	fsClient *feishu.Client,
 	msg feishu.Message,
 	updateInterval time.Duration,
+	maxTokens int,
 ) (string, error) {
 	initialID, err := fsClient.SendText(ctx, "正在输入...", msg.ChatID)
 	if err != nil {
@@ -370,7 +647,7 @@ func streamingTextReply(
 			fsClient.UpdateTextMessage(ctx, initialID, fullText)
 			lastUpdate = now
 		}
-	})
+	}, llm.WithMaxTokens(maxTokens))
 	if err != nil {
 		return fullText, err
 	}
@@ -398,6 +675,20 @@ func buildSystemPrompt(prof *profile.Profile) string {
 		b.WriteString(fmt.Sprintf(" 和%s关系亲密。", prof.TargetName))
 	}
 	b.WriteString(" 你不是owner本人，只是小弟/助手。语气轻松自然，克制不腻。")
+	b.WriteString(fmt.Sprintf(" 必须分清发言人身份：owner 是%s", prof.OwnerDisplay()))
+	if target := prof.TargetDisplay(); target != "" {
+		b.WriteString(fmt.Sprintf("，target 是%s", target))
+	}
+	if prof.BotName != "" {
+		b.WriteString(fmt.Sprintf("，机器人是%s。", prof.BotName))
+	} else {
+		b.WriteString("，机器人是小弟。")
+	}
+	b.WriteString(" 不要把当前发言人叫成另一个人。")
+	if roster := prof.IdentityRoster(); roster != "" {
+		b.WriteString(" 已知成员表：\n")
+		b.WriteString(roster)
+	}
 	b.WriteString(" 不要在回复末尾加\"正在输入\"或\"整理中\"这类占位文字。")
 	if persona, ok := prof.Config["persona"].(string); ok && persona != "" {
 		b.WriteString(" ")
@@ -406,7 +697,31 @@ func buildSystemPrompt(prof *profile.Profile) string {
 	return b.String()
 }
 
-func buildChatMessages(prof *profile.Profile, recentMsgs []feishu.Message, memories []string, extraInstructions string, budget *ctxmgr.Budget) []llm.Message {
+func senderLabel(cfg *config.Config, prof *profile.Profile, fs *feishu.Client, openID string) string {
+	if member, ok := prof.MemberByOpenID(openID); ok {
+		return member.DisplayName()
+	}
+	return fs.LabelSender(openID, prof.OwnerDisplay(), prof.BotName, prof.TargetDisplay())
+}
+
+func audienceForSender(cfg *config.Config, prof *profile.Profile, msg feishu.Message) string {
+	if msg.IsOwner || (cfg.FeishuOwnerOpenID != "" && msg.Sender == cfg.FeishuOwnerOpenID) {
+		return "owner"
+	}
+	if cfg.FeishuTargetOpenID != "" && msg.Sender == cfg.FeishuTargetOpenID {
+		return "target"
+	}
+	switch prof.MemberRole(msg.Sender) {
+	case "owner":
+		return "owner"
+	case "target", "partner":
+		return "target"
+	default:
+		return "other"
+	}
+}
+
+func buildChatMessages(prof *profile.Profile, currentContent string, currentSender string, currentMessageID string, recentMsgs []feishu.Message, memories []string, extraInstructions string, budget *ctxmgr.Budget, senderLabel func(string) string) []llm.Message {
 	var msgs []llm.Message
 	msgs = append(msgs, llm.Message{Role: "system", Content: buildSystemPrompt(prof)})
 
@@ -421,15 +736,23 @@ func buildChatMessages(prof *profile.Profile, recentMsgs []feishu.Message, memor
 		}
 	}
 
-	// recent context (last 10 messages)
+	// Recent context — the conversation BEFORE the current message, in
+	// chronological order (oldest first). The current message is excluded so it
+	// isn't duplicated; it's passed separately as the final user message, which
+	// is the one the model must reply to. (ListMessages returns newest-first,
+	// so we iterate in reverse.)
 	if len(recentMsgs) > 0 {
 		var ctxLines []string
-		for _, m := range recentMsgs {
-			ctxLines = append(ctxLines, fmt.Sprintf("[%s] %s: %s", m.Time, m.Sender, safety.SanitizeForLLM(m.Content)))
+		for i := len(recentMsgs) - 1; i >= 0; i-- {
+			m := recentMsgs[i]
+			if m.MessageID == currentMessageID {
+				continue
+			}
+			ctxLines = append(ctxLines, fmt.Sprintf("[%s] %s: %s", m.Time, senderLabel(m.Sender), safety.SanitizeForLLM(m.Content)))
 		}
 		ctxText := budget.Add("recent_messages", strings.Join(ctxLines, "\n"))
 		if ctxText != "" {
-			msgs = append(msgs, llm.Message{Role: "system", Content: "近期对话：\n" + ctxText})
+			msgs = append(msgs, llm.Message{Role: "system", Content: "对话历史（早→近，不含最新消息）：\n" + ctxText})
 		}
 	}
 
@@ -437,11 +760,9 @@ func buildChatMessages(prof *profile.Profile, recentMsgs []feishu.Message, memor
 		msgs = append(msgs, llm.Message{Role: "system", Content: extraInstructions})
 	}
 
-	currentMessage := ""
-	if len(recentMsgs) > 0 {
-		currentMessage = recentMsgs[len(recentMsgs)-1].Content
-	}
-	safeCurrentMessage := safety.SanitizeForLLM(currentMessage)
+	// The final user message is the latest one — explicitly mark it as the
+	// message to reply to, so the model doesn't latch onto an earlier turn.
+	safeCurrentMessage := fmt.Sprintf("【这是用户最新发的消息，请针对它回复，不要回复历史里的消息】\n当前发言人：%s\n消息：%s", currentSender, safety.SanitizeForLLM(currentContent))
 	budget.Add("current_message", safeCurrentMessage)
 	msgs = append(msgs, llm.Message{Role: "user", Content: safeCurrentMessage})
 
@@ -492,10 +813,7 @@ func buildMemoryAuditCard(mem memory.MemoryStore, audience string) map[string]in
 		all := mem.All()
 		var filtered []memory.Memory
 		for _, m := range all {
-			if audience == "owner" && m.Visibility == memory.VisPrivate {
-				continue
-			}
-			if audience == "target" && m.Visibility == memory.VisOwnerOnly {
+			if !memoryVisibleTo(m.Visibility, audience) {
 				continue
 			}
 			filtered = append(filtered, m)
@@ -536,6 +854,19 @@ func buildMemoryAuditCard(mem memory.MemoryStore, audience string) map[string]in
 	return buildCard(headerTitle, "blue", elements)
 }
 
+func memoryVisibleTo(vis memory.Visibility, audience string) bool {
+	switch vis {
+	case memory.VisPrivate:
+		return false
+	case memory.VisOwnerOnly:
+		return audience == "owner"
+	case memory.VisPublicToTarget:
+		return audience == "owner" || audience == "target"
+	default:
+		return false
+	}
+}
+
 // ---- External search adapter ----
 
 func webSearch(query string, cfg *config.Config) ([]search.Result, error) {
@@ -560,6 +891,7 @@ func summarizeSearch(query string, results []search.Result, llmClient *llm.Clien
 var (
 	passiveAssistant = NewPassiveAssistant()
 	streamingContext = make(map[string]map[string]interface{}) // messageID -> context
+	convoState       = newStateManager()
 )
 
 var (
@@ -595,6 +927,94 @@ func alreadyProcessed(msgID string) bool {
 	}
 	processedMsgIDs[msgID] = now
 	return false
+}
+
+// lastMediaAt tracks, per chat, when the last image search happened so
+// follow-ups can be resolved while that search is still the active topic.
+var (
+	lastMediaAt = make(map[string]time.Time)
+	lastMediaMu sync.Mutex
+)
+
+const lastMediaTTL = 10 * time.Minute
+
+func noteMediaSearch(chatID string) {
+	lastMediaMu.Lock()
+	defer lastMediaMu.Unlock()
+	lastMediaAt[chatID] = time.Now()
+}
+
+func recentMediaSearch(chatID string) bool {
+	lastMediaMu.Lock()
+	defer lastMediaMu.Unlock()
+	t, ok := lastMediaAt[chatID]
+	return ok && time.Since(t) <= lastMediaTTL
+}
+
+var mediaFollowupWords = []string{"全部", "都看", "都要", "都发", "那张", "另一", "换一张", "再来", "再看", "再发", "别的图", "还有图", "都发来"}
+
+func hasMediaFollowupWord(s string) bool {
+	for _, w := range mediaFollowupWords {
+		if strings.Contains(s, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// interpretMediaRequest uses the LLM to understand, in conversation context,
+// what images the user wants and whether they want all of them — resolving
+// follow-up references like "再/那张/全部" against recent messages. Returns
+// the search query (empty if the message isn't really an image request) and
+// whether to send every match.
+func interpretMediaRequest(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, recentMsgs []feishu.Message, label func(string) string, prof *profile.Profile) (query string, showAll bool) {
+	if llmClient == nil {
+		return msg.Content, false // fallback: search the raw message
+	}
+	var ctxLines []string
+	for _, m := range recentMsgs {
+		ctxLines = append(ctxLines, fmt.Sprintf("[%s] %s: %s", m.Time, label(m.Sender), safety.SanitizeForLLM(m.Content)))
+	}
+	prompt := fmt.Sprintf(`用户在飞书聊天里找图片。根据近期对话理解用户最新这条消息想找什么，只返回 JSON：{"query":"关键词","show_all":true/false}。
+- query：用于图片库检索的关键词（如 美食/蚊子/小区/截图/聊天记录），要结合上下文解析"再/那张/全部/另一张"等指代；如果最新消息明显不是找图片，query 为空字符串。
+- show_all：用户要看全部相关图片（"全部/都看看/都要/都发"）时为 true，否则 false。
+
+近期对话：
+%s
+
+用户最新消息：%s`, strings.Join(ctxLines, "\n"), safety.SanitizeForLLM(msg.Content))
+	reply, err := llmClient.Chat(ctx, []llm.Message{
+		{Role: "system", Content: buildSystemPrompt(prof)},
+		{Role: "user", Content: prompt},
+	}, llm.WithTemperature(0), llm.WithMaxTokens(120))
+	if err != nil {
+		log.Printf("[图片记忆] 查询理解失败: %v", err)
+		return msg.Content, false
+	}
+	m := regexp.MustCompile(`\{.*\}`).FindString(reply)
+	if m == "" {
+		return msg.Content, false
+	}
+	var parsed struct {
+		Query   string `json:"query"`
+		ShowAll bool   `json:"show_all"`
+	}
+	if err := json.Unmarshal([]byte(m), &parsed); err != nil {
+		return msg.Content, false
+	}
+	return strings.TrimSpace(parsed.Query), parsed.ShowAll
+}
+
+// sendOneMediaImage uploads and sends one image, replying to the message when
+// possible, logging (not returning) upload errors.
+func sendOneMediaImage(ctx stdctx.Context, fs *feishu.Client, msg feishu.Message, path string) {
+	if msg.MessageID != "" {
+		if err := fs.ReplyImage(ctx, path, msg.MessageID); err != nil {
+			log.Printf("[图片记忆] 发送图片失败: %v", err)
+		}
+	} else if _, err := fs.SendImage(ctx, path, msg.ChatID); err != nil {
+		log.Printf("[图片记忆] 发送图片失败: %v", err)
+	}
 }
 
 func main() {
@@ -642,6 +1062,10 @@ func runBotMode() {
 	var memStore memory.MemoryStore
 	var err error
 	if cfg.MemoryEnabled {
+		var embedder memory.Embedder
+		if cfg.OllamaModel != "" {
+			embedder = memory.NewOllamaEmbedder(cfg.OllamaBaseURL, cfg.OllamaModel)
+		}
 		if cfg.MemoryDatabaseDSN != "" {
 			memStore, err = memory.NewDatabaseStore(memory.DatabaseOptions{
 				DSN:                   cfg.MemoryDatabaseDSN,
@@ -660,16 +1084,19 @@ func runBotMode() {
 				MediaSenderColumn:     cfg.MemoryMediaSenderColumn,
 				MediaFilePathColumn:   cfg.MemoryMediaFilePathColumn,
 				MediaMsgIDColumn:      cfg.MemoryMediaMsgIDColumn,
+				Embedder:              embedder,
 			})
 			if err != nil {
 				log.Printf("初始化数据库记忆库失败: %v", err)
 			} else {
-				log.Printf("[记忆] 使用 OceanBase/MySQL: profile=%s include_chat_archive=%v include_media_archive=%v", cfg.ProfileID, cfg.MemoryIncludeChatArchive, cfg.MemoryIncludeMediaArchive)
+				if embedder != nil {
+					log.Printf("[记忆] 使用 OceanBase/MySQL + Ollama hybrid retrieval: profile=%s include_chat_archive=%v include_media_archive=%v embed=%s/%s", cfg.ProfileID, cfg.MemoryIncludeChatArchive, cfg.MemoryIncludeMediaArchive, cfg.OllamaBaseURL, cfg.OllamaModel)
+				} else {
+					log.Printf("[记忆] 使用 OceanBase/MySQL: profile=%s include_chat_archive=%v include_media_archive=%v", cfg.ProfileID, cfg.MemoryIncludeChatArchive, cfg.MemoryIncludeMediaArchive)
+				}
 			}
 		} else {
-			var embedder memory.Embedder
-			if cfg.OllamaModel != "" {
-				embedder = memory.NewOllamaEmbedder(cfg.OllamaBaseURL, cfg.OllamaModel)
+			if embedder != nil {
 				log.Printf("[记忆] 使用 Ollama embedding: %s/%s", cfg.OllamaBaseURL, cfg.OllamaModel)
 			} else {
 				embedder = &memory.HashEmbedder{}
@@ -685,6 +1112,7 @@ func runBotMode() {
 	llmClient := llm.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
 	fsClient := feishu.NewClient(cfg.FeishuAppID, cfg.FeishuAppSecret, cfg.FeishuBotOpenID)
 	fsClient.SetOwnerOpenID(cfg.FeishuOwnerOpenID)
+	fsClient.SetTargetOpenID(cfg.FeishuTargetOpenID)
 	ghClient := github.NewClient(cfg.GitHubUsername, cfg.GitHubToken)
 
 	// Load persistent state for GitHub polling idempotency
@@ -718,6 +1146,7 @@ func runBotMode() {
 			onMessageReceived(ctx, cfg, prof, memStore, llmClient, fsClient, msg)
 		},
 		OnPassiveMsg: func(msg feishu.Message) {
+			convoState.UpdateMessage(msg, audienceForSender(cfg, prof, msg))
 			passiveAssistant.OnMessage(msg)
 		},
 		OnCardAction: func(action feishu.CardAction) string {
@@ -989,7 +1418,9 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	trace := latency.NewTrace("chat_reply")
 	defer trace.Log()
 
-	log.Printf("[收到消息] %s: %s", msg.Sender, msg.Content)
+	audience := audienceForSender(cfg, prof, msg)
+	initialLabel := senderLabel(cfg, prof, fs, msg.Sender)
+	log.Printf("[收到消息] sender=%s label=%s audience=%s is_owner=%v mentioned=%v: %s", msg.Sender, initialLabel, audience, msg.IsOwner, msg.IsMentioned, msg.Content)
 
 	// Idempotency: Feishu redelivers a message if the handler is slow to ACK
 	// (e.g. LLM + image upload takes a few seconds). Skip redeliveries we've
@@ -998,15 +1429,41 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 		log.Printf("[收到消息] 跳过重复投递: %s", msg.MessageID)
 		return
 	}
+	st := convoState.UpdateMessage(msg, audience)
+	passiveAssistant.OnMessage(msg)
 
-	// Add thinking reaction
+	// Classify explicit intents only for private chats and @-mentions.
+	// Passive group messages are judged by DeepSeek in planReply.
+	intent := IntentNone
+	if msg.ChatType != "group" || msg.IsMentioned {
+		intent = classifyIntent(msg.Content)
+	}
+
+	// @/private follow-ups after an image search can still route to the media
+	// handler, which reads conversation context to resolve the reference.
+	if (msg.ChatType != "group" || msg.IsMentioned) && intent == IntentNone && recentMediaSearch(msg.ChatID) && hasMediaFollowupWord(msg.Content) {
+		intent = IntentMedia
+	}
+
+	label := func(openid string) string {
+		return senderLabel(cfg, prof, fs, openid)
+	}
+	currentSender := label(msg.Sender)
+	plan := planReply(ctx, llmClient, msg, intent, *st, prof, currentSender)
+	log.Printf("[回复决策] reply=%v memory=%v media=%v style=%s max_tokens=%d reason=%s", plan.ShouldReply, plan.UseMemory, plan.UseMedia, plan.ReplyStyle, plan.MaxTokens, plan.Reason)
+	if !plan.ShouldReply {
+		return
+	}
+	if intent == IntentNone && plan.UseMedia {
+		intent = IntentMedia
+	}
+
+	// Add thinking reaction only after deciding to reply. Passive group
+	// messages that are observed but not answered should stay invisible.
 	var thinkReactID string
 	if msg.MessageID != "" {
 		thinkReactID, _ = fs.AddReaction(ctx, msg.MessageID, "THINKING")
 	}
-
-	// Classify intent
-	intent := classifyIntent(msg.Content)
 
 	// Handle intent-based tools first
 	switch intent {
@@ -1017,7 +1474,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 		handleHealthIntent(ctx, cfg, fs, msg, thinkReactID)
 		return
 	case IntentMemoryAudit:
-		handleMemoryAuditIntent(ctx, cfg, mem, fs, msg, thinkReactID)
+		handleMemoryAuditIntent(ctx, cfg, prof, mem, fs, msg, thinkReactID)
 		return
 	case IntentSearch:
 		handleSearchIntent(ctx, cfg, fs, msg, thinkReactID, llmClient, prof)
@@ -1032,22 +1489,21 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 
 	// Read recent messages for context
 	trace.Span("read_messages")
-	recentMsgs, _ := fs.ListMessages(ctx, msg.ChatID, 20)
+	recentMsgs, _ := fs.ListMessages(ctx, msg.ChatID, 100)
 
 	// Search relevant memories
 	var memories []string
-	if mem != nil {
+	if mem != nil && plan.UseMemory {
 		trace.Span("search_memory")
-		audience := audienceForMessage(msg)
 		memories = mem.Search(msg.Content, audience)
 		if len(memories) > 0 {
-			log.Printf("[记忆] 找到 %d 条相关记忆", len(memories))
+			log.Printf("[记忆] audience=%s 找到 %d 条相关记忆", audience, len(memories))
 		}
 	}
 
 	// Build prompt and call LLM
-	budget := ctxmgr.NewBudget(4000)
-	llmMsgs := buildChatMessages(prof, recentMsgs, memories, "", budget)
+	budget := ctxmgr.NewBudget(16000)
+	llmMsgs := buildChatMessages(prof, msg.Content, currentSender, msg.MessageID, recentMsgs, memories, replyStyleInstruction(plan, *st), budget, label)
 
 	trace.Span("deepseek_call")
 
@@ -1057,11 +1513,11 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 
 	if cfg.StreamingReplyEnabled && msg.ChatType != "group" {
 		// CardKit streaming reply for private chats
-		reply, err = streamingReply(ctx, llmClient, llmMsgs, fs, msg, cfg.StreamingReplyUpdateInterval)
+		reply, err = streamingReply(ctx, llmClient, llmMsgs, fs, msg, cfg.StreamingReplyUpdateInterval, plan.MaxTokens)
 		streamed = true
 	} else {
 		// Non-streaming for group chats
-		reply, err = llmClient.Chat(ctx, llmMsgs, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
+		reply, err = llmClient.Chat(ctx, llmMsgs, llm.WithTemperature(0.7), llm.WithMaxTokens(plan.MaxTokens))
 	}
 
 	if err != nil {
@@ -1089,6 +1545,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 			fs.SendText(ctx, reply, msg.ChatID)
 		}
 	}
+	convoState.MarkBotReply(msg.ChatID)
 
 	// Cleanup thinking reaction and add content emoji
 	cleanupReaction(ctx, fs, msg, thinkReactID)
@@ -1097,7 +1554,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	}
 
 	// Memory confirmation check
-	if cfg.MemoryConfirmationEnabled && mem != nil {
+	if cfg.MemoryConfirmationEnabled && mem != nil && audience != "other" {
 		shouldRemember, candidate := shouldRememberViaLLM(ctx, msg.Content, msg.IsOwner, prof, llmClient)
 		if shouldRemember && candidate != "" {
 			saveMemoryCandidate(ctx, cfg, fs, mem, candidate, msg.MessageID)
@@ -1145,6 +1602,7 @@ func handleGitHubIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 	}
 	cleanupReaction(ctx, fs, msg, reactID)
 	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	convoState.MarkBotReply(msg.ChatID)
 }
 
 func handleHealthIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message, reactID string) {
@@ -1156,13 +1614,11 @@ func handleHealthIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 	}
 	cleanupReaction(ctx, fs, msg, reactID)
 	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	convoState.MarkBotReply(msg.ChatID)
 }
 
-func handleMemoryAuditIntent(ctx stdctx.Context, cfg *config.Config, mem memory.MemoryStore, fs *feishu.Client, msg feishu.Message, reactID string) {
-	audience := "owner"
-	if msg.IsOwner {
-		audience = "target"
-	}
+func handleMemoryAuditIntent(ctx stdctx.Context, cfg *config.Config, prof *profile.Profile, mem memory.MemoryStore, fs *feishu.Client, msg feishu.Message, reactID string) {
+	audience := audienceForSender(cfg, prof, msg)
 	card := buildMemoryAuditCard(mem, audience)
 	if msg.MessageID != "" {
 		fs.ReplyCard(ctx, card, msg.MessageID)
@@ -1171,6 +1627,7 @@ func handleMemoryAuditIntent(ctx stdctx.Context, cfg *config.Config, mem memory.
 	}
 	cleanupReaction(ctx, fs, msg, reactID)
 	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	convoState.MarkBotReply(msg.ChatID)
 }
 
 func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.MemoryStore, fs *feishu.Client, msg feishu.Message, reactID string, llmClient *llm.Client, prof *profile.Profile) {
@@ -1182,21 +1639,46 @@ func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.Memory
 		return
 	}
 
-	results := searcher.SearchMedia(msg.Content, audienceForMessage(msg), 3)
-	log.Printf("[图片记忆] 查询=%q audience=%s 命中=%d", msg.Content, audienceForMessage(msg), len(results))
-	if len(results) == 0 {
-		fs.ReplyText(ctx, "我在图片记忆里还没翻到相关内容。可以换个更具体的词，比如地点、截图里的文字、物品或大概时间。", msg.MessageID)
+	audience := audienceForSender(cfg, prof, msg)
+	label := func(openid string) string {
+		return senderLabel(cfg, prof, fs, openid)
+	}
+
+	// Understand the request in conversation context: resolves "再/那张/全部"
+	// references and detects "show all", so follow-ups work.
+	recentMsgs, _ := fs.ListMessages(ctx, msg.ChatID, 100)
+	query, showAll := interpretMediaRequest(ctx, llmClient, msg, recentMsgs, label, prof)
+	log.Printf("[图片记忆] 理解查询=%q showAll=%v audience=%s 原文=%q", query, showAll, audience, msg.Content)
+	if query == "" {
+		fs.ReplyText(ctx, "我没太明白要找哪张图，可以说具体点：地点、物品、截图里的字，或大概时间。", msg.MessageID)
 		cleanupReaction(ctx, fs, msg, reactID)
 		fs.AddReaction(ctx, msg.MessageID, "DONE")
 		return
 	}
 
-	reply, pickIdx := summarizeMediaResults(ctx, llmClient, msg.Content, results, prof)
+	limit := 3
+	if showAll {
+		limit = 8
+	}
+	results := searcher.SearchMedia(query, audience, limit)
+	noteMediaSearch(msg.ChatID)
+	convoState.MarkMediaSearch(msg.ChatID, query)
+	log.Printf("[图片记忆] 查询=%q 命中=%d", query, len(results))
+	if len(results) == 0 {
+		fs.ReplyText(ctx, fmt.Sprintf("图片记忆里没翻到跟“%s”相关的内容，换个词试试？", query), msg.MessageID)
+		cleanupReaction(ctx, fs, msg, reactID)
+		fs.AddReaction(ctx, msg.MessageID, "DONE")
+		return
+	}
+
+	reply, pickIdx := summarizeMediaResults(ctx, llmClient, query, results, prof)
 	if reply == "" {
 		reply = fallbackMediaSummary(results)
 		pickIdx = 0
 	}
-	if len(results) > 1 {
+	if showAll {
+		reply += fmt.Sprintf("\n（共 %d 张，我都发出来。）", len(results))
+	} else if len(results) > 1 {
 		reply += fmt.Sprintf("\n（还有 %d 张相关的，要看全部就说一声。）", len(results)-1)
 	}
 	log.Printf("[图片记忆] 回复: %q", reply)
@@ -1211,41 +1693,59 @@ func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.Memory
 	}
 
 	if cfg.MemoryMediaSendImage {
-		// Try the LLM-picked image first; fall back to the others if it's
-		// missing or not a decodable image.
-		order := make([]int, 0, len(results))
-		order = append(order, pickIdx)
-		for i := range results {
-			if i != pickIdx {
-				order = append(order, i)
-			}
-		}
-		for _, idx := range order {
-			result := results[idx]
-			if result.FilePath == "" {
-				continue
-			}
-			if _, err := os.Stat(result.FilePath); err != nil {
-				log.Printf("[图片记忆] 文件不存在: %s: %v", result.FilePath, err)
-				continue
-			}
-			if !isLikelyImage(result.FilePath) {
-				log.Printf("[图片记忆] 跳过非图片/坏图文件: %s", result.FilePath)
-				continue
-			}
-			if msg.MessageID != "" {
-				if err := fs.ReplyImage(ctx, result.FilePath, msg.MessageID); err != nil {
-					log.Printf("[图片记忆] 发送图片失败: %v", err)
+		if showAll {
+			// Send up to 5 valid images.
+			sent := 0
+			for _, result := range results {
+				if sent >= 5 {
+					break
 				}
-			} else if _, err := fs.SendImage(ctx, result.FilePath, msg.ChatID); err != nil {
-				log.Printf("[图片记忆] 发送图片失败: %v", err)
+				if result.FilePath == "" {
+					continue
+				}
+				if _, err := os.Stat(result.FilePath); err != nil {
+					log.Printf("[图片记忆] 文件不存在: %s: %v", result.FilePath, err)
+					continue
+				}
+				if !isLikelyImage(result.FilePath) {
+					log.Printf("[图片记忆] 跳过非图片/坏图文件: %s", result.FilePath)
+					continue
+				}
+				sendOneMediaImage(ctx, fs, msg, result.FilePath)
+				sent++
 			}
-			break
+		} else {
+			// Send the LLM-picked image first; fall back to the others if it's
+			// missing or not a decodable image.
+			order := make([]int, 0, len(results))
+			order = append(order, pickIdx)
+			for i := range results {
+				if i != pickIdx {
+					order = append(order, i)
+				}
+			}
+			for _, idx := range order {
+				result := results[idx]
+				if result.FilePath == "" {
+					continue
+				}
+				if _, err := os.Stat(result.FilePath); err != nil {
+					log.Printf("[图片记忆] 文件不存在: %s: %v", result.FilePath, err)
+					continue
+				}
+				if !isLikelyImage(result.FilePath) {
+					log.Printf("[图片记忆] 跳过非图片/坏图文件: %s", result.FilePath)
+					continue
+				}
+				sendOneMediaImage(ctx, fs, msg, result.FilePath)
+				break
+			}
 		}
 	}
 
 	cleanupReaction(ctx, fs, msg, reactID)
 	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	convoState.MarkBotReply(msg.ChatID)
 }
 
 // isLikelyImage reports whether the file starts with a recognized image magic
@@ -1352,6 +1852,7 @@ func handleSearchIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 	}
 	cleanupReaction(ctx, fs, msg, reactID)
 	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	convoState.MarkBotReply(msg.ChatID)
 }
 
 func handleStatusIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message, reactID string, llmClient *llm.Client, prof *profile.Profile) {
@@ -1366,19 +1867,13 @@ func handleStatusIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 	}
 	cleanupReaction(ctx, fs, msg, reactID)
 	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	convoState.MarkBotReply(msg.ChatID)
 }
 
 func cleanupReaction(ctx stdctx.Context, fs *feishu.Client, msg feishu.Message, reactID string) {
 	if reactID != "" && msg.MessageID != "" {
 		fs.DeleteReaction(ctx, msg.MessageID, reactID)
 	}
-}
-
-func audienceForMessage(msg feishu.Message) string {
-	if msg.IsOwner {
-		return "owner"
-	}
-	return "target"
 }
 
 func saveMemoryCandidate(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, mem memory.MemoryStore, content, replyToMsgID string) {

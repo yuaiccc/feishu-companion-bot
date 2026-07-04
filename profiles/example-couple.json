@@ -5,6 +5,29 @@
   "bot_name": "小宝",
   "owner_name": "小明",
   "target_name": "小红",
+  "members": [
+    {
+      "open_id": "ou_owner_xxx",
+      "name": "小明",
+      "role": "owner",
+      "relation": "机器人主人",
+      "aliases": ["明明"]
+    },
+    {
+      "open_id": "ou_target_xxx",
+      "name": "小红",
+      "role": "target",
+      "relation": "owner 的伴侣",
+      "aliases": ["红红"]
+    },
+    {
+      "open_id": "ou_friend_xxx",
+      "name": "朋友A",
+      "role": "friend",
+      "relation": "普通群友",
+      "aliases": []
+    }
+  ],
   "memory_keywords": [
     "生日", "纪念日", "喜好", "忌口", "过敏", "日程"
   ],

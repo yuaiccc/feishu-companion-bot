@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -78,13 +79,37 @@ func (c *Client) SetOwnerOpenID(openID string) {
 	c.ownerOpenID = openID
 }
 
+// LabelSender maps a sender open_id to a readable name for conversation
+// context, so the LLM sees "三哥: ..." / "小弟: ..." instead of opaque open_ids.
+// Unknown users stay "对方"; only targetOpenID is labeled as the configured
+// target, preventing the bot from mistaking owner/other users for the target.
+func (c *Client) LabelSender(openid, ownerName, botName, targetName string) string {
+	switch openid {
+	case c.ownerOpenID:
+		return ownerName
+	case c.botOpenID:
+		if botName != "" {
+			return botName
+		}
+		return "小弟"
+	case c.targetOpenID:
+		if targetName != "" {
+			return targetName
+		}
+	}
+	return "对方"
+}
+
 // SetTargetOpenID sets the target's OpenID.
 func (c *Client) SetTargetOpenID(openID string) {
 	c.targetOpenID = openID
 }
 
 func (c *Client) refreshToken(ctx context.Context) error {
-	if c.token != "" && time.Since(c.tokenTime) < 2*time.Hour {
+	// Feishu tenant_access_token expires at 2h. Refresh a bit early (110m) so a
+	// request doesn't slip through in the expiry window with an about-to-expire
+	// token (which Feishu rejects with 99991663).
+	if c.token != "" && time.Since(c.tokenTime) < 110*time.Minute {
 		return nil
 	}
 	body, _ := json.Marshal(map[string]string{"app_id": c.appID, "app_secret": c.appSecret})
@@ -119,46 +144,59 @@ func (c *Client) refreshToken(ctx context.Context) error {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body interface{}) (json.RawMessage, error) {
-	if err := c.refreshToken(ctx); err != nil {
-		return nil, err
-	}
-	var reqBody io.Reader
+	var marshaled []byte
 	if body != nil {
-		data, _ := json.Marshal(body)
-		reqBody = bytes.NewReader(data)
+		marshaled, _ = json.Marshal(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method,
-		"https://open.feishu.cn/open-apis"+path, reqBody)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	var result struct {
-		Code int             `json:"code"`
-		Msg  string          `json:"msg"`
-		Data json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("parse response: %v", data)
-	}
-	if result.Code != 0 {
-		snippet := string(data)
-		if len(snippet) > 800 {
-			snippet = snippet[:800]
+	// Retry once on 99991663 (token rejected as invalid/expired): force a
+	// refresh and re-send. Covers the 2h expiry edge and external invalidation.
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := c.refreshToken(ctx); err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("api %d: %s (resp: %s)", result.Code, result.Msg, snippet)
+		var reqBody io.Reader
+		if marshaled != nil {
+			reqBody = bytes.NewReader(marshaled)
+		}
+		req, err := http.NewRequestWithContext(ctx, method,
+			"https://open.feishu.cn/open-apis"+path, reqBody)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.httpCli.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			Code int             `json:"code"`
+			Msg  string          `json:"msg"`
+			Data json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(data, &result); err != nil {
+			return nil, fmt.Errorf("parse response: %v", data)
+		}
+		if result.Code == 99991663 && attempt == 0 {
+			c.token = ""
+			c.tokenTime = time.Time{}
+			continue
+		}
+		if result.Code != 0 {
+			snippet := string(data)
+			if len(snippet) > 800 {
+				snippet = snippet[:800]
+			}
+			return nil, fmt.Errorf("api %d: %s (resp: %s)", result.Code, result.Msg, snippet)
+		}
+		return result.Data, nil
 	}
-	return result.Data, nil
+	return nil, fmt.Errorf("api 99991663: token still invalid after retry")
 }
 
 // ---- Messaging APIs ----
@@ -330,59 +368,89 @@ func (c *Client) DeleteReaction(ctx context.Context, messageID, reactionID strin
 
 func (c *Client) ListMessages(ctx context.Context, chatID string, limit int) ([]Message, error) {
 	if limit <= 0 {
-		limit = 20
-	}
-	if limit > 50 {
 		limit = 50
 	}
-	respData, err := c.do(ctx, "GET",
-		fmt.Sprintf("/im/v1/messages?container_id_type=chat&container_id=%s&sort_type=ByCreateTimeDesc&page_size=%d", chatID, limit),
-		nil)
-	if err != nil {
-		return nil, err
-	}
-	var result struct {
-		Items []struct {
-			MessageID  string `json:"message_id"`
-			CreateTime string `json:"create_time"`
-			MsgType    string `json:"msg_type"`
-			Body       struct {
-				Content string `json:"content"`
-			} `json:"body"`
-			Sender struct {
-				SenderID struct {
-					OpenID string `json:"open_id"`
-				} `json:"sender_id"`
-				SenderType string `json:"sender_type"`
-			} `json:"sender"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(respData, &result); err != nil {
-		return nil, err
-	}
-
 	var out []Message
-	for _, item := range result.Items {
-		if item.Sender.SenderType != "user" {
-			continue
+	pageToken := ""
+	for len(out) < limit {
+		pageSize := limit - len(out)
+		if pageSize > 50 {
+			pageSize = 50 // Feishu caps page_size at 50
 		}
-		content := ExtractText(item.MsgType, item.Body.Content)
-		if content == "" {
-			continue
+		path := fmt.Sprintf("/im/v1/messages?container_id_type=chat&container_id=%s&sort_type=ByCreateTimeDesc&page_size=%d", chatID, pageSize)
+		if pageToken != "" {
+			path += "&page_token=" + url.QueryEscape(pageToken)
 		}
-		content = CleanHistoryText(content)
-		if content == "" {
-			continue
+		respData, err := c.do(ctx, "GET", path, nil)
+		if err != nil {
+			if len(out) > 0 {
+				return out, nil // return what we have if a later page fails
+			}
+			return nil, err
 		}
-		senderID := item.Sender.SenderID.OpenID
-		out = append(out, Message{
-			MessageID: item.MessageID,
-			Time:      FormatTime(item.CreateTime),
-			Content:   content,
-			Sender:    senderID,
-			IsOwner:   senderID == c.ownerOpenID,
-			ChatID:    chatID,
-		})
+		var result struct {
+			Items []struct {
+				MessageID  string `json:"message_id"`
+				CreateTime string `json:"create_time"`
+				MsgType    string `json:"msg_type"`
+				Body       struct {
+					Content string `json:"content"`
+				} `json:"body"`
+				Sender struct {
+					ID         string `json:"id"`
+					IDType     string `json:"id_type"`
+					SenderType string `json:"sender_type"`
+				} `json:"sender"`
+			} `json:"items"`
+			HasMore   bool   `json:"has_more"`
+			PageToken string `json:"page_token"`
+		}
+		if err := json.Unmarshal(respData, &result); err != nil {
+			if len(out) > 0 {
+				return out, nil
+			}
+			return nil, err
+		}
+		for _, item := range result.Items {
+			if len(out) >= limit {
+				break
+			}
+			// Recalled messages carry no original text, but "someone sent then
+			// recalled a message" is itself context — keep a placeholder instead
+			// of dropping the turn entirely.
+			var content string
+			if strings.Contains(item.Body.Content, "This message was recalled") || strings.Contains(item.Body.Content, "消息已被撤回") {
+				content = "（消息已撤回）"
+			} else {
+				content = ExtractText(item.MsgType, item.Body.Content)
+				if content == "" {
+					continue
+				}
+				content = CleanHistoryText(content)
+				if content == "" {
+					continue
+				}
+			}
+			// Feishu identifies the bot's own messages as sender_type=app with
+			// sender.id = the app_id; map those onto the bot's open_id so callers
+			// can label them as the bot (小弟) instead of an unknown sender.
+			senderID := item.Sender.ID
+			if item.Sender.SenderType == "app" {
+				senderID = c.botOpenID
+			}
+			out = append(out, Message{
+				MessageID: item.MessageID,
+				Time:      FormatTime(item.CreateTime),
+				Content:   content,
+				Sender:    senderID,
+				IsOwner:   senderID == c.ownerOpenID,
+				ChatID:    chatID,
+			})
+		}
+		if !result.HasMore || result.PageToken == "" {
+			break
+		}
+		pageToken = result.PageToken
 	}
 	return out, nil
 }
@@ -400,14 +468,6 @@ func (c *Client) StartListening(ctx context.Context, handlers Handlers) error {
 	d.OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 		msg, ok := adaptMessageEvent(event, c)
 		if !ok {
-			return nil
-		}
-		// In groups the bot only acts when @-mentioned; otherwise the message
-		// is passive context (used for activity tracking).
-		if msg.ChatType == "group" && !msg.IsMentioned {
-			if handlers.OnPassiveMsg != nil {
-				handlers.OnPassiveMsg(msg)
-			}
 			return nil
 		}
 		if handlers.OnMessage != nil {

@@ -12,12 +12,13 @@ import (
 
 type Config struct {
 	// Feishu
-	FeishuAppID       string
-	FeishuAppSecret   string
-	FeishuChatID      string
-	FeishuBotOpenID   string
-	FeishuOwnerOpenID string
-	FeishuReadMsg     bool
+	FeishuAppID        string
+	FeishuAppSecret    string
+	FeishuChatID       string
+	FeishuBotOpenID    string
+	FeishuOwnerOpenID  string
+	FeishuTargetOpenID string
+	FeishuReadMsg      bool
 
 	// DeepSeek
 	DeepSeekAPIKey  string
@@ -90,19 +91,20 @@ type Config struct {
 func Load() *Config {
 	loadDotEnv(".env")
 	c := &Config{
-		FeishuAppID:       getEnv("FEISHU_APP_ID", ""),
-		FeishuAppSecret:   getEnv("FEISHU_APP_SECRET", ""),
-		FeishuChatID:      getEnv("FEISHU_CHAT_ID", ""),
-		FeishuBotOpenID:   getEnv("FEISHU_BOT_OPEN_ID", ""),
-		FeishuOwnerOpenID: getEnv("FEISHU_OWNER_OPEN_ID", ""),
-		FeishuReadMsg:     getEnvBool("FEISHU_READ_MESSAGES", true),
+		FeishuAppID:        getEnv("FEISHU_APP_ID", ""),
+		FeishuAppSecret:    getEnv("FEISHU_APP_SECRET", ""),
+		FeishuChatID:       getEnv("FEISHU_CHAT_ID", ""),
+		FeishuBotOpenID:    getEnv("FEISHU_BOT_OPEN_ID", ""),
+		FeishuOwnerOpenID:  getEnv("FEISHU_OWNER_OPEN_ID", ""),
+		FeishuTargetOpenID: getEnv("FEISHU_TARGET_OPEN_ID", ""),
+		FeishuReadMsg:      getEnvBool("FEISHU_READ_MESSAGES", true),
 
 		DeepSeekAPIKey:  getEnv("DEEPSEEK_API_KEY", ""),
 		DeepSeekBaseURL: getEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 		DeepSeekModel:   getEnv("DEEPSEEK_MODEL", "deepseek-chat"),
 
-		OllamaBaseURL: getEnv("OLLAMA_BASE_URL", "http://localhost:11434"),
-		OllamaModel:   getEnv("OLLAMA_MODEL", "nomic-embed-text"),
+		OllamaBaseURL: getEnv("OLLAMA_BASE_URL", getEnv("MEMORY_OLLAMA_BASE_URL", "http://localhost:11434")),
+		OllamaModel:   getEnv("OLLAMA_MODEL", getEnv("MEMORY_OLLAMA_EMBED_MODEL", "nomic-embed-text")),
 
 		GitHubUsername: getEnv("GH_USERNAME", getEnv("GITHUB_USERNAME", "")),
 		GitHubToken:    getEnv("GH_TOKEN", getEnv("GITHUB_TOKEN", "")),

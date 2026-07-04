@@ -53,12 +53,29 @@ func main() {
 }
 
 func openMemoryStore(cfg *config.Config) (memory.MemoryStore, error) {
+	var embedder memory.Embedder
+	if cfg.OllamaModel != "" {
+		embedder = memory.NewOllamaEmbedder(cfg.OllamaBaseURL, cfg.OllamaModel)
+	}
 	if cfg.MemoryDatabaseDSN != "" {
 		return memory.NewDatabaseStore(memory.DatabaseOptions{
-			DSN:                cfg.MemoryDatabaseDSN,
-			ProfileID:          cfg.ProfileID,
-			IncludeChatArchive: cfg.MemoryIncludeChatArchive,
-			ChatVisibility:     memory.Visibility(cfg.MemoryChatVisibility),
+			DSN:                   cfg.MemoryDatabaseDSN,
+			ProfileID:             cfg.ProfileID,
+			IncludeChatArchive:    cfg.MemoryIncludeChatArchive,
+			ChatVisibility:        memory.Visibility(cfg.MemoryChatVisibility),
+			ChatArchiveTable:      cfg.MemoryChatArchiveTable,
+			ChatArchiveTextColumn: cfg.MemoryChatArchiveTextColumn,
+			ChatArchiveTimeColumn: cfg.MemoryChatArchiveTimeColumn,
+			IncludeMediaArchive:   cfg.MemoryIncludeMediaArchive,
+			MediaVisibility:       memory.Visibility(cfg.MemoryMediaVisibility),
+			MediaArchiveTable:     cfg.MemoryMediaArchiveTable,
+			MediaOCRColumn:        cfg.MemoryMediaOCRColumn,
+			MediaCaptionColumn:    cfg.MemoryMediaCaptionColumn,
+			MediaTimeColumn:       cfg.MemoryMediaTimeColumn,
+			MediaSenderColumn:     cfg.MemoryMediaSenderColumn,
+			MediaFilePathColumn:   cfg.MemoryMediaFilePathColumn,
+			MediaMsgIDColumn:      cfg.MemoryMediaMsgIDColumn,
+			Embedder:              embedder,
 		})
 	}
 	return memory.NewStore(cfg.ProfileID, "memory_data")

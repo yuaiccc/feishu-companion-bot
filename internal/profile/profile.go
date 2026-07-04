@@ -2,19 +2,30 @@ package profile
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
+type Member struct {
+	OpenID   string   `json:"open_id"`
+	Name     string   `json:"name"`
+	Role     string   `json:"role"`
+	Relation string   `json:"relation"`
+	Aliases  []string `json:"aliases"`
+}
+
 type Profile struct {
-	ID          string                 `json:"id"`
-	Name        string                 `json:"name"`
-	BotRole     string                 `json:"bot_role"`
-	BotName     string                 `json:"bot_name"`
-	OwnerName   string                 `json:"owner_name"`
-	TargetName  string                 `json:"target_name"`
-	MemoryKeywords []string            `json:"memory_keywords"`
-	Config      map[string]interface{} `json:"config"`
+	ID             string                 `json:"id"`
+	Name           string                 `json:"name"`
+	BotRole        string                 `json:"bot_role"`
+	BotName        string                 `json:"bot_name"`
+	OwnerName      string                 `json:"owner_name"`
+	TargetName     string                 `json:"target_name"`
+	Members        []Member               `json:"members"`
+	MemoryKeywords []string               `json:"memory_keywords"`
+	Config         map[string]interface{} `json:"config"`
 }
 
 func Load(profileID string, profilesDir string) (*Profile, error) {
@@ -55,4 +66,63 @@ func (p *Profile) TargetDisplay() string {
 
 func (p *Profile) TargetAddressingHint() string {
 	return ""
+}
+
+func (m Member) DisplayName() string {
+	name := strings.TrimSpace(m.Name)
+	if name != "" {
+		return name
+	}
+	if len(m.Aliases) > 0 {
+		return strings.TrimSpace(m.Aliases[0])
+	}
+	return "对方"
+}
+
+func (p *Profile) MemberByOpenID(openID string) (Member, bool) {
+	openID = strings.TrimSpace(openID)
+	if openID == "" {
+		return Member{}, false
+	}
+	for _, member := range p.Members {
+		if strings.TrimSpace(member.OpenID) == openID {
+			return member, true
+		}
+	}
+	return Member{}, false
+}
+
+func (p *Profile) MemberRole(openID string) string {
+	member, ok := p.MemberByOpenID(openID)
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(member.Role))
+}
+
+func (p *Profile) IdentityRoster() string {
+	var lines []string
+	if owner := p.OwnerDisplay(); owner != "" {
+		lines = append(lines, fmt.Sprintf("- owner：%s", owner))
+	}
+	if target := p.TargetDisplay(); target != "" {
+		lines = append(lines, fmt.Sprintf("- target：%s", target))
+	}
+	for _, member := range p.Members {
+		name := member.DisplayName()
+		role := strings.TrimSpace(member.Role)
+		if name == "" || role == "" {
+			continue
+		}
+		relation := strings.TrimSpace(member.Relation)
+		if relation != "" {
+			lines = append(lines, fmt.Sprintf("- %s：%s（%s）", role, name, relation))
+		} else {
+			lines = append(lines, fmt.Sprintf("- %s：%s", role, name))
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }

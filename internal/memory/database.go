@@ -3,6 +3,7 @@ package memory
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ type DatabaseOptions struct {
 	MediaSenderColumn     string
 	MediaFilePathColumn   string
 	MediaMsgIDColumn      string
+	Embedder              Embedder
 }
 
 type DatabaseStore struct {
@@ -46,6 +48,7 @@ type DatabaseStore struct {
 	mediaSenderColumn     string
 	mediaFilePathColumn   string
 	mediaMsgIDColumn      string
+	embedder              Embedder
 }
 
 func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
@@ -119,6 +122,7 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 		mediaSenderColumn:     opts.MediaSenderColumn,
 		mediaFilePathColumn:   opts.MediaFilePathColumn,
 		mediaMsgIDColumn:      opts.MediaMsgIDColumn,
+		embedder:              opts.Embedder,
 	}
 	if err := store.ensureSchema(); err != nil {
 		db.Close()
@@ -203,7 +207,11 @@ ORDER BY created_at DESC`, s.profileID)
 func (s *DatabaseStore) Search(query string, audience string) []string {
 	results := s.searchBotMemories(query, audience, 5)
 	if s.includeChatArchive && s.chatVisibleTo(audience) {
-		results = append(results, s.searchChatArchive(query, 5)...)
+		if vec, ok := s.queryVectorLiteral(query); ok {
+			results = append(results, s.searchChatArchiveHybrid(query, vec, 5)...)
+		} else {
+			results = append(results, s.searchChatArchive(query, 5)...)
+		}
 	}
 	if s.includeMediaArchive && s.mediaVisibleTo(audience) {
 		for _, media := range s.SearchMedia(query, audience, 3) {
@@ -214,6 +222,32 @@ func (s *DatabaseStore) Search(query string, audience string) []string {
 		return results[:8]
 	}
 	return results
+}
+
+func (s *DatabaseStore) queryVectorLiteral(query string) (string, bool) {
+	query = strings.TrimSpace(query)
+	if query == "" || s.embedder == nil {
+		return "", false
+	}
+	vec, err := s.embedder.Embed(query)
+	if err != nil || len(vec) == 0 {
+		return "", false
+	}
+	return vectorLiteral(vec), true
+}
+
+func vectorLiteral(vec []float32) string {
+	var b strings.Builder
+	b.Grow(len(vec) * 12)
+	b.WriteByte('[')
+	for i, v := range vec {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(fmt.Sprintf("%.8g", v))
+	}
+	b.WriteByte(']')
+	return b.String()
 }
 
 func (s *DatabaseStore) searchBotMemories(query string, audience string, limit int) []string {
@@ -301,6 +335,138 @@ LIMIT ?`,
 	return out
 }
 
+type scoredTextResult struct {
+	key          string
+	text         string
+	vectorScore  float64
+	ftScore      float64
+	semanticRank int
+	keywordRank  int
+	score        float64
+}
+
+func (s *DatabaseStore) searchChatArchiveHybrid(query string, vecLiteral string, limit int) []string {
+	if strings.TrimSpace(query) == "" || vecLiteral == "" {
+		return nil
+	}
+	pool := limit * 20
+	if pool < 80 {
+		pool = 80
+	}
+	if pool > 300 {
+		pool = 300
+	}
+
+	results := make(map[string]*scoredTextResult)
+	semanticRows, err := s.db.Query(fmt.Sprintf(`
+SELECT id,
+       CONCAT('[聊天记录 ', DATE_FORMAT(%s, '%%Y-%%m-%%d %%H:%%i'), '] ', %s),
+       cosine_distance(embedding, ?) AS vector_distance,
+       MATCH(%s) AGAINST (?) AS ft_score
+FROM %s
+WHERE embedding IS NOT NULL
+ORDER BY vector_distance ASC
+LIMIT ?`,
+		s.chatArchiveTimeColumn, s.chatArchiveTextColumn,
+		s.chatArchiveTextColumn,
+		s.chatArchiveTable,
+	), vecLiteral, query, pool)
+	if err == nil {
+		defer semanticRows.Close()
+		rank := 0
+		for semanticRows.Next() {
+			rank++
+			var id int64
+			var text string
+			var distance, ftScore float64
+			if err := semanticRows.Scan(&id, &text, &distance, &ftScore); err != nil {
+				continue
+			}
+			key := fmt.Sprint(id)
+			item := &scoredTextResult{key: key, text: text, semanticRank: rank, vectorScore: 1 - distance, ftScore: ftScore}
+			results[key] = item
+		}
+	} else {
+		return s.searchChatArchive(query, limit)
+	}
+
+	keywordRows, err := s.db.Query(fmt.Sprintf(`
+SELECT id,
+       CONCAT('[聊天记录 ', DATE_FORMAT(%s, '%%Y-%%m-%%d %%H:%%i'), '] ', %s),
+       cosine_distance(embedding, ?) AS vector_distance,
+       MATCH(%s) AGAINST (?) AS ft_score
+FROM %s
+WHERE MATCH(%s) AGAINST (? IN NATURAL LANGUAGE MODE)
+ORDER BY ft_score DESC
+LIMIT ?`,
+		s.chatArchiveTimeColumn, s.chatArchiveTextColumn,
+		s.chatArchiveTextColumn,
+		s.chatArchiveTable,
+		s.chatArchiveTextColumn,
+	), vecLiteral, query, query, pool)
+	if err == nil {
+		defer keywordRows.Close()
+		rank := 0
+		for keywordRows.Next() {
+			rank++
+			var id int64
+			var text string
+			var distance, ftScore float64
+			if err := keywordRows.Scan(&id, &text, &distance, &ftScore); err != nil {
+				continue
+			}
+			key := fmt.Sprint(id)
+			item := results[key]
+			if item == nil {
+				item = &scoredTextResult{key: key, text: text, vectorScore: 1 - distance}
+				results[key] = item
+			}
+			item.keywordRank = rank
+			item.ftScore = ftScore
+		}
+	}
+
+	ranked := make([]*scoredTextResult, 0, len(results))
+	for _, item := range results {
+		keywordScore := 0.0
+		if item.ftScore > 0 {
+			keywordScore = item.ftScore / (item.ftScore + 10)
+		}
+		rankBonus := 0.0
+		if item.semanticRank > 0 {
+			rankBonus += 1.0 / float64(60+item.semanticRank)
+		}
+		if item.keywordRank > 0 {
+			rankBonus += 1.0 / float64(60+item.keywordRank)
+		}
+		item.score = 0.65*maxFloat(0, item.vectorScore) + 0.35*keywordScore + 6*rankBonus
+		ranked = append(ranked, item)
+	}
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
+
+	out := make([]string, 0, limit)
+	seen := make(map[string]struct{})
+	for _, item := range ranked {
+		text := strings.TrimSpace(item.text)
+		if text == "" {
+			continue
+		}
+		key := text
+		if len(key) > 120 {
+			key = key[:120]
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, text)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
 func (s *DatabaseStore) SearchMedia(query string, audience string, limit int) []MediaResult {
 	if !s.includeMediaArchive || !s.mediaVisibleTo(audience) {
 		return nil
@@ -315,7 +481,13 @@ func (s *DatabaseStore) SearchMedia(query string, audience string, limit int) []
 	if term == "" {
 		return s.recentMedia(limit)
 	}
-	results := s.searchMediaFullText(term, limit)
+	var results []MediaResult
+	if vec, ok := s.queryVectorLiteral(term); ok {
+		results = s.searchMediaHybrid(term, vec, limit)
+	}
+	if len(results) == 0 {
+		results = s.searchMediaFullText(term, limit)
+	}
 	if len(results) == 0 {
 		results = s.searchMediaLike(term, limit)
 	}
@@ -323,6 +495,127 @@ func (s *DatabaseStore) SearchMedia(query string, audience string, limit int) []
 		results = s.recentMedia(limit)
 	}
 	return results
+}
+
+type scoredMediaResult struct {
+	result       MediaResult
+	vectorScore  float64
+	ftScore      float64
+	semanticRank int
+	keywordRank  int
+	score        float64
+}
+
+func (s *DatabaseStore) searchMediaHybrid(query string, vecLiteral string, limit int) []MediaResult {
+	if strings.TrimSpace(query) == "" || vecLiteral == "" {
+		return nil
+	}
+	pool := limit * 20
+	if pool < 80 {
+		pool = 80
+	}
+	if pool > 300 {
+		pool = 300
+	}
+
+	results := make(map[string]*scoredMediaResult)
+	semanticRows, err := s.db.Query(fmt.Sprintf(`
+SELECT COALESCE(%s, ''), COALESCE(%s, ''), DATE_FORMAT(%s, '%%Y-%%m-%%d %%H:%%i'),
+       COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(has_text, 0),
+       cosine_distance(embedding, ?) AS vector_distance,
+       MATCH(%s, %s) AGAINST (?) AS ft_score
+FROM %s
+WHERE embedding IS NOT NULL
+ORDER BY vector_distance ASC
+LIMIT ?`,
+		s.mediaMsgIDColumn, s.mediaSenderColumn, s.mediaTimeColumn,
+		s.mediaFilePathColumn, s.mediaOCRColumn, s.mediaCaptionColumn, s.mediaMsgIDColumn,
+		s.mediaOCRColumn, s.mediaCaptionColumn,
+		s.mediaArchiveTable,
+	), vecLiteral, query, pool)
+	if err == nil {
+		defer semanticRows.Close()
+		rank := 0
+		for semanticRows.Next() {
+			rank++
+			result, distance, ftScore, ok := scanScoredMediaRow(semanticRows)
+			if !ok {
+				continue
+			}
+			key := mediaResultKey(result)
+			results[key] = &scoredMediaResult{result: result, semanticRank: rank, vectorScore: 1 - distance, ftScore: ftScore}
+		}
+	} else {
+		return nil
+	}
+
+	keywordRows, err := s.db.Query(fmt.Sprintf(`
+SELECT COALESCE(%s, ''), COALESCE(%s, ''), DATE_FORMAT(%s, '%%Y-%%m-%%d %%H:%%i'),
+       COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(%s, ''), COALESCE(has_text, 0),
+       cosine_distance(embedding, ?) AS vector_distance,
+       MATCH(%s, %s) AGAINST (?) AS ft_score
+FROM %s
+WHERE MATCH(%s, %s) AGAINST (? IN NATURAL LANGUAGE MODE)
+ORDER BY ft_score DESC
+LIMIT ?`,
+		s.mediaMsgIDColumn, s.mediaSenderColumn, s.mediaTimeColumn,
+		s.mediaFilePathColumn, s.mediaOCRColumn, s.mediaCaptionColumn, s.mediaMsgIDColumn,
+		s.mediaOCRColumn, s.mediaCaptionColumn,
+		s.mediaArchiveTable,
+		s.mediaOCRColumn, s.mediaCaptionColumn,
+	), vecLiteral, query, query, pool)
+	if err == nil {
+		defer keywordRows.Close()
+		rank := 0
+		for keywordRows.Next() {
+			rank++
+			result, distance, ftScore, ok := scanScoredMediaRow(keywordRows)
+			if !ok {
+				continue
+			}
+			key := mediaResultKey(result)
+			item := results[key]
+			if item == nil {
+				item = &scoredMediaResult{result: result, vectorScore: 1 - distance}
+				results[key] = item
+			}
+			item.keywordRank = rank
+			item.ftScore = ftScore
+		}
+	}
+
+	ranked := make([]*scoredMediaResult, 0, len(results))
+	for _, item := range results {
+		keywordScore := 0.0
+		if item.ftScore > 0 {
+			keywordScore = item.ftScore / (item.ftScore + 10)
+		}
+		rankBonus := 0.0
+		if item.semanticRank > 0 {
+			rankBonus += 1.0 / float64(60+item.semanticRank)
+		}
+		if item.keywordRank > 0 {
+			rankBonus += 1.0 / float64(60+item.keywordRank)
+		}
+		item.score = 0.70*maxFloat(0, item.vectorScore) + 0.30*keywordScore + 6*rankBonus
+		ranked = append(ranked, item)
+	}
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
+
+	out := make([]MediaResult, 0, limit)
+	seen := make(map[string]struct{})
+	for _, item := range ranked {
+		key := mediaResultKey(item.result)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, item.result)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 func (s *DatabaseStore) searchMediaFullText(query string, limit int) []MediaResult {
@@ -411,6 +704,27 @@ func scanMediaRows(rows *sql.Rows) []MediaResult {
 	return out
 }
 
+func scanScoredMediaRow(rows *sql.Rows) (MediaResult, float64, float64, bool) {
+	var result MediaResult
+	var hasText int
+	var distance, ftScore float64
+	if err := rows.Scan(&result.MsgID, &result.Sender, &result.SentAt, &result.FilePath, &result.OCRText, &result.Caption, &result.MessageID, &hasText, &distance, &ftScore); err != nil {
+		return MediaResult{}, 0, 0, false
+	}
+	result.HasText = hasText != 0
+	return result, distance, ftScore, true
+}
+
+func mediaResultKey(result MediaResult) string {
+	if result.MsgID != "" {
+		return result.MsgID
+	}
+	if result.MessageID != "" {
+		return result.MessageID
+	}
+	return result.SentAt + "|" + result.FilePath
+}
+
 func cleanMediaQuery(query string) string {
 	q := strings.TrimSpace(query)
 	replacer := strings.NewReplacer(
@@ -423,6 +737,13 @@ func cleanMediaQuery(query string) string {
 	q = replacer.Replace(q)
 	q = strings.Join(strings.Fields(q), " ")
 	return q
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func isVagueMediaQuery(query string) bool {

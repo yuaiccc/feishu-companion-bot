@@ -194,6 +194,7 @@ FEISHU_APP_SECRET=xxx
 FEISHU_CHAT_ID=oc_xxx              # 目标会话（群或私聊 chat_id）
 FEISHU_BOT_OPEN_ID=ou_xxx
 FEISHU_OWNER_OPEN_ID=ou_xxx        # owner 的 open_id，用于身份判断
+FEISHU_TARGET_OPEN_ID=ou_xxx       # 可选，伴侣/目标用户 open_id；多人群聊推荐写到 profile.members
 
 # DeepSeek
 DEEPSEEK_API_KEY=sk-xxx
@@ -243,6 +244,45 @@ POLL_INTERVAL_SECONDS=300
 ```
 
 `GH_USERNAME` / `GH_TOKEN` / `GH_PRIVATE_REPOS` 也兼容 `GITHUB_USERNAME` / `GITHUB_TOKEN` / `GITHUB_PRIVATE_REPOS` 旧名（fallback）。
+
+## 多人群聊身份
+
+群里有多人时，不要把“非 owner”都当成 target。推荐在 profile 里配置固定成员：
+
+```json
+{
+  "members": [
+    {
+      "open_id": "ou_owner_xxx",
+      "name": "三哥",
+      "role": "owner",
+      "relation": "机器人主人",
+      "aliases": ["秋酿"]
+    },
+    {
+      "open_id": "ou_target_xxx",
+      "name": "舒舒",
+      "role": "target",
+      "relation": "owner 的伴侣",
+      "aliases": ["烨子"]
+    },
+    {
+      "open_id": "ou_friend_xxx",
+      "name": "朋友A",
+      "role": "friend",
+      "relation": "普通群友",
+      "aliases": []
+    }
+  ]
+}
+```
+
+身份规则：
+
+- `owner` 可以读取 `owner_only` 和 `public_to_target` 记忆。
+- `target` 只能读取 `public_to_target` 记忆。
+- 未配置或普通 `friend` 默认是 `other`，不会读取私密聊天/图片记忆，也不会进入长期记忆候选。
+- 固定小群可以只用 profile；大群或运行时自动识别成员，建议把成员表放到 OceanBase/MySQL，例如 `bot_participants(profile_id, chat_id, open_id, display_name, role, relation, aliases, confirmed_at, last_seen_at)`。
 
 ## 开源说明
 
