@@ -140,6 +140,11 @@ CREATE TABLE IF NOT EXISTS bot_memories (
   raw longtext DEFAULT NULL,
   sender varchar(255) DEFAULT NULL,
   category varchar(64) DEFAULT NULL,
+  memory_type varchar(32) DEFAULT NULL,
+  importance int DEFAULT NULL,
+  confidence double DEFAULT NULL,
+  last_used_at bigint DEFAULT NULL,
+  expires_at bigint DEFAULT NULL,
   visibility varchar(32) NOT NULL,
   source_type varchar(64) DEFAULT NULL,
   hash varchar(64) DEFAULT NULL,
@@ -151,7 +156,25 @@ CREATE TABLE IF NOT EXISTS bot_memories (
   KEY idx_hash (hash),
   FULLTEXT KEY ft_bot_memories_content (content) WITH PARSER ngram PARSER_PROPERTIES=(ngram_token_size=2)
 ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`)
-	return err
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE bot_memories ADD COLUMN memory_type varchar(32) DEFAULT NULL`)
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE bot_memories ADD COLUMN importance int DEFAULT NULL`,
+		`ALTER TABLE bot_memories ADD COLUMN confidence double DEFAULT NULL`,
+		`ALTER TABLE bot_memories ADD COLUMN last_used_at bigint DEFAULT NULL`,
+		`ALTER TABLE bot_memories ADD COLUMN expires_at bigint DEFAULT NULL`,
+		`ALTER TABLE bot_memories ADD COLUMN embedding vector(1024) DEFAULT NULL`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *DatabaseStore) Add(m Memory) error {
@@ -164,14 +187,29 @@ func (s *DatabaseStore) Add(m Memory) error {
 	if m.Hash == "" {
 		m.Hash = HashContent(m.Content)
 	}
+	m.MemoryType = NormalizeMemoryType(m.MemoryType, m.Content)
+	m.Importance = NormalizeImportance(m.Importance, m.MemoryType)
+	m.Confidence = NormalizeConfidence(m.Confidence, m.MemoryType)
+	m.ExpiresAt = NormalizeExpiresAt(m.ExpiresAt, m.MemoryType)
+
+	var vecLiteral interface{} = nil
+	if s.embedder != nil {
+		if vec, err := s.embedder.Embed(m.Content); err == nil && len(vec) > 0 {
+			vecLiteral = vectorLiteral(vec)
+		}
+	}
+
 	_, err := s.db.Exec(`
 INSERT INTO bot_memories
-  (id, profile_id, content, raw, sender, category, visibility, source_type, hash, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  (id, profile_id, content, raw, sender, category, memory_type, importance, confidence, last_used_at, expires_at, visibility, source_type, hash, created_at, embedding)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   content=VALUES(content), raw=VALUES(raw), sender=VALUES(sender), category=VALUES(category),
-  visibility=VALUES(visibility), source_type=VALUES(source_type), hash=VALUES(hash)`,
-		m.ID, s.profileID, m.Content, m.Raw, m.Sender, m.Category, string(m.Visibility), m.SourceType, m.Hash, m.CreatedAt)
+  memory_type=VALUES(memory_type), importance=VALUES(importance), confidence=VALUES(confidence),
+  last_used_at=VALUES(last_used_at), expires_at=VALUES(expires_at),
+  visibility=VALUES(visibility), source_type=VALUES(source_type), hash=VALUES(hash),
+  embedding=VALUES(embedding)`,
+		m.ID, s.profileID, m.Content, m.Raw, m.Sender, m.Category, string(m.MemoryType), m.Importance, m.Confidence, m.LastUsedAt, m.ExpiresAt, string(m.Visibility), m.SourceType, m.Hash, m.CreatedAt, vecLiteral)
 	return err
 }
 
@@ -182,7 +220,8 @@ func (s *DatabaseStore) Delete(id string) error {
 
 func (s *DatabaseStore) All() []Memory {
 	rows, err := s.db.Query(`
-SELECT id, content, COALESCE(raw, ''), COALESCE(sender, ''), COALESCE(category, ''),
+SELECT id, content, COALESCE(raw, ''), COALESCE(sender, ''), COALESCE(category, ''), COALESCE(memory_type, ''),
+       COALESCE(importance, 0), COALESCE(confidence, 0), COALESCE(last_used_at, 0), COALESCE(expires_at, 0),
        visibility, COALESCE(source_type, ''), COALESCE(hash, ''), created_at
 FROM bot_memories
 WHERE profile_id=?
@@ -195,8 +234,13 @@ ORDER BY created_at DESC`, s.profileID)
 	var out []Memory
 	for rows.Next() {
 		var m Memory
+		var memoryType string
 		var visibility string
-		if err := rows.Scan(&m.ID, &m.Content, &m.Raw, &m.Sender, &m.Category, &visibility, &m.SourceType, &m.Hash, &m.CreatedAt); err == nil {
+		if err := rows.Scan(&m.ID, &m.Content, &m.Raw, &m.Sender, &m.Category, &memoryType, &m.Importance, &m.Confidence, &m.LastUsedAt, &m.ExpiresAt, &visibility, &m.SourceType, &m.Hash, &m.CreatedAt); err == nil {
+			m.MemoryType = NormalizeMemoryType(MemoryType(memoryType), m.Content)
+			m.Importance = NormalizeImportance(m.Importance, m.MemoryType)
+			m.Confidence = NormalizeConfidence(m.Confidence, m.MemoryType)
+			m.ExpiresAt = NormalizeExpiresAt(m.ExpiresAt, m.MemoryType)
 			m.Visibility = Visibility(visibility)
 			out = append(out, m)
 		}
@@ -205,21 +249,51 @@ ORDER BY created_at DESC`, s.profileID)
 }
 
 func (s *DatabaseStore) Search(query string, audience string) []string {
-	results := s.searchBotMemories(query, audience, 5)
+	results := s.SearchRelevant(query, audience)
+	out := make([]string, 0, len(results))
+	for _, item := range results {
+		out = append(out, item.Text)
+	}
+	return out
+}
+
+func (s *DatabaseStore) SearchRelevant(query string, audience string) []RetrievedMemory {
+	var results []RetrievedMemory
+	results = append(results, s.searchBotMemories(query, audience, 6)...)
 	if s.includeChatArchive && s.chatVisibleTo(audience) {
 		if vec, ok := s.queryVectorLiteral(query); ok {
-			results = append(results, s.searchChatArchiveHybrid(query, vec, 5)...)
+			results = append(results, wrapRetrievedTexts(s.searchChatArchiveHybrid(query, vec, 3), MemoryTypeArchiveChat, "chat_archive")...)
 		} else {
-			results = append(results, s.searchChatArchive(query, 5)...)
+			results = append(results, wrapRetrievedTexts(s.searchChatArchive(query, 3), MemoryTypeArchiveChat, "chat_archive")...)
 		}
 	}
 	if s.includeMediaArchive && s.mediaVisibleTo(audience) {
-		for _, media := range s.SearchMedia(query, audience, 3) {
-			results = append(results, media.ContextText())
+		for _, media := range s.SearchMedia(query, audience, 2) {
+			results = append(results, RetrievedMemory{
+				Text:       media.ContextText(),
+				MemoryType: MemoryTypeArchiveMedia,
+				SourceType: "media_archive",
+			})
 		}
 	}
 	if len(results) > 8 {
-		return results[:8]
+		results = results[:8]
+	}
+	sortRetrievedMemories(results)
+	s.touchRetrieved(results)
+	return results
+}
+
+func wrapRetrievedTexts(texts []string, mt MemoryType, source string) []RetrievedMemory {
+	results := make([]RetrievedMemory, 0, len(texts))
+	for _, text := range texts {
+		results = append(results, RetrievedMemory{
+			Text:       text,
+			MemoryType: mt,
+			SourceType: source,
+			Importance: NormalizeImportance(0, mt),
+			Confidence: NormalizeConfidence(0, mt),
+		})
 	}
 	return results
 }
@@ -250,11 +324,156 @@ func vectorLiteral(vec []float32) string {
 	return b.String()
 }
 
-func (s *DatabaseStore) searchBotMemories(query string, audience string, limit int) []string {
+type scoredMemoryResult struct {
+	result       RetrievedMemory
+	vectorScore  float64
+	ftScore      float64
+	semanticRank int
+	keywordRank  int
+	score        float64
+}
+
+func (s *DatabaseStore) searchBotMemories(query string, audience string, limit int) []RetrievedMemory {
 	visibility := allowedVisibility(audience)
 	if len(visibility) == 0 {
 		return nil
 	}
+
+	// Calculate query embedding vector
+	var vecLiteral string
+	if s.embedder != nil && strings.TrimSpace(query) != "" {
+		if vec, err := s.embedder.Embed(query); err == nil && len(vec) > 0 {
+			vecLiteral = vectorLiteral(vec)
+		}
+	}
+
+	// If no embedding is available, fallback to standard text search
+	if vecLiteral == "" {
+		return s.searchBotMemoriesTextOnly(query, visibility, limit)
+	}
+
+	// Perform Hybrid Search (Vector + FullText)
+	pool := limit * 4
+	if pool < 20 {
+		pool = 20
+	}
+
+	results := make(map[string]*scoredMemoryResult)
+
+	// Way 1: Vector similarity path
+	args := []interface{}{vecLiteral, s.profileID}
+	placeholders := make([]string, 0, len(visibility))
+	for _, v := range visibility {
+		placeholders = append(placeholders, "?")
+		args = append(args, string(v))
+	}
+	where := fmt.Sprintf("embedding IS NOT NULL AND profile_id=? AND visibility IN (%s) AND (expires_at IS NULL OR expires_at=0 OR expires_at>?)", strings.Join(placeholders, ","))
+	args = append(args, time.Now().Unix())
+	args = append(args, pool)
+
+	semanticRows, err := s.db.Query(fmt.Sprintf(`
+SELECT id, content, COALESCE(memory_type, ''), COALESCE(source_type, ''), COALESCE(importance, 0), COALESCE(confidence, 0), COALESCE(last_used_at, 0), COALESCE(expires_at, 0), created_at,
+       cosine_distance(embedding, ?) AS vector_distance,
+       MATCH(content) AGAINST (?) AS ft_score
+FROM bot_memories
+WHERE %s
+ORDER BY vector_distance ASC
+LIMIT ?`, where), append([]interface{}{vecLiteral, query}, args...)...)
+	if err == nil {
+		defer semanticRows.Close()
+		rank := 0
+		for semanticRows.Next() {
+			rank++
+			var m RetrievedMemory
+			var distance, ftScore float64
+			var memoryType string
+			if err := semanticRows.Scan(&m.ID, &m.Text, &memoryType, &m.SourceType, &m.Importance, &m.Confidence, &m.LastUsedAt, &m.ExpiresAt, &m.CreatedAt, &distance, &ftScore); err == nil {
+				m.MemoryType = NormalizeMemoryType(MemoryType(memoryType), m.Text)
+				m.Importance = NormalizeImportance(m.Importance, m.MemoryType)
+				m.Confidence = NormalizeConfidence(m.Confidence, m.MemoryType)
+				m.ExpiresAt = NormalizeExpiresAt(m.ExpiresAt, m.MemoryType)
+				results[m.ID] = &scoredMemoryResult{result: m, semanticRank: rank, vectorScore: 1 - distance, ftScore: ftScore}
+			}
+		}
+	}
+
+	// Way 2: Keyword Fulltext path
+	args2 := []interface{}{vecLiteral, s.profileID}
+	placeholders2 := make([]string, 0, len(visibility))
+	for _, v := range visibility {
+		placeholders2 = append(placeholders2, "?")
+		args2 = append(args2, string(v))
+	}
+	where2 := fmt.Sprintf("profile_id=? AND visibility IN (%s) AND (expires_at IS NULL OR expires_at=0 OR expires_at>?)", strings.Join(placeholders2, ","))
+	args2 = append(args2, time.Now().Unix())
+	args2 = append(args2, query, "%"+query+"%", pool)
+
+	keywordRows, err := s.db.Query(fmt.Sprintf(`
+SELECT id, content, COALESCE(memory_type, ''), COALESCE(source_type, ''), COALESCE(importance, 0), COALESCE(confidence, 0), COALESCE(last_used_at, 0), COALESCE(expires_at, 0), created_at,
+       cosine_distance(embedding, ?) AS vector_distance,
+       MATCH(content) AGAINST (?) AS ft_score
+FROM bot_memories
+WHERE %s AND (MATCH(content) AGAINST (? IN NATURAL LANGUAGE MODE) OR content LIKE ?)
+ORDER BY ft_score DESC
+LIMIT ?`, where2), append([]interface{}{vecLiteral, query}, args2...)...)
+	if err == nil {
+		defer keywordRows.Close()
+		rank := 0
+		for keywordRows.Next() {
+			rank++
+			var m RetrievedMemory
+			var distance, ftScore float64
+			var memoryType string
+			if err := keywordRows.Scan(&m.ID, &m.Text, &memoryType, &m.SourceType, &m.Importance, &m.Confidence, &m.LastUsedAt, &m.ExpiresAt, &m.CreatedAt, &distance, &ftScore); err == nil {
+				m.MemoryType = NormalizeMemoryType(MemoryType(memoryType), m.Text)
+				m.Importance = NormalizeImportance(m.Importance, m.MemoryType)
+				m.Confidence = NormalizeConfidence(m.Confidence, m.MemoryType)
+				m.ExpiresAt = NormalizeExpiresAt(m.ExpiresAt, m.MemoryType)
+				item := results[m.ID]
+				if item == nil {
+					item = &scoredMemoryResult{result: m, vectorScore: 1 - distance}
+					results[m.ID] = item
+				}
+				item.keywordRank = rank
+				item.ftScore = ftScore
+			}
+		}
+	}
+
+	// Mix scoring and RRF reranking
+	ranked := make([]*scoredMemoryResult, 0, len(results))
+	for _, item := range results {
+		keywordScore := 0.0
+		if item.ftScore > 0 {
+			keywordScore = item.ftScore / (item.ftScore + 10)
+		}
+		rankBonus := 0.0
+		if item.semanticRank > 0 {
+			rankBonus += 1.0 / float64(60+item.semanticRank)
+		}
+		if item.keywordRank > 0 {
+			rankBonus += 1.0 / float64(60+item.keywordRank)
+		}
+		item.score = 0.65*maxFloat(0, item.vectorScore) + 0.35*keywordScore + 6*rankBonus
+		// Bonus for manually set importance
+		if item.result.Importance > 0 {
+			item.score += float64(item.result.Importance) * 0.05
+		}
+		ranked = append(ranked, item)
+	}
+
+	sort.SliceStable(ranked, func(i, j int) bool {
+		return ranked[i].score > ranked[j].score
+	})
+
+	var out []RetrievedMemory
+	for i := 0; i < len(ranked) && i < limit; i++ {
+		out = append(out, ranked[i].result)
+	}
+	return out
+}
+
+func (s *DatabaseStore) searchBotMemoriesTextOnly(query string, visibility []Visibility, limit int) []RetrievedMemory {
 	args := []interface{}{s.profileID}
 	placeholders := make([]string, 0, len(visibility))
 	for _, v := range visibility {
@@ -262,7 +481,8 @@ func (s *DatabaseStore) searchBotMemories(query string, audience string, limit i
 		args = append(args, string(v))
 	}
 
-	where := fmt.Sprintf("profile_id=? AND visibility IN (%s)", strings.Join(placeholders, ","))
+	where := fmt.Sprintf("profile_id=? AND visibility IN (%s) AND (expires_at IS NULL OR expires_at=0 OR expires_at>?)", strings.Join(placeholders, ","))
+	args = append(args, time.Now().Unix())
 	if strings.TrimSpace(query) != "" {
 		where += " AND (MATCH(content) AGAINST (? IN NATURAL LANGUAGE MODE) OR content LIKE ?)"
 		args = append(args, query, "%"+query+"%")
@@ -270,24 +490,47 @@ func (s *DatabaseStore) searchBotMemories(query string, audience string, limit i
 	args = append(args, limit)
 
 	rows, err := s.db.Query(`
-SELECT content
+SELECT id, content, COALESCE(memory_type, ''), COALESCE(source_type, ''), COALESCE(importance, 0), COALESCE(confidence, 0), COALESCE(last_used_at, 0), COALESCE(expires_at, 0), created_at
 FROM bot_memories
 WHERE `+where+`
-ORDER BY created_at DESC
+ORDER BY importance DESC, confidence DESC, created_at DESC
 LIMIT ?`, args...)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
 
-	var out []string
+	var out []RetrievedMemory
 	for rows.Next() {
-		var content string
-		if err := rows.Scan(&content); err == nil {
-			out = append(out, content)
+		var id, content, memoryType, sourceType string
+		var importance int
+		var confidence float64
+		var lastUsedAt, expiresAt, createdAt int64
+		if err := rows.Scan(&id, &content, &memoryType, &sourceType, &importance, &confidence, &lastUsedAt, &expiresAt, &createdAt); err == nil {
+			out = append(out, RetrievedMemory{
+				ID:         id,
+				Text:       content,
+				MemoryType: NormalizeMemoryType(MemoryType(memoryType), content),
+				SourceType: sourceType,
+				Importance: NormalizeImportance(importance, MemoryType(memoryType)),
+				Confidence: NormalizeConfidence(confidence, MemoryType(memoryType)),
+				LastUsedAt: lastUsedAt,
+				ExpiresAt:  NormalizeExpiresAt(expiresAt, MemoryType(memoryType)),
+				CreatedAt:  createdAt,
+			})
 		}
 	}
 	return out
+}
+
+func (s *DatabaseStore) touchRetrieved(results []RetrievedMemory) {
+	now := time.Now().Unix()
+	for _, item := range results {
+		if item.ID == "" || item.SourceType == "chat_archive" || item.SourceType == "media_archive" {
+			continue
+		}
+		_, _ = s.db.Exec(`UPDATE bot_memories SET last_used_at=? WHERE profile_id=? AND id=?`, now, s.profileID, item.ID)
+	}
 }
 
 func (s *DatabaseStore) searchChatArchive(query string, limit int) []string {

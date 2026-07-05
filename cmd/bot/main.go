@@ -66,6 +66,7 @@ const (
 	IntentSearch      Intent = "search"
 	IntentStatus      Intent = "status"
 	IntentMedia       Intent = "media"
+	IntentRecall      Intent = "recall"
 )
 
 type mediaMemoryStore interface {
@@ -218,7 +219,62 @@ var (
 	}
 )
 
-func classifyIntent(content string) Intent {
+func classifyIntent(ctx stdctx.Context, llmClient *llm.Client, content string, isRecentMediaSearch bool) Intent {
+	if llmClient == nil {
+		return classifyIntentFallback(content)
+	}
+
+	prompt := fmt.Sprintf(`你是飞书陪伴机器人的消息意图分类器。只返回 JSON：
+{"intent":"github|health|memory_audit|search|recall|media|none","reason":"极短原因"}
+
+分类规则：
+- github：查询主人在 GitHub 的 commit 提交、代码变动、近期活动等。
+- health：自检命令，包含健康检查、服务状态、自检、自测状态等。
+- memory_audit：审计记忆、看我的记忆、记忆审计面板、管理记忆等。
+- search：要求去上网搜索、查百度、看网页、联网查询最新资讯、搜索当前新闻等。
+- recall：要求机器人撤回消息（如‘撤回刚才发错的消息’、‘把刚才那条收回’、‘撤回’、‘发错了收回’）。
+- media：看照片、看截图、回忆图片、发张图、有没有照片、换一张、看别的图片等。
+- none：其他普通的闲聊、询问、指令等。
+
+如果 context 表明刚刚发生过图片查询，且用户当前输入如“换一张”、“再来一张”、“下一张”，则必须判定为 "media"。
+
+用户消息：%s`, safety.SanitizeForLLM(content))
+
+	reply, err := llmClient.Chat(ctx, []llm.Message{
+		{Role: "user", Content: prompt},
+	}, llm.WithTemperature(0), llm.WithMaxTokens(100))
+	if err != nil {
+		log.Printf("[意图分类] LLM 调用失败，使用本地兜底: %v", err)
+		return classifyIntentFallback(content)
+	}
+
+	var parsed struct {
+		Intent string `json:"intent"`
+	}
+	if err := json.Unmarshal([]byte(extractJSON(reply)), &parsed); err != nil {
+		log.Printf("[意图分类] JSON 解析失败: %v raw=%q", err, reply)
+		return classifyIntentFallback(content)
+	}
+
+	switch parsed.Intent {
+	case "github":
+		return IntentGitHub
+	case "health":
+		return IntentHealth
+	case "memory_audit":
+		return IntentMemoryAudit
+	case "search":
+		return IntentSearch
+	case "recall":
+		return IntentRecall
+	case "media":
+		return IntentMedia
+	default:
+		return IntentNone
+	}
+}
+
+func classifyIntentFallback(content string) Intent {
 	if len(content) <= 2 {
 		return IntentNone
 	}
@@ -254,6 +310,9 @@ func classifyIntent(content string) Intent {
 		if strings.Contains(content, kw) {
 			return IntentStatus
 		}
+	}
+	if strings.Contains(content, "撤回") || strings.Contains(content, "发错了") || strings.Contains(content, "收回") || strings.Contains(lower, "recall") {
+		return IntentRecall
 	}
 	return IntentNone
 }
@@ -301,17 +360,18 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 		stateText = "暂无"
 	}
 	prompt := fmt.Sprintf(`你是飞书陪伴机器人的回复前决策器。只返回 JSON：
-{"should_reply":true/false,"use_memory":true/false,"use_media":true/false,"reply_style":"short|normal|comfort|detailed","max_tokens":120,"reason":"极短原因"}
+{"should_reply":true/false,"use_memory":true/false,"use_media":true/false,"reply_style":"short|normal|comfort|detailed","max_tokens":600,"reason":"极短原因"}
 
 判断规则：
 - 群聊中被 @ 时通常要回复；私聊通常要回复。
 - 群聊未 @ 时必须由你理解语义后决定是否插话，不能按关键词机械匹配；只有你确实能帮上忙、接住情绪、回答问题、补充图片/记忆时才插话。
 - 群聊未 @ 且机器人刚回复过时，要更克制，除非用户明显在接着问你或需要帮助。
 - 当前发言人是 %s。不要把当前发言人和被提到的人混淆；不要把当前发言人叫成另一个成员。
-- 如果用户只是寒暄、确认、短句，short。
+- 回复倾向于使用 "detailed" 详细风格（提供依据、论据充实，不要三言两语应付），除非是单字寒暄/语气词，否则绝对避免使用 "short" 极简风格。
 - 如果用户表达低落/生气/累，comfort，并查记忆。
-- 如果问题涉及过去、回忆、偏好、关系、图片、截图，查记忆；涉及图片再 use_media。
-- 不要为了所有消息都查记忆。
+- 积极开启记忆检索（use_memory 设为 true）。只要用户的发言可能关联到他的偏好、习惯、承诺、过去的约定、或者可能有相关背景事实，就应当开启记忆检索，以便机器人能表现出极强的上下文连贯记忆。
+- 如果问题涉及图片、截图，再 use_media。
+- max_tokens 通常推荐在 500 到 600 之间，以保证回答内容丰满有深度。
 
 会话状态：
 %s
@@ -320,7 +380,7 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 	reply, err := llmClient.Chat(ctx, []llm.Message{
 		{Role: "system", Content: buildSystemPrompt(prof)},
 		{Role: "user", Content: prompt},
-	}, llm.WithTemperature(0), llm.WithMaxTokens(160))
+	}, llm.WithTemperature(0), llm.WithMaxTokens(256))
 	if err != nil {
 		log.Printf("[回复决策] LLM 失败，使用默认计划: %v", err)
 		if passiveGroup {
@@ -365,28 +425,29 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 }
 
 func defaultReplyPlan(msg feishu.Message, intent Intent, st conversationState) replyPlan {
-	plan := replyPlan{ShouldReply: true, UseMemory: false, UseMedia: false, ReplyStyle: "normal", MaxTokens: 350, Reason: "default"}
+	plan := replyPlan{ShouldReply: true, UseMemory: true, UseMedia: false, ReplyStyle: "detailed", MaxTokens: 600, Reason: "default"}
 	if msg.ChatType == "group" && !msg.IsMentioned {
 		plan.ShouldReply = false
 		plan.Reason = "passive_wait_llm"
 		return plan
 	}
 	if intent != IntentNone {
-		plan.UseMemory = intent == IntentMedia || intent == IntentStatus
+		plan.UseMemory = intent == IntentMedia || intent == IntentStatus || intent == IntentGitHub || intent == IntentSearch
 		plan.UseMedia = intent == IntentMedia
-		plan.MaxTokens = 300
+		plan.MaxTokens = 500
 		plan.Reason = "intent"
 		return plan
 	}
 	content := msg.Content
-	if len([]rune(content)) <= 8 {
+	if len([]rune(content)) <= 3 {
+		plan.UseMemory = false
 		plan.ReplyStyle = "short"
 		plan.MaxTokens = 160
 	}
 	if inferEmotion(content) != "" || st.LastEmotion == "低落或需要安慰" || st.LastEmotion == "生气" {
 		plan.UseMemory = true
 		plan.ReplyStyle = "comfort"
-		plan.MaxTokens = 320
+		plan.MaxTokens = 500
 		plan.Reason = "emotion"
 	}
 	return plan
@@ -403,7 +464,7 @@ func replyStyleInstruction(plan replyPlan, st conversationState) string {
 	case "comfort":
 		parts = append(parts, "优先安慰和接住情绪，先表明态度，再轻轻回应事情本身。")
 	case "detailed":
-		parts = append(parts, "可以稍微展开，但保持自然，不要写成报告。")
+		parts = append(parts, "回复要非常详尽、饱满且有事实依据，应当主动展开多写几段。把所有可能相关的细节、背景事实、跨渠道微信历史聊天上下文都融汇并丰富地叙述出来，展现出你对大哥事情的极度了解和丰富记忆，同时保持轻松亲切的语气，尽量多写，不要写得太短太敷衍。")
 	default:
 		parts = append(parts, "回复自然，不要过长。")
 	}
@@ -494,12 +555,16 @@ func pickEmoji(content string, fromOwner bool, prof *profile.Profile) string {
 
 // ---- Memory candidate decision ----
 
-func shouldRememberViaLLM(ctx stdctx.Context, content string, fromOwner bool, prof *profile.Profile, llmClient *llm.Client) (bool, string) {
+type workingMemoryTurn struct {
+	Sender  string
+	Content string
+}
+
+func shouldRememberViaLLM(ctx stdctx.Context, content string, fromOwner bool, prof *profile.Profile, llmClient *llm.Client, recentTurns []workingMemoryTurn) (bool, string, string) {
 	if llmClient == nil || content == "" || len(content) < 3 || len(content) > 500 {
-		return false, ""
+		return false, "", ""
 	}
-	// Label the sender from the profile. fromOwner maps to the owner name;
-	// otherwise the target name, or a generic "对方" when no target is set.
+
 	sender := prof.OwnerDisplay()
 	if !fromOwner {
 		if t := prof.TargetDisplay(); t != "" {
@@ -508,40 +573,138 @@ func shouldRememberViaLLM(ctx stdctx.Context, content string, fromOwner bool, pr
 			sender = "对方"
 		}
 	}
-	systemPrompt := `你是飞书陪伴机器人的记忆管家。判断一条聊天消息是否值得进入长期记忆候选。
+
+	var sb strings.Builder
+	if len(recentTurns) > 0 {
+		sb.WriteString("\n【近期对话历史（按时间由远及近）：】\n")
+		start := 0
+		if len(recentTurns) > 5 {
+			start = len(recentTurns) - 5
+		}
+		for _, turn := range recentTurns[start:] {
+			sb.WriteString(fmt.Sprintf("- %s: %s\n", turn.Sender, turn.Content))
+		}
+	}
+
+	systemPrompt := fmt.Sprintf(`你是飞书陪伴机器人的记忆管家。判断当前的一条聊天消息是否值得进入长期记忆候选。
+你可以结合提供的【近期对话历史】来理解用户的最新消息。如果用户的最新消息是确认、简答（如‘对的’、‘好的’、‘就定这个’）或带有代词，请顺着对话历史中的语境还原出具体的事实内容，提炼为一句主谓宾完整、含义清晰明确的长期中文记忆。
+
 只返回 JSON，不要解释。格式：
-{"remember": true/false, "memory": "一句自然中文记忆", "reason": "极短原因"}
+{"remember": true/false, "memory": "一句自然中文记忆", "memory_type": "semantic|relational|episodic", "reason": "极短原因"}
 
 判断标准：
 - 记住稳定偏好、重要事实、长期习惯、关系边界、称呼方式、明确承诺、重要计划。
+- memory_type 含义：semantic=稳定事实/偏好保存，relational=相处方式/边界/称呼/安慰方式，episodic=值得长期留痕的重要事件。
 - 不记普通寒暄、即时情绪、重复废话、临时闲聊、表情语气、已经过时的细枝末节。
 - 不要编造消息里没有的信息。
-- memory 要适合给 owner 私聊确认，简短、克制、可长期复用。`
+- memory 要适合给 owner 私聊确认，简短、克制、可长期复用。
+%s`, sb.String())
 
 	resp, err := llmClient.Chat(ctx, []llm.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: fmt.Sprintf("发送者：%s\n消息：%s", sender, content)},
-	}, llm.WithTemperature(0), llm.WithMaxTokens(160))
+	}, llm.WithTemperature(0), llm.WithMaxTokens(256))
 	if err != nil {
 		log.Printf("[记忆判断] LLM 失败: %v", err)
-		return false, ""
+		return false, "", ""
 	}
 
-	// parse JSON from response
-	re := regexp.MustCompile(`\{.*\}`)
-	m := re.FindString(resp)
+	m := extractJSON(resp)
 	if m == "" {
-		return false, ""
+		return false, "", ""
 	}
 	var result struct {
-		Remember bool   `json:"remember"`
-		Memory   string `json:"memory"`
-		Reason   string `json:"reason"`
+		Remember   bool   `json:"remember"`
+		Memory     string `json:"memory"`
+		MemoryType string `json:"memory_type"`
+		Reason     string `json:"reason"`
 	}
 	if err := json.Unmarshal([]byte(m), &result); err != nil {
-		return false, ""
+		log.Printf("[记忆判断] JSON 解析失败: %v", err)
+		return false, "", ""
 	}
-	return result.Remember, result.Memory
+	return result.Remember, result.Memory, result.MemoryType
+}
+
+func consolidateMemory(ctx stdctx.Context, llmClient *llm.Client, memStore memory.MemoryStore, content string, mType string, sender string, prof *profile.Profile) (string, bool) {
+	if memStore == nil || llmClient == nil {
+		return content, true
+	}
+
+	existing := memStore.SearchRelevant(content, "owner")
+	if len(existing) == 0 {
+		return content, true
+	}
+
+	var sb strings.Builder
+	for _, m := range existing {
+		if m.ID != "" && m.SourceType != "chat_archive" && m.SourceType != "media_archive" {
+			sb.WriteString(fmt.Sprintf("- ID: %s | 内容: %s\n", m.ID, m.Text))
+		}
+	}
+	similars := sb.String()
+	if similars == "" {
+		return content, true
+	}
+
+	prompt := fmt.Sprintf(`你是飞书陪伴机器人的记忆整合管家。判断新提炼的候选记忆与已有的多条长期记忆是否存在冲突、冗余或重合。
+新候选记忆：%s
+
+已有的相似记忆：
+%s
+
+只返回 JSON，不要任何解释。格式：
+{"action":"none|ignore|delete|update","target_id":"冲突的老记忆ID","merged_content":"融合更新后的内容","reason":"理由"}
+
+规则：
+- none：与已有记忆无冲突、无冗余，这是一条全新的补充事实。
+- ignore：新记忆的内容与已有记忆完全一致或高度冗余（老记忆已包含该信息），无需新记，应忽略。
+- delete：已有记忆内容已过时、被否定或与新候选发生实质性冲突（比如：老记忆说‘去北京’，新记忆说‘取消北京改去上海’）。此时应删除被冲突的老记忆（即返回老记忆ID，让系统删除它），并让新记忆直接新建。
+- update：新老记忆存在信息交集或有补充部分（比如：老记忆说‘喜欢喝可乐’，新记忆说‘平时爱喝无糖可口可乐’）。此时应融合提炼成一句更精确完整的新描述放入 merged_content，并返回对应 target_id 予以更新覆盖（老记忆ID对应的老内容将被删除）。
+
+请仔细辨析。`, content, similars)
+
+	resp, err := llmClient.Chat(ctx, []llm.Message{
+		{Role: "user", Content: prompt},
+	}, llm.WithTemperature(0), llm.WithMaxTokens(256))
+	if err != nil {
+		log.Printf("[记忆整合] LLM 失败: %v", err)
+		return content, true
+	}
+
+	var result struct {
+		Action        string `json:"action"`
+		TargetID      string `json:"target_id"`
+		MergedContent string `json:"merged_content"`
+	}
+	if err := json.Unmarshal([]byte(extractJSON(resp)), &result); err != nil {
+		log.Printf("[记忆整合] 解析 JSON 失败: %v", err)
+		return content, true
+	}
+
+	log.Printf("[记忆整理] 行为: %s, 目标ID: %s, 融合后内容: %s", result.Action, result.TargetID, result.MergedContent)
+
+	switch result.Action {
+	case "ignore":
+		return "", false
+	case "delete":
+		if result.TargetID != "" {
+			_ = memStore.Delete(result.TargetID)
+			log.Printf("[记忆整理] 已成功删除被冲突记忆 ID=%s", result.TargetID)
+		}
+		return content, true
+	case "update":
+		if result.TargetID != "" {
+			_ = memStore.Delete(result.TargetID)
+			log.Printf("[记忆整理] 已成功合并更新冲突记忆 ID=%s", result.TargetID)
+		}
+		if result.MergedContent != "" {
+			return result.MergedContent, true
+		}
+		return content, true
+	default:
+		return content, true
+	}
 }
 
 // ---- Streaming reply ----
@@ -691,6 +854,7 @@ func buildSystemPrompt(prof *profile.Profile) string {
 		b.WriteString(" 已知成员表：\n")
 		b.WriteString(roster)
 	}
+	b.WriteString(" 【重要记忆与会话一体化原则】提供给你的“相关记忆”中如果包含 `[聊天记录 YYYY-MM-DD HH:MM]` 前缀的文本，这与“对话历史”一样，全都是你与 owner 过去在不同渠道（如微信、飞书等）留下的连续会话足迹。你必须把它们视为一个整体且连贯的聊天时间线。在回复时，请极其自然、直接地融入这些过去的聊天背景，像是一直在同一个会话中无间断聊天一样，直接使用这些历史内容作为你回答的背景和默契事实。绝不要生硬地向用户提及“根据我的记忆”、“在微信聊天记录里查到”等带有机器痕迹的词汇，让所有历史对话上下文与当前对话浑然一体。")
 	b.WriteString(" 不要在回复末尾加\"正在输入\"或\"整理中\"这类占位文字。")
 	if persona, ok := prof.Config["persona"].(string); ok && persona != "" {
 		b.WriteString(" ")
@@ -724,48 +888,75 @@ func audienceForSender(cfg *config.Config, prof *profile.Profile, msg feishu.Mes
 }
 
 func buildChatMessages(prof *profile.Profile, currentContent string, currentSender string, currentMessageID string, recentMsgs []feishu.Message, memories []string, extraInstructions string, budget *ctxmgr.Budget, senderLabel func(string) string) []llm.Message {
-	var msgs []llm.Message
-	msgs = append(msgs, llm.Message{Role: "system", Content: buildSystemPrompt(prof)})
+	systemPrompt := buildSystemPrompt(prof)
+	safeCurrentMessage := fmt.Sprintf("【这是用户最新发的消息，请针对它回复，不要回复历史里的消息】\n当前发言人：%s\n消息：%s", currentSender, safety.SanitizeForLLM(currentContent))
 
-	if len(memories) > 0 {
-		safeMemories := make([]string, 0, len(memories))
-		for _, memory := range memories {
-			safeMemories = append(safeMemories, safety.SanitizeForLLM(memory))
-		}
-		memText := budget.Add("memories", strings.Join(safeMemories, "\n"))
-		if memText != "" {
-			msgs = append(msgs, llm.Message{Role: "system", Content: "相关记忆：\n" + memText})
-		}
+	// Reserve high-priority static elements
+	budget.Reserve("system_prompt", systemPrompt)
+	budget.Reserve("current_message", safeCurrentMessage)
+	if extraInstructions != "" {
+		budget.Reserve("extra_instructions", extraInstructions)
 	}
 
-	// Recent context — the conversation BEFORE the current message, in
-	// chronological order (oldest first). The current message is excluded so it
-	// isn't duplicated; it's passed separately as the final user message, which
-	// is the one the model must reply to. (ListMessages returns newest-first,
-	// so we iterate in reverse.)
+	// 1. Pack recent messages (second priority) - chronological order (oldest first)
+	// We scan newest-first to fill the budget, but we will output chronologically
+	var ctxLines []string
 	if len(recentMsgs) > 0 {
-		var ctxLines []string
-		for i := len(recentMsgs) - 1; i >= 0; i-- {
+		for i := 0; i < len(recentMsgs); i++ {
 			m := recentMsgs[i]
 			if m.MessageID == currentMessageID {
 				continue
 			}
-			ctxLines = append(ctxLines, fmt.Sprintf("[%s] %s: %s", m.Time, senderLabel(m.Sender), safety.SanitizeForLLM(m.Content)))
-		}
-		ctxText := budget.Add("recent_messages", strings.Join(ctxLines, "\n"))
-		if ctxText != "" {
-			msgs = append(msgs, llm.Message{Role: "system", Content: "对话历史（早→近，不含最新消息）：\n" + ctxText})
+			line := fmt.Sprintf("[%s] %s: %s", m.Time, senderLabel(m.Sender), safety.SanitizeForLLM(m.Content))
+			// We check if we can fit it. If yes, we keep it.
+			// ListMessages returns newest-first, so i=0 is newest, i=len-1 is oldest.
+			// We fill starting from the newest historical turns.
+			if budget.CanFit(len(line) + 1) {
+				budget.Reserve("recent_message_turn", line)
+				// Prepend since we are traversing newest-first but want chronological order (oldest first)
+				ctxLines = append([]string{line}, ctxLines...)
+			} else {
+				// Stop filling history if we exceed budget
+				break
+			}
 		}
 	}
 
+	// 2. Pack memories (third priority)
+	var safeMemories []string
+	if len(memories) > 0 {
+		for _, memory := range memories {
+			sanitized := safety.SanitizeForLLM(memory)
+			if budget.CanFit(len(sanitized) + 1) {
+				budget.Reserve("memory_item", sanitized)
+				safeMemories = append(safeMemories, sanitized)
+			} else {
+				break
+			}
+		}
+	}
+
+	// Assemble final messages for KV cache friendliness:
+	// 1. System Prompt
+	var msgs []llm.Message
+	msgs = append(msgs, llm.Message{Role: "system", Content: systemPrompt})
+
+	// 2. Memory context (semi-static)
+	if len(safeMemories) > 0 {
+		msgs = append(msgs, llm.Message{Role: "system", Content: "相关记忆：\n" + strings.Join(safeMemories, "\n")})
+	}
+
+	// 3. Historical conversation context
+	if len(ctxLines) > 0 {
+		msgs = append(msgs, llm.Message{Role: "system", Content: "对话历史（早→近，不含最新消息）：\n" + strings.Join(ctxLines, "\n")})
+	}
+
+	// 4. Extra instructions
 	if extraInstructions != "" {
 		msgs = append(msgs, llm.Message{Role: "system", Content: extraInstructions})
 	}
 
-	// The final user message is the latest one — explicitly mark it as the
-	// message to reply to, so the model doesn't latch onto an earlier turn.
-	safeCurrentMessage := fmt.Sprintf("【这是用户最新发的消息，请针对它回复，不要回复历史里的消息】\n当前发言人：%s\n消息：%s", currentSender, safety.SanitizeForLLM(currentContent))
-	budget.Add("current_message", safeCurrentMessage)
+	// 5. Final User Turn
 	msgs = append(msgs, llm.Message{Role: "user", Content: safeCurrentMessage})
 
 	budget.Log()
@@ -885,7 +1076,43 @@ func webSearch(query string, cfg *config.Config) ([]search.Result, error) {
 }
 
 func summarizeSearch(query string, results []search.Result, llmClient *llm.Client) string {
-	return search.Summarize(query, results)
+	if llmClient == nil || len(results) == 0 {
+		return search.Summarize(query, results)
+	}
+
+	var sb strings.Builder
+	for i, res := range results {
+		sb.WriteString(fmt.Sprintf("[%d] 标题：%s | 链接：%s\n内容：%s\n\n", i+1, res.Title, res.URL, res.Summary))
+	}
+	sources := sb.String()
+
+	prompt := fmt.Sprintf(`你是飞书陪伴机器人的外部搜索资料整理小弟。请将搜索到的多条外部参考资料融会贯通，撰写成一段流畅、有人设温度、有事实依据的解答。
+
+用户的问题：%s
+
+外部参考资料：
+%s
+
+回答规则：
+- 对内容进行归纳重组，让回答读起来像一个充满朝气和耐心的机器人小弟（“老板，您来得正好！我帮您查了查……”）。
+- 【非常重要】你的每一句核心事实结论，必须在句尾标注其来源资料的序号。例如：
+  “Google在2026年发布了Gemini 3.5 Flash模型，推理速度快且性价比高[1]。”
+- 在回答的尾部换行并打印具体的「参考资料：」列表。格式：
+  [1] 标题：链接
+  [2] 标题：链接
+- 尽量覆盖所有相关的关键信息，不要只敷衍列举一两条。
+
+只返回整理出的最终回答内容，不要包含任何系统调试信息。`, query, sources)
+
+	resp, err := llmClient.Chat(stdctx.Background(), []llm.Message{
+		{Role: "user", Content: prompt},
+	}, llm.WithTemperature(0.2), llm.WithMaxTokens(1000))
+	if err != nil {
+		log.Printf("[搜索合成] LLM 失败: %v", err)
+		return search.Summarize(query, results)
+	}
+
+	return resp
 }
 
 // ---- Main entry ----
@@ -953,27 +1180,6 @@ func recentMediaSearch(chatID string) bool {
 	return ok && time.Since(t) <= lastMediaTTL
 }
 
-var mediaFollowupWords = []string{"全部", "都看", "都要", "都发", "那张", "另一", "换一张", "再来", "再看", "再发", "别的图", "还有图", "都发来"}
-
-func hasMediaFollowupWord(s string) bool {
-	for _, w := range mediaFollowupWords {
-		if strings.Contains(s, w) {
-			return true
-		}
-	}
-	return false
-}
-
-// isRecallCommand reports whether the message asks the bot to recall its last
-// reply. Kept to short messages to avoid matching "撤回" inside normal sentences.
-func isRecallCommand(s string) bool {
-	s = strings.TrimSpace(s)
-	if len([]rune(s)) > 10 {
-		return false
-	}
-	lower := strings.ToLower(s)
-	return strings.Contains(s, "撤回") || strings.Contains(s, "发错了") || strings.Contains(s, "收回") || strings.Contains(lower, "recall")
-}
 
 // interpretMediaRequest uses the LLM to understand, in conversation context,
 // what images the user wants and whether they want all of them — resolving
@@ -1532,15 +1738,6 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 			log.Printf("[图片理解] %s", desc)
 		}
 	}
-	if isRecallCommand(msg.Content) {
-		if err := fs.RecallLastSent(ctx, msg.ChatID); err != nil {
-			log.Printf("[撤回] %v", err)
-			fs.ReplyText(ctx, "没找到能撤回的消息呀", msg.MessageID)
-		} else {
-			fs.ReplyText(ctx, "已撤回～", msg.MessageID)
-		}
-		return
-	}
 	st := convoState.UpdateMessage(msg, audience)
 	passiveAssistant.OnMessage(msg)
 
@@ -1548,13 +1745,8 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	// Passive group messages are judged by DeepSeek in planReply.
 	intent := IntentNone
 	if msg.ChatType != "group" || msg.IsMentioned {
-		intent = classifyIntent(msg.Content)
-	}
-
-	// @/private follow-ups after an image search can still route to the media
-	// handler, which reads conversation context to resolve the reference.
-	if (msg.ChatType != "group" || msg.IsMentioned) && intent == IntentNone && recentMediaSearch(msg.ChatID) && hasMediaFollowupWord(msg.Content) {
-		intent = IntentMedia
+		isRecentMediaSearch := st.LastImageQuery != "" && time.Since(st.LastActiveAt) < 5*time.Minute
+		intent = classifyIntent(ctx, llmClient, msg.Content, isRecentMediaSearch)
 	}
 
 	label := func(openid string) string {
@@ -1596,6 +1788,15 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 		return
 	case IntentMedia:
 		handleMediaIntent(ctx, cfg, mem, fs, msg, thinkReactID, llmClient, prof)
+		return
+	case IntentRecall:
+		if err := fs.RecallLastSent(ctx, msg.ChatID); err != nil {
+			log.Printf("[撤回] %v", err)
+			fs.ReplyText(ctx, "没找到能撤回的消息呀", msg.MessageID)
+		} else {
+			fs.ReplyText(ctx, "已撤回～", msg.MessageID)
+		}
+		cleanupReaction(ctx, fs, msg, thinkReactID)
 		return
 	}
 
@@ -1667,11 +1868,47 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 		fs.AddReaction(ctx, msg.MessageID, pickEmoji(msg.Content, msg.IsOwner, prof))
 	}
 
-	// Memory confirmation check
+	// Autonomous Memory confirmation check
 	if cfg.MemoryConfirmationEnabled && mem != nil && audience != "other" {
-		shouldRemember, candidate := shouldRememberViaLLM(ctx, msg.Content, msg.IsOwner, prof, llmClient)
+		var recentTurns []workingMemoryTurn
+		history, err := fs.ListMessages(ctx, msg.ChatID, 8)
+		if err == nil && len(history) > 0 {
+			for i := len(history) - 1; i >= 0; i-- {
+				h := history[i]
+				senderLabel := "对方"
+				if h.Sender == cfg.FeishuOwnerOpenID {
+					senderLabel = prof.OwnerName
+				} else if h.Sender == cfg.FeishuTargetOpenID {
+					senderLabel = prof.TargetDisplay()
+				} else if h.Sender == cfg.FeishuBotOpenID {
+					senderLabel = "机器人"
+				}
+				recentTurns = append(recentTurns, workingMemoryTurn{
+					Sender:  senderLabel,
+					Content: h.Content,
+				})
+			}
+		}
+
+		shouldRemember, candidate, mType := shouldRememberViaLLM(ctx, msg.Content, msg.IsOwner, prof, llmClient, recentTurns)
 		if shouldRemember && candidate != "" {
-			saveMemoryCandidate(ctx, cfg, fs, mem, candidate, msg.MessageID)
+			// Run memory consolidation to resolve conflicts and duplicates
+			mergedCandidate, keep := consolidateMemory(ctx, llmClient, mem, candidate, mType, msg.Sender, prof)
+			if keep && mergedCandidate != "" {
+				// Autonomous persistence directly into database
+				err := mem.Add(memory.Memory{
+					Content:    mergedCandidate,
+					MemoryType: memory.MemoryType(mType),
+					Sender:     msg.Sender,
+					Visibility: memory.VisOwnerOnly,
+				})
+				if err != nil {
+					log.Printf("[记忆沉淀] 写入记忆库失败: %v", err)
+				} else {
+					log.Printf("[记忆沉淀] 自动整理并成功存入长期记忆: %q", mergedCandidate)
+					fs.AddReaction(ctx, msg.MessageID, "SUBMIT")
+				}
+			}
 		}
 	}
 }
@@ -1992,62 +2229,10 @@ func cleanupReaction(ctx stdctx.Context, fs *feishu.Client, msg feishu.Message, 
 	}
 }
 
-func saveMemoryCandidate(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, mem memory.MemoryStore, content, replyToMsgID string) {
-	elements := []interface{}{
-		map[string]interface{}{
-			"tag":     "markdown",
-			"content": fmt.Sprintf("这条可能值得长期记住：\n\n%s", content),
-		},
-		map[string]interface{}{
-			"tag":   "button",
-			"text":  map[string]string{"tag": "plain_text", "content": "记住"},
-			"type":  "primary",
-			"name":  "memory_confirm_remember",
-			"value": map[string]string{"action": "remember_candidate", "content": content},
-		},
-		map[string]interface{}{
-			"tag":   "button",
-			"text":  map[string]string{"tag": "plain_text", "content": "不要记"},
-			"type":  "danger",
-			"name":  "memory_confirm_dismiss",
-			"value": map[string]string{"action": "dismiss_candidate", "content": content},
-		},
-	}
-
-	card := buildCard("候选记忆", "turquoise", elements)
-
-	// Send to owner's private chat via open_id
-	if cfg.FeishuOwnerOpenID != "" {
-		fs.SendCardToOpenID(ctx, card, cfg.FeishuOwnerOpenID)
-	}
-}
-
 // ---- Card action handler ----
 
 func onCardAction(ctx stdctx.Context, cfg *config.Config, prof *profile.Profile, mem memory.MemoryStore, llmClient *llm.Client, fs *feishu.Client, action feishu.CardAction) string {
 	log.Printf("[卡片回调] action=%s msgID=%s operator=%s", action.Action, action.MessageID, action.OperatorID)
-
-	switch action.Action {
-	case "remember_candidate":
-		// Content is passed in ActionValue, save now
-		if mem != nil && action.ActionValue != nil {
-			if content, ok := action.ActionValue["content"].(string); ok && content != "" {
-				m := memory.Memory{
-					ID:         fmt.Sprintf("cand_%d", time.Now().UnixNano()),
-					Content:    content,
-					Visibility: memory.VisOwnerOnly,
-					SourceType: "llm_candidate",
-					CreatedAt:  time.Now().Unix(),
-				}
-				mem.Add(m)
-				return "已写入记忆"
-			}
-		}
-		return "内容为空，未写入"
-	case "dismiss_candidate":
-		// Just acknowledge, don't save
-		return "好，这条不记"
-	}
 	return "已收到"
 }
 

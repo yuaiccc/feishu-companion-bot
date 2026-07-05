@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Visibility string
@@ -18,16 +20,44 @@ const (
 	VisPublicToTarget Visibility = "public_to_target"
 )
 
+type MemoryType string
+
+const (
+	MemoryTypeWorking      MemoryType = "working"
+	MemoryTypeEpisodic     MemoryType = "episodic"
+	MemoryTypeSemantic     MemoryType = "semantic"
+	MemoryTypeRelational   MemoryType = "relational"
+	MemoryTypeArchiveChat  MemoryType = "archive_chat"
+	MemoryTypeArchiveMedia MemoryType = "archive_media"
+)
+
 type Memory struct {
 	ID         string     `json:"id"`
 	Content    string     `json:"content"`
 	Raw        string     `json:"raw"`
 	Sender     string     `json:"sender"`
 	Category   string     `json:"category"`
+	MemoryType MemoryType `json:"memory_type"`
+	Importance int        `json:"importance"`
+	Confidence float64    `json:"confidence"`
+	LastUsedAt int64      `json:"last_used_at"`
+	ExpiresAt  int64      `json:"expires_at"`
 	Visibility Visibility `json:"visibility"`
 	SourceType string     `json:"source_type"`
 	Hash       string     `json:"hash"`
 	CreatedAt  int64      `json:"created_at"`
+}
+
+type RetrievedMemory struct {
+	ID         string
+	Text       string
+	MemoryType MemoryType
+	SourceType string
+	Importance int
+	Confidence float64
+	LastUsedAt int64
+	ExpiresAt  int64
+	CreatedAt  int64
 }
 
 type MediaResult struct {
@@ -50,6 +80,113 @@ func (m MediaResult) ContextText() string {
 		parts = append(parts, "文字："+m.OCRText)
 	}
 	return strings.Join(parts, " ")
+}
+
+func (m RetrievedMemory) PromptText() string {
+	prefix := MemoryTypeLabel(m.MemoryType)
+	if prefix == "" {
+		return m.Text
+	}
+	return fmt.Sprintf("[%s] %s", prefix, m.Text)
+}
+
+func MemoryTypeLabel(mt MemoryType) string {
+	switch mt {
+	case MemoryTypeWorking:
+		return "工作记忆"
+	case MemoryTypeEpisodic:
+		return "情景记忆"
+	case MemoryTypeSemantic:
+		return "语义记忆"
+	case MemoryTypeRelational:
+		return "关系记忆"
+	case MemoryTypeArchiveChat:
+		return "聊天归档"
+	case MemoryTypeArchiveMedia:
+		return "图片归档"
+	default:
+		return ""
+	}
+}
+
+func NormalizeMemoryType(mt MemoryType, content string) MemoryType {
+	switch mt {
+	case MemoryTypeWorking, MemoryTypeEpisodic, MemoryTypeSemantic, MemoryTypeRelational, MemoryTypeArchiveChat, MemoryTypeArchiveMedia:
+		return mt
+	}
+	return InferMemoryType(content)
+}
+
+func NormalizeImportance(v int, mt MemoryType) int {
+	if v > 0 {
+		if v > 5 {
+			return 5
+		}
+		return v
+	}
+	switch mt {
+	case MemoryTypeRelational:
+		return 5
+	case MemoryTypeSemantic:
+		return 4
+	case MemoryTypeEpisodic:
+		return 3
+	case MemoryTypeWorking:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func NormalizeConfidence(v float64, mt MemoryType) float64 {
+	if v > 0 {
+		if v > 1 {
+			return 1
+		}
+		return v
+	}
+	switch mt {
+	case MemoryTypeRelational, MemoryTypeSemantic:
+		return 0.85
+	case MemoryTypeEpisodic:
+		return 0.75
+	case MemoryTypeWorking:
+		return 0.6
+	default:
+		return 0.7
+	}
+}
+
+func NormalizeExpiresAt(v int64, mt MemoryType) int64 {
+	if v > 0 {
+		return v
+	}
+	switch mt {
+	case MemoryTypeEpisodic:
+		return time.Now().Add(365 * 24 * time.Hour).Unix()
+	case MemoryTypeWorking:
+		return time.Now().Add(72 * time.Hour).Unix()
+	default:
+		return 0
+	}
+}
+
+func IsExpired(expiresAt int64) bool {
+	return expiresAt > 0 && time.Now().Unix() >= expiresAt
+}
+
+func InferMemoryType(content string) MemoryType {
+	lower := strings.ToLower(strings.TrimSpace(content))
+	switch {
+	case strings.Contains(lower, "叫她") || strings.Contains(lower, "称呼") || strings.Contains(lower, "安慰") || strings.Contains(lower, "心软") || strings.Contains(lower, "关系") || strings.Contains(lower, "老婆"):
+		return MemoryTypeRelational
+	case strings.Contains(lower, "喜欢") || strings.Contains(lower, "不加糖") || strings.Contains(lower, "平时") || strings.Contains(lower, "家住") || strings.Contains(lower, "本科") || strings.Contains(lower, "大学") || strings.Contains(lower, "学校"):
+		return MemoryTypeSemantic
+	case strings.Contains(lower, "今天") || strings.Contains(lower, "昨晚") || strings.Contains(lower, "这次") || strings.Contains(lower, "刚刚") || strings.Contains(lower, "一起") || strings.Contains(lower, "第一次见面"):
+		return MemoryTypeEpisodic
+	default:
+		return MemoryTypeSemantic
+	}
 }
 
 type Store struct {
@@ -75,21 +212,66 @@ func NewStore(profileID, dataDir string) (*Store, error) {
 func (s *Store) Add(m Memory) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	m.MemoryType = NormalizeMemoryType(m.MemoryType, m.Content)
+	m.Importance = NormalizeImportance(m.Importance, m.MemoryType)
+	m.Confidence = NormalizeConfidence(m.Confidence, m.MemoryType)
+	m.ExpiresAt = NormalizeExpiresAt(m.ExpiresAt, m.MemoryType)
 	s.Items = append(s.Items, m)
 	return s.flush()
 }
 
 func (s *Store) Search(query string, audience string) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var results []string
+	results := s.SearchRelevant(query, audience)
+	out := make([]string, 0, len(results))
+	for _, item := range results {
+		out = append(out, item.Text)
+	}
+	return out
+}
+
+func (s *Store) SearchRelevant(query string, audience string) []RetrievedMemory {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var results []RetrievedMemory
 	for _, m := range s.Items {
+		if IsExpired(m.ExpiresAt) {
+			continue
+		}
 		if !s.visibleTo(m, audience) {
 			continue
 		}
-		results = append(results, m.Content)
+		results = append(results, RetrievedMemory{
+			ID:         m.ID,
+			Text:       m.Content,
+			MemoryType: NormalizeMemoryType(m.MemoryType, m.Content),
+			SourceType: m.SourceType,
+			Importance: NormalizeImportance(m.Importance, m.MemoryType),
+			Confidence: NormalizeConfidence(m.Confidence, m.MemoryType),
+			LastUsedAt: m.LastUsedAt,
+			ExpiresAt:  NormalizeExpiresAt(m.ExpiresAt, m.MemoryType),
+			CreatedAt:  m.CreatedAt,
+		})
 	}
+	sortRetrievedMemories(results)
+	s.touchRetrieved(results)
 	return results
+}
+
+func (s *Store) touchRetrieved(results []RetrievedMemory) {
+	now := time.Now().Unix()
+	changed := false
+	for _, result := range results {
+		for i := range s.Items {
+			if s.Items[i].ID == result.ID && result.ID != "" {
+				s.Items[i].LastUsedAt = now
+				changed = true
+				break
+			}
+		}
+	}
+	if changed {
+		_ = s.flush()
+	}
 }
 
 func (s *Store) visibleTo(m Memory, audience string) bool {
@@ -139,6 +321,7 @@ type MemoryStore interface {
 	Add(m Memory) error
 	Delete(id string) error
 	Search(query string, audience string) []string
+	SearchRelevant(query string, audience string) []RetrievedMemory
 }
 
 var _ MemoryStore = (*Store)(nil)
@@ -147,4 +330,41 @@ var _ MemoryStore = (*SearchStore)(nil)
 func HashContent(content string) string {
 	h := sha1.Sum([]byte(content))
 	return fmt.Sprintf("%x", h[:])
+}
+
+func sortRetrievedMemories(results []RetrievedMemory) {
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].MemoryType != results[j].MemoryType {
+			return memoryTypePriority(results[i].MemoryType) < memoryTypePriority(results[j].MemoryType)
+		}
+		if results[i].Importance != results[j].Importance {
+			return results[i].Importance > results[j].Importance
+		}
+		if results[i].Confidence != results[j].Confidence {
+			return results[i].Confidence > results[j].Confidence
+		}
+		if results[i].LastUsedAt != results[j].LastUsedAt {
+			return results[i].LastUsedAt > results[j].LastUsedAt
+		}
+		return results[i].CreatedAt > results[j].CreatedAt
+	})
+}
+
+func memoryTypePriority(mt MemoryType) int {
+	switch mt {
+	case MemoryTypeWorking:
+		return 0
+	case MemoryTypeRelational:
+		return 1
+	case MemoryTypeSemantic:
+		return 2
+	case MemoryTypeEpisodic:
+		return 3
+	case MemoryTypeArchiveChat:
+		return 4
+	case MemoryTypeArchiveMedia:
+		return 5
+	default:
+		return 6
+	}
 }

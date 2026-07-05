@@ -229,6 +229,22 @@ func (s *SearchStore) Search(query string, audience string) []string {
 	return s.KeywordSearch(query, SearchOptions{TopK: 5, FilterOwner: audience})
 }
 
+func (s *SearchStore) SearchRelevant(query string, audience string) []RetrievedMemory {
+	texts := s.Search(query, audience)
+	results := make([]RetrievedMemory, 0, len(texts))
+	for _, text := range texts {
+		results = append(results, RetrievedMemory{
+			Text:       text,
+			MemoryType: InferMemoryType(text),
+			SourceType: "local_memory",
+			Importance: NormalizeImportance(0, InferMemoryType(text)),
+			Confidence: NormalizeConfidence(0, InferMemoryType(text)),
+		})
+	}
+	sortRetrievedMemories(results)
+	return results
+}
+
 // Delete removes a memory by ID.
 func (s *SearchStore) Delete(id string) error {
 	return s.Store.Delete(id)

@@ -3,6 +3,7 @@ package context
 import (
 	"fmt"
 	"log"
+	"strings"
 )
 
 type Budget struct {
@@ -12,25 +13,29 @@ type Budget struct {
 }
 
 type Section struct {
-	Name   string
-	Chars  int
+	Name  string
+	Chars int
 }
 
 func NewBudget(maxChars int) *Budget {
 	return &Budget{MaxChars: maxChars}
 }
 
-func (b *Budget) Add(section, content string) string {
-	if b.Used >= b.MaxChars {
-		return ""
+// CanFit reports whether a content of a given size can fit in the remaining budget.
+func (b *Budget) CanFit(length int) bool {
+	return b.Used+length <= b.MaxChars
+}
+
+// Reserve allocates budget for a content. It returns true if it fits, otherwise false.
+// If it fits, b.Used is incremented.
+func (b *Budget) Reserve(section string, content string) bool {
+	l := len(content)
+	if b.Used+l > b.MaxChars {
+		return false
 	}
-	remaining := b.MaxChars - b.Used
-	if len(content) > remaining {
-		content = content[:remaining]
-	}
-	b.Used += len(content)
-	b.Sections = append(b.Sections, Section{Name: section, Chars: len(content)})
-	return content
+	b.Used += l
+	b.Sections = append(b.Sections, Section{Name: section, Chars: l})
+	return true
 }
 
 func (b *Budget) Log() {
@@ -38,25 +43,5 @@ func (b *Budget) Log() {
 	for _, s := range b.Sections {
 		parts = append(parts, fmt.Sprintf("%s=%d", s.Name, s.Chars))
 	}
-	log.Printf("[上下文] %s", joinStrings(parts, " "))
-}
-
-func joinStrings(parts []string, sep string) string {
-	switch len(parts) {
-	case 0:
-		return ""
-	case 1:
-		return parts[0]
-	}
-	n := (len(parts) - 1) * len(sep)
-	for _, s := range parts {
-		n += len(s)
-	}
-	buf := make([]byte, 0, n)
-	buf = append(buf, parts[0]...)
-	for _, s := range parts[1:] {
-		buf = append(buf, sep...)
-		buf = append(buf, s...)
-	}
-	return string(buf)
+	log.Printf("[上下文] %s", strings.Join(parts, " "))
 }
