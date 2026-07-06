@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	stdctx "context"
 	"feishu-companion-bot/internal/config"
@@ -54,6 +55,22 @@ func (m *mockMemoryStore) SearchRelevant(query string, audience string) []memory
 		})
 	}
 	return out
+}
+
+func (m *mockMemoryStore) GetRelationshipState() (memory.RelationshipState, error) {
+	return memory.RelationshipState{MoodScore: 80, AffinityScore: 80, LastSentiment: "neutral"}, nil
+}
+
+func (m *mockMemoryStore) UpdateRelationshipState(state memory.RelationshipState) error {
+	return nil
+}
+
+func (m *mockMemoryStore) GetImageHashCache(hash string) (ocr string, caption string, err error) {
+	return "", "", fmt.Errorf("not implemented in mock")
+}
+
+func (m *mockMemoryStore) SaveImageHashCache(hash string, ocr string, caption string) error {
+	return nil
 }
 
 func init() {
@@ -301,6 +318,7 @@ func TestSmokeQueryShushuFood(t *testing.T) {
 	
 	messages := buildChatMessages(
 		prof,
+		nil,
 		query,
 		"三哥",
 		"msg_smoke",
@@ -319,3 +337,135 @@ func TestSmokeQueryShushuFood(t *testing.T) {
 
 	t.Logf("\n💬 --- ROBOT REPLY ---\n%s\n----------------------", reply)
 }
+
+func TestTemporalMemoryAlignment(t *testing.T) {
+	cfg := config.Load()
+	if cfg.DeepSeekAPIKey == "" {
+		t.Skip("DEEPSEEK_API_KEY not configured")
+	}
+	llmClient := llm.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
+
+	memories := []string{
+		"[聊天记录 2023-06-22] 对方: 我觉得鸡爪煲特别好吃，舒舒也很喜欢吃鸡爪煲。",
+		"[语义记忆] 舒舒最近在减肥，说以后再也不吃油腻的鸡爪煲了，只吃清蒸沙拉。",
+	}
+
+	aligned := alignTemporalMemory(stdctx.Background(), llmClient, memories)
+	if len(aligned) == 0 {
+		t.Fatalf("Aligned memories should not be empty")
+	}
+
+	hasCokeArchive := false
+	hasNewFact := false
+	for _, m := range aligned {
+		if strings.Contains(m, "鸡爪煲特别好吃") {
+			hasCokeArchive = true
+		}
+		if strings.Contains(m, "再也不吃油腻的鸡爪煲") {
+			hasNewFact = true
+		}
+	}
+
+	// Because alignment is run, the outdated WeChat record should be filtered out
+	if hasCokeArchive {
+		t.Errorf("Temporal memory alignment failed: outdated WeChat record was not filtered out")
+	}
+	if !hasNewFact {
+		t.Errorf("Temporal memory alignment failed: new semantic memory was lost")
+	}
+}
+
+type mock1024Embedder struct{}
+
+func (e *mock1024Embedder) Embed(text string) ([]float32, error) {
+	vec := make([]float32, 1024)
+	vec[0] = 0.5
+	return vec, nil
+}
+
+func TestAsyncEmbeddingAndHashCache(t *testing.T) {
+	cfg := config.Load()
+	if cfg.MemoryDatabaseDSN == "" {
+		t.Skip("MEMORY_DATABASE_DSN not configured in .env, skipping OceanBase integration tests")
+	}
+
+	opts := memory.DatabaseOptions{
+		DSN:       cfg.MemoryDatabaseDSN,
+		ProfileID: "test_async_opt",
+		Embedder:  &mock1024Embedder{},
+	}
+	store, err := memory.NewDatabaseStore(opts)
+	if err != nil {
+		t.Fatalf("Failed to connect to OceanBase: %v", err)
+	}
+	defer store.Close()
+
+	// 1. Test image hash cache
+	testHash := "img_md5_test_hash_val"
+	ocrExpected := "测试图片文字内容"
+	captionExpected := "一只可爱的测试猫咪"
+
+	err = store.SaveImageHashCache(testHash, ocrExpected, captionExpected)
+	if err != nil {
+		t.Fatalf("Failed to save image hash cache: %v", err)
+	}
+
+	ocrRet, captionRet, err := store.GetImageHashCache(testHash)
+	if err != nil {
+		t.Fatalf("Failed to get image hash cache: %v", err)
+	}
+	if ocrRet != ocrExpected || captionRet != captionExpected {
+		t.Errorf("Image hash cache value mismatch: got ocr=%q, cap=%q, want ocr=%q, cap=%q", ocrRet, captionRet, ocrExpected, captionExpected)
+	}
+
+	// 2. Test async embedding calculation and eventual consistency
+	testMem := memory.Memory{
+		ID:         fmt.Sprintf("mem_async_t_%d", time.Now().UnixNano()),
+		Content:    "大哥今天很开心，说要带我们去吃火锅。",
+		MemoryType: memory.MemoryTypeSemantic,
+		Visibility: memory.VisOwnerOnly,
+	}
+
+	// Sync write should complete instantly
+	err = store.Add(testMem)
+	if err != nil {
+		t.Fatalf("Failed to Add memory: %v", err)
+	}
+
+	// Poll database for up to 2 seconds to check if background embedding worker finished writing the vector
+	var hasVector bool
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		var vecRaw []byte
+		err = store.GetDBConn().QueryRow(`SELECT embedding FROM bot_memories WHERE id=?`, testMem.ID).Scan(&vecRaw)
+		if err == nil && len(vecRaw) > 0 {
+			hasVector = true
+			break
+		}
+	}
+
+	if !hasVector {
+		t.Errorf("Async embedding worker failed to compute and update vector within 2 seconds")
+	}
+
+	// 3. Test relationship metrics tracker
+	relState := memory.RelationshipState{
+		MoodScore:     95,
+		AffinityScore: 98,
+		LastSentiment: "happy",
+	}
+	err = store.UpdateRelationshipState(relState)
+	if err != nil {
+		t.Fatalf("Failed to update relationship state: %v", err)
+	}
+
+	relRet, err := store.GetRelationshipState()
+	if err != nil {
+		t.Fatalf("Failed to get relationship state: %v", err)
+	}
+	if relRet.MoodScore != relState.MoodScore || relRet.AffinityScore != relState.AffinityScore || relRet.LastSentiment != relState.LastSentiment {
+		t.Errorf("Relationship state mismatch: got %+v, want %+v", relRet, relState)
+	}
+}
+
+

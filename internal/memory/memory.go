@@ -315,6 +315,13 @@ func (s *Store) Delete(id string) error {
 	return nil
 }
 
+// RelationshipState tracks emotional metrics and affinity scores for custom人设.
+type RelationshipState struct {
+	MoodScore     int    `json:"mood_score"`
+	AffinityScore int    `json:"affinity_score"`
+	LastSentiment string `json:"last_sentiment"`
+}
+
 // MemoryStore is the interface for memory storage operations.
 type MemoryStore interface {
 	All() []Memory
@@ -322,6 +329,30 @@ type MemoryStore interface {
 	Delete(id string) error
 	Search(query string, audience string) []string
 	SearchRelevant(query string, audience string) []RetrievedMemory
+
+	// 情绪与亲密度管理
+	GetRelationshipState() (RelationshipState, error)
+	UpdateRelationshipState(state RelationshipState) error
+
+	// 图片 MD5 缓存管理
+	GetImageHashCache(hash string) (ocr string, caption string, err error)
+	SaveImageHashCache(hash string, ocr string, caption string) error
+}
+
+func (s *Store) GetRelationshipState() (RelationshipState, error) {
+	return RelationshipState{MoodScore: 80, AffinityScore: 80, LastSentiment: "neutral"}, nil
+}
+
+func (s *Store) UpdateRelationshipState(state RelationshipState) error {
+	return nil
+}
+
+func (s *Store) GetImageHashCache(hash string) (ocr string, caption string, err error) {
+	return "", "", fmt.Errorf("not supported in file store")
+}
+
+func (s *Store) SaveImageHashCache(hash string, ocr string, caption string) error {
+	return nil
 }
 
 var _ MemoryStore = (*Store)(nil)

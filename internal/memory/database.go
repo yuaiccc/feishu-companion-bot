@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sort"
@@ -49,6 +50,7 @@ type DatabaseStore struct {
 	mediaFilePathColumn   string
 	mediaMsgIDColumn      string
 	embedder              Embedder
+	embedQueue            chan string
 }
 
 func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
@@ -123,11 +125,14 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 		mediaFilePathColumn:   opts.MediaFilePathColumn,
 		mediaMsgIDColumn:      opts.MediaMsgIDColumn,
 		embedder:              opts.Embedder,
+		embedQueue:            make(chan string, 500),
 	}
 	if err := store.ensureSchema(); err != nil {
 		db.Close()
 		return nil, err
 	}
+	// Start async embedding background worker
+	go store.startEmbeddingWorker(context.Background())
 	return store, nil
 }
 
@@ -174,6 +179,30 @@ CREATE TABLE IF NOT EXISTS bot_memories (
 			return err
 		}
 	}
+	_, err = s.db.Exec(`
+CREATE TABLE IF NOT EXISTS relationship_state (
+  profile_id varchar(64) NOT NULL,
+  mood_score int DEFAULT 80,
+  affinity_score int DEFAULT 80,
+  last_sentiment varchar(32) DEFAULT 'neutral',
+  updated_at bigint DEFAULT NULL,
+  PRIMARY KEY (profile_id)
+) DEFAULT CHARSET=utf8mb4`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec(`
+CREATE TABLE IF NOT EXISTS image_hash_cache (
+  image_hash varchar(64) NOT NULL,
+  ocr_text longtext DEFAULT NULL,
+  caption longtext DEFAULT NULL,
+  created_at bigint DEFAULT NULL,
+  PRIMARY KEY (image_hash)
+) DEFAULT CHARSET=utf8mb4`)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -192,25 +221,50 @@ func (s *DatabaseStore) Add(m Memory) error {
 	m.Confidence = NormalizeConfidence(m.Confidence, m.MemoryType)
 	m.ExpiresAt = NormalizeExpiresAt(m.ExpiresAt, m.MemoryType)
 
-	var vecLiteral interface{} = nil
-	if s.embedder != nil {
-		if vec, err := s.embedder.Embed(m.Content); err == nil && len(vec) > 0 {
-			vecLiteral = vectorLiteral(vec)
-		}
-	}
-
 	_, err := s.db.Exec(`
 INSERT INTO bot_memories
   (id, profile_id, content, raw, sender, category, memory_type, importance, confidence, last_used_at, expires_at, visibility, source_type, hash, created_at, embedding)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 ON DUPLICATE KEY UPDATE
   content=VALUES(content), raw=VALUES(raw), sender=VALUES(sender), category=VALUES(category),
   memory_type=VALUES(memory_type), importance=VALUES(importance), confidence=VALUES(confidence),
   last_used_at=VALUES(last_used_at), expires_at=VALUES(expires_at),
-  visibility=VALUES(visibility), source_type=VALUES(source_type), hash=VALUES(hash),
-  embedding=VALUES(embedding)`,
-		m.ID, s.profileID, m.Content, m.Raw, m.Sender, m.Category, string(m.MemoryType), m.Importance, m.Confidence, m.LastUsedAt, m.ExpiresAt, string(m.Visibility), m.SourceType, m.Hash, m.CreatedAt, vecLiteral)
+  visibility=VALUES(visibility), source_type=VALUES(source_type), hash=VALUES(hash)`,
+		m.ID, s.profileID, m.Content, m.Raw, m.Sender, m.Category, string(m.MemoryType), m.Importance, m.Confidence, m.LastUsedAt, m.ExpiresAt, string(m.Visibility), m.SourceType, m.Hash, m.CreatedAt)
+	if err == nil {
+		if s.embedder != nil && s.embedQueue != nil {
+			select {
+			case s.embedQueue <- m.ID:
+			default:
+				// If channel is full, log or discard to prevent block
+			}
+		}
+	}
 	return err
+}
+
+func (s *DatabaseStore) startEmbeddingWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case id, ok := <-s.embedQueue:
+			if !ok {
+				return
+			}
+			var content string
+			err := s.db.QueryRow(`SELECT content FROM bot_memories WHERE id=?`, id).Scan(&content)
+			if err != nil || content == "" {
+				continue
+			}
+			if s.embedder != nil {
+				vec, err := s.embedder.Embed(content)
+				if err == nil && len(vec) > 0 {
+					_, _ = s.db.Exec(`UPDATE bot_memories SET embedding=? WHERE id=?`, vectorLiteral(vec), id)
+				}
+			}
+		}
+	}
 }
 
 func (s *DatabaseStore) Delete(id string) error {
@@ -1054,6 +1108,51 @@ func allowedVisibility(audience string) []Visibility {
 
 func (s *DatabaseStore) Close() error {
 	return s.db.Close()
+}
+
+func (s *DatabaseStore) GetDBConn() *sql.DB {
+	return s.db
+}
+
+func (s *DatabaseStore) GetRelationshipState() (RelationshipState, error) {
+	var state RelationshipState
+	err := s.db.QueryRow(`
+SELECT mood_score, affinity_score, COALESCE(last_sentiment, 'neutral')
+FROM relationship_state
+WHERE profile_id=?`, s.profileID).Scan(&state.MoodScore, &state.AffinityScore, &state.LastSentiment)
+	if err == sql.ErrNoRows {
+		return RelationshipState{MoodScore: 80, AffinityScore: 80, LastSentiment: "neutral"}, nil
+	}
+	return state, err
+}
+
+func (s *DatabaseStore) UpdateRelationshipState(state RelationshipState) error {
+	_, err := s.db.Exec(`
+INSERT INTO relationship_state (profile_id, mood_score, affinity_score, last_sentiment, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  mood_score=VALUES(mood_score), affinity_score=VALUES(affinity_score),
+  last_sentiment=VALUES(last_sentiment), updated_at=VALUES(updated_at)`,
+		s.profileID, state.MoodScore, state.AffinityScore, state.LastSentiment, time.Now().Unix())
+	return err
+}
+
+func (s *DatabaseStore) GetImageHashCache(hash string) (ocr string, caption string, err error) {
+	err = s.db.QueryRow(`
+SELECT ocr_text, caption
+FROM image_hash_cache
+WHERE image_hash=?`, hash).Scan(&ocr, &caption)
+	return ocr, caption, err
+}
+
+func (s *DatabaseStore) SaveImageHashCache(hash string, ocr string, caption string) error {
+	_, err := s.db.Exec(`
+INSERT INTO image_hash_cache (image_hash, ocr_text, caption, created_at)
+VALUES (?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  ocr_text=VALUES(ocr_text), caption=VALUES(caption)`,
+		hash, ocr, caption, time.Now().Unix())
+	return err
 }
 
 var _ MemoryStore = (*DatabaseStore)(nil)

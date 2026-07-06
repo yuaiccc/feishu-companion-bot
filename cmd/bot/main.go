@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -344,7 +345,7 @@ func inferEmotion(content string) string {
 	}
 }
 
-func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, intent Intent, st conversationState, prof *profile.Profile, senderLabel string) replyPlan {
+func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, intent Intent, st conversationState, prof *profile.Profile, senderLabel string, mem memory.MemoryStore) replyPlan {
 	plan := defaultReplyPlan(msg, intent, st)
 	passiveGroup := msg.ChatType == "group" && !msg.IsMentioned
 	if passiveGroup && llmClient == nil {
@@ -378,7 +379,7 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 
 用户消息：%s`, senderLabel, stateText, safety.SanitizeForLLM(msg.Content))
 	reply, err := llmClient.Chat(ctx, []llm.Message{
-		{Role: "system", Content: buildSystemPrompt(prof)},
+		{Role: "system", Content: buildSystemPrompt(prof, mem)},
 		{Role: "user", Content: prompt},
 	}, llm.WithTemperature(0), llm.WithMaxTokens(256))
 	if err != nil {
@@ -554,6 +555,141 @@ func pickEmoji(content string, fromOwner bool, prof *profile.Profile) string {
 }
 
 // ---- Memory candidate decision ----
+
+func alignTemporalMemory(ctx stdctx.Context, llmClient *llm.Client, memories []string) []string {
+	if llmClient == nil || len(memories) < 2 {
+		return memories
+	}
+
+	var sb strings.Builder
+	for i, m := range memories {
+		sb.WriteString(fmt.Sprintf("[%d] %s\n", i, m))
+	}
+	memList := sb.String()
+
+	prompt := fmt.Sprintf(`你是一个历史记忆对齐与消解管家。下面是从数据库中检索出来的多条针对同一个用户的近期和历史记忆片段（包括以前的微信聊天记录、图片OCR以及机器人主动沉淀的事实记忆）。
+
+请分析这几条记忆。如果较新的记忆（如飞书对话中提炼出的事实）明确否定、修正或冲突了较老旧的历史记录（如带有 [聊天记录 YYYY-MM-DD] 的过去微信对话），说明老旧的记录信息已经失效或发生了实质改变。
+
+你必须仅保留当前最新生效的记忆事实，并在返回的 JSON 中列出应当被“保留”的记忆条目索引号。
+
+召回的记忆列表：
+%s
+
+只返回 JSON，不要解释。格式：
+{"valid_indices": [0, 2, ...]}`, memList)
+
+	resp, err := llmClient.Chat(ctx, []llm.Message{
+		{Role: "user", Content: prompt},
+	}, llm.WithTemperature(0), llm.WithMaxTokens(128))
+	if err != nil {
+		log.Printf("[记忆对齐] 过滤失败: %v", err)
+		return memories
+	}
+
+	m := extractJSON(resp)
+	if m == "" {
+		return memories
+	}
+	var result struct {
+		ValidIndices []int `json:"valid_indices"`
+	}
+	if err := json.Unmarshal([]byte(m), &result); err != nil {
+		log.Printf("[记忆对齐] 解析 JSON 失败: %v", err)
+		return memories
+	}
+
+	if len(result.ValidIndices) == 0 {
+		return memories
+	}
+
+	var aligned []string
+	seen := make(map[int]bool)
+	for _, idx := range result.ValidIndices {
+		if idx >= 0 && idx < len(memories) {
+			aligned = append(aligned, memories[idx])
+			seen[idx] = true
+		}
+	}
+
+	log.Printf("[记忆对齐] 原始记忆数: %d -> 对齐后留存数: %d", len(memories), len(aligned))
+	return aligned
+}
+
+func updateEmotionMetrics(ctx stdctx.Context, llmClient *llm.Client, memStore memory.MemoryStore, userMsg string, replyMsg string) {
+	if memStore == nil || llmClient == nil || userMsg == "" || replyMsg == "" {
+		return
+	}
+
+	oldState, err := memStore.GetRelationshipState()
+	if err != nil {
+		oldState = memory.RelationshipState{MoodScore: 80, AffinityScore: 80, LastSentiment: "neutral"}
+	}
+
+	prompt := fmt.Sprintf(`你是一个陪伴机器人的情感关系分析管家。请根据用户最新发的消息和机器人的回复，评估并更新当前用户的“情绪指数”（Mood）和“人机亲密好感度”（Affinity）。
+
+当前值：
+- 大哥情绪分值（0到100）：%d
+- 大哥亲密好感度（0到100）：%d
+- 上次情感状态：%s
+
+用户消息：%s
+机器人回复：%s
+
+更新规则：
+- mood_score 评估用户的当下精神情绪。如果表现为疲惫、委屈、难过或生气，分值应适当降低（如50-70）；如果表现为开心、放松、开玩笑，分值应提升（如85-95）。
+- affinity_score 评估用户与机器人小弟之间的亲近程度。如果用户夸奖小弟、认可小弟、进行温馨的私密分享，亲密度分值上升；如果吐槽、嫌弃、态度冰冷，亲密度分值可以微降。
+- last_sentiment 必须为以下四种之一：happy (高兴/轻松), tired (疲惫/难过), angry (生气/烦躁), neutral (平静/普通)。
+
+只返回 JSON，不要解释。格式：
+{"mood_score": 整数, "affinity_score": 整数, "last_sentiment": "四种状态之一"}`, oldState.MoodScore, oldState.AffinityScore, oldState.LastSentiment, userMsg, replyMsg)
+
+	resp, err := llmClient.Chat(ctx, []llm.Message{
+		{Role: "user", Content: prompt},
+	}, llm.WithTemperature(0), llm.WithMaxTokens(128))
+	if err != nil {
+		log.Printf("[情绪更新] LLM 分析失败: %v", err)
+		return
+	}
+
+	m := extractJSON(resp)
+	if m == "" {
+		return
+	}
+	var result struct {
+		MoodScore     int    `json:"mood_score"`
+		AffinityScore int    `json:"affinity_score"`
+		LastSentiment string `json:"last_sentiment"`
+	}
+	if err := json.Unmarshal([]byte(m), &result); err != nil {
+		return
+	}
+
+	if result.MoodScore < 0 {
+		result.MoodScore = 0
+	}
+	if result.MoodScore > 100 {
+		result.MoodScore = 100
+	}
+	if result.AffinityScore < 0 {
+		result.AffinityScore = 0
+	}
+	if result.AffinityScore > 100 {
+		result.AffinityScore = 100
+	}
+
+	newState := memory.RelationshipState{
+		MoodScore:     result.MoodScore,
+		AffinityScore: result.AffinityScore,
+		LastSentiment: result.LastSentiment,
+	}
+	err = memStore.UpdateRelationshipState(newState)
+	if err != nil {
+		log.Printf("[情绪更新] 写入 relationship_state 失败: %v", err)
+	} else {
+		log.Printf("[情绪更新] 成功! 情绪值: %d, 亲密值: %d, 状态: %s", newState.MoodScore, newState.AffinityScore, newState.LastSentiment)
+	}
+}
 
 type workingMemoryTurn struct {
 	Sender  string
@@ -833,7 +969,7 @@ func endsWithPunct(s string) bool {
 
 // ---- Build prompt ----
 
-func buildSystemPrompt(prof *profile.Profile) string {
+func buildSystemPrompt(prof *profile.Profile, mem memory.MemoryStore) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("你是%s，%s的小助手。", prof.BotRoleText(), prof.OwnerName))
 	if prof.TargetName != "" {
@@ -853,6 +989,13 @@ func buildSystemPrompt(prof *profile.Profile) string {
 	if roster := prof.IdentityRoster(); roster != "" {
 		b.WriteString(" 已知成员表：\n")
 		b.WriteString(roster)
+	}
+
+	// Dynamic sentiment and relationship injection
+	if mem != nil {
+		if state, err := mem.GetRelationshipState(); err == nil {
+			b.WriteString(fmt.Sprintf(" 【当前情感氛围】当前大哥的情绪指数为 %d/100（状态：%s，当分值较小如小于70时，说明他疲惫或受挫，请加倍温和与多给安慰；分值正常时可幽默）；你们当前的亲密度分值为 %d/100。请根据此分值自动微调你的语调。", state.MoodScore, state.LastSentiment, state.AffinityScore))
+		}
 	}
 	b.WriteString(" 【重要记忆与会话一体化原则】提供给你的“相关记忆”中如果包含 `[聊天记录 YYYY-MM-DD HH:MM]` 前缀的文本，这与“对话历史”一样，全都是你与 owner 过去在不同渠道（如微信、飞书等）留下的连续会话足迹。你必须把它们视为一个整体且连贯的聊天时间线。在回复时，请极其自然、直接地融入这些过去的聊天背景，像是一直在同一个会话中无间断聊天一样，直接使用这些历史内容作为你回答的背景和默契事实。绝不要生硬地向用户提及“根据我的记忆”、“在微信聊天记录里查到”等带有机器痕迹的词汇，让所有历史对话上下文与当前对话浑然一体。")
 	b.WriteString(" 不要在回复末尾加\"正在输入\"或\"整理中\"这类占位文字。")
@@ -887,8 +1030,8 @@ func audienceForSender(cfg *config.Config, prof *profile.Profile, msg feishu.Mes
 	}
 }
 
-func buildChatMessages(prof *profile.Profile, currentContent string, currentSender string, currentMessageID string, recentMsgs []feishu.Message, memories []string, extraInstructions string, budget *ctxmgr.Budget, senderLabel func(string) string) []llm.Message {
-	systemPrompt := buildSystemPrompt(prof)
+func buildChatMessages(prof *profile.Profile, mem memory.MemoryStore, currentContent string, currentSender string, currentMessageID string, recentMsgs []feishu.Message, memories []string, extraInstructions string, budget *ctxmgr.Budget, senderLabel func(string) string) []llm.Message {
+	systemPrompt := buildSystemPrompt(prof, mem)
 	safeCurrentMessage := fmt.Sprintf("【这是用户最新发的消息，请针对它回复，不要回复历史里的消息】\n当前发言人：%s\n消息：%s", currentSender, safety.SanitizeForLLM(currentContent))
 
 	// Reserve high-priority static elements
@@ -1203,7 +1346,7 @@ func interpretMediaRequest(ctx stdctx.Context, llmClient *llm.Client, msg feishu
 
 用户最新消息：%s`, strings.Join(ctxLines, "\n"), safety.SanitizeForLLM(msg.Content))
 	reply, err := llmClient.Chat(ctx, []llm.Message{
-		{Role: "system", Content: buildSystemPrompt(prof)},
+		{Role: "system", Content: buildSystemPrompt(prof, nil)},
 		{Role: "user", Content: prompt},
 	}, llm.WithTemperature(0), llm.WithMaxTokens(120))
 	if err != nil {
@@ -1236,7 +1379,7 @@ func sendOneMediaImage(ctx stdctx.Context, fs *feishu.Client, msg feishu.Message
 	}
 }
 
-func understandIncomingImage(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message) string {
+func understandIncomingImage(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message, mem memory.MemoryStore) string {
 	if msg.ImageKey == "" {
 		log.Printf("[图片理解] 图片消息没有 image_key: message_id=%s", msg.MessageID)
 		return ""
@@ -1246,7 +1389,27 @@ func understandIncomingImage(ctx stdctx.Context, cfg *config.Config, fs *feishu.
 		log.Printf("[图片理解] 下载飞书图片失败: %v", err)
 		return ""
 	}
+
+	// Calculate MD5 hash
+	hash := fmt.Sprintf("%x", md5.Sum(image))
+	if mem != nil {
+		if ocr, caption, err := mem.GetImageHashCache(hash); err == nil && (ocr != "" || caption != "") {
+			log.Printf("[图片理解] 命中 MD5 缓存秒懂: hash=%s", hash)
+			var cacheParts []string
+			if ocr != "" {
+				cacheParts = append(cacheParts, "OCR文字："+ocr)
+			}
+			if caption != "" {
+				cacheParts = append(cacheParts, "视觉描述："+caption)
+			}
+			return strings.Join(cacheParts, "\n")
+		}
+	}
+
+	var ocrText string
+	var captionText string
 	var parts []string
+
 	if cfg.FeishuOCREnabled {
 		texts, err := fs.RecognizeImageText(ctx, image, cfg.FeishuOCRCooldown)
 		if err != nil {
@@ -1256,16 +1419,24 @@ func understandIncomingImage(ctx stdctx.Context, cfg *config.Config, fs *feishu.
 				log.Printf("[图片理解] 飞书 OCR 失败，改用本地视觉模型: %v", err)
 			}
 		} else if len(texts) > 0 {
-			parts = append(parts, "OCR文字："+strings.Join(texts, " / "))
+			ocrText = strings.Join(texts, " / ")
+			parts = append(parts, "OCR文字："+ocrText)
 		}
 	}
 	if cfg.LocalVisionEnabled && cfg.OllamaVisionModel != "" {
 		if desc, err := describeImageWithOllama(ctx, cfg, image); err != nil {
 			log.Printf("[图片理解] 本地视觉模型失败: %v", err)
 		} else if desc != "" {
-			parts = append(parts, "视觉描述："+desc)
+			captionText = desc
+			parts = append(parts, "视觉描述："+captionText)
 		}
 	}
+
+	// Save to hash cache database if any description generated
+	if mem != nil && (ocrText != "" || captionText != "") {
+		_ = mem.SaveImageHashCache(hash, ocrText, captionText)
+	}
+
 	return strings.Join(parts, "\n")
 }
 
@@ -1733,7 +1904,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	}
 	if msg.MsgType == "image" {
 		trace.Span("image_understanding")
-		if desc := understandIncomingImage(ctx, cfg, fs, msg); desc != "" {
+		if desc := understandIncomingImage(ctx, cfg, fs, msg, mem); desc != "" {
 			msg.Content = strings.TrimSpace(msg.Content + "\n图片理解：" + desc)
 			log.Printf("[图片理解] %s", desc)
 		}
@@ -1753,7 +1924,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 		return senderLabel(cfg, prof, fs, openid)
 	}
 	currentSender := label(msg.Sender)
-	plan := planReply(ctx, llmClient, msg, intent, *st, prof, currentSender)
+	plan := planReply(ctx, llmClient, msg, intent, *st, prof, currentSender, mem)
 	log.Printf("[回复决策] reply=%v memory=%v media=%v style=%s max_tokens=%d reason=%s", plan.ShouldReply, plan.UseMemory, plan.UseMedia, plan.ReplyStyle, plan.MaxTokens, plan.Reason)
 	if !plan.ShouldReply {
 		return
@@ -1809,6 +1980,9 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	if mem != nil && plan.UseMemory {
 		trace.Span("search_memory")
 		memories = mem.Search(msg.Content, audience)
+		if len(memories) > 1 {
+			memories = alignTemporalMemory(ctx, llmClient, memories)
+		}
 		if len(memories) > 0 {
 			log.Printf("[记忆] audience=%s 找到 %d 条相关记忆", audience, len(memories))
 		}
@@ -1816,7 +1990,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 
 	// Build prompt and call LLM
 	budget := ctxmgr.NewBudget(16000)
-	llmMsgs := buildChatMessages(prof, msg.Content, currentSender, msg.MessageID, recentMsgs, memories, replyStyleInstruction(plan, *st), budget, label)
+	llmMsgs := buildChatMessages(prof, mem, msg.Content, currentSender, msg.MessageID, recentMsgs, memories, replyStyleInstruction(plan, *st), budget, label)
 
 	trace.Span("deepseek_call")
 
@@ -1867,6 +2041,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	if msg.MessageID != "" {
 		fs.AddReaction(ctx, msg.MessageID, pickEmoji(msg.Content, msg.IsOwner, prof))
 	}
+	go updateEmotionMetrics(ctx, llmClient, mem, msg.Content, reply)
 
 	// Autonomous Memory confirmation check
 	if cfg.MemoryConfirmationEnabled && mem != nil && audience != "other" {
@@ -2152,7 +2327,7 @@ func summarizeMediaResults(ctx stdctx.Context, llmClient *llm.Client, query stri
 图片记录：
 %s`, len(results)-1, safety.SanitizeForLLM(query), strings.Join(lines, "\n"))
 	reply, err := llmClient.Chat(ctx, []llm.Message{
-		{Role: "system", Content: buildSystemPrompt(prof)},
+		{Role: "system", Content: buildSystemPrompt(prof, nil)},
 		{Role: "user", Content: prompt},
 	}, llm.WithTemperature(0.5), llm.WithMaxTokens(300))
 	if err != nil {
