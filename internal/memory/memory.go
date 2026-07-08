@@ -343,6 +343,8 @@ type MemoryStore interface {
 	SaveRelation(srcName string, relation string, dstName string) error
 	GetEntityRelations(entityNames []string) []string
 	ResolveAliases(entityNames []string) []string
+	GetRelationDestinations(srcName string, relation string) ([]string, error)
+	DeleteRelation(srcName string, relation string, dstName string) error
 }
 
 func (s *Store) GetRelationshipState() (RelationshipState, error) {
@@ -367,6 +369,14 @@ func (s *Store) GetEntityRelations(entityNames []string) []string {
 
 func (s *Store) ResolveAliases(entityNames []string) []string {
 	return entityNames
+}
+
+func (s *Store) GetRelationDestinations(srcName string, relation string) ([]string, error) {
+	return nil, nil
+}
+
+func (s *Store) DeleteRelation(srcName string, relation string, dstName string) error {
+	return nil
 }
 
 func (s *Store) GetImageHashCache(hash string) (ocr string, caption string, err error) {

@@ -1192,13 +1192,13 @@ func (s *DatabaseStore) SaveEntity(name string, category string) (string, error)
 	if name == "" || category == "" {
 		return "", fmt.Errorf("entity name or category cannot be empty")
 	}
-	id := fmt.Sprintf("ent_%s", HashContent(fmt.Sprintf("%s_%s", category, name))[:16])
+	id := fmt.Sprintf("ent_%s", HashContent(name)[:16])
 	now := time.Now().Unix()
 
 	_, err := s.db.Exec(`
 INSERT INTO knowledge_entities (id, name, category, created_at)
 VALUES (?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE name=VALUES(name)`, id, name, category, now)
+ON DUPLICATE KEY UPDATE name=VALUES(name), category=VALUES(category)`, id, name, category, now)
 	if err != nil {
 		return "", err
 	}
@@ -1325,6 +1325,64 @@ WHERE e1.name IN (%s) OR e2.name IN (%s)`, inClause, inClause)
 		}
 	}
 	return facts
+}
+
+func (s *DatabaseStore) GetRelationDestinations(srcName string, relation string) ([]string, error) {
+	srcName = strings.TrimSpace(srcName)
+	relation = strings.TrimSpace(relation)
+	if srcName == "" || relation == "" {
+		return nil, nil
+	}
+
+	rows, err := s.db.Query(`
+SELECT e2.name
+FROM knowledge_relations r
+JOIN knowledge_entities e1 ON r.src_id = e1.id
+JOIN knowledge_entities e2 ON r.dst_id = e2.id
+WHERE e1.name = ? AND r.relation = ?`, srcName, relation)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var dests []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			dests = append(dests, name)
+		}
+	}
+	return dests, nil
+}
+
+func (s *DatabaseStore) DeleteRelation(srcName string, relation string, dstName string) error {
+	srcName = strings.TrimSpace(srcName)
+	relation = strings.TrimSpace(relation)
+	dstName = strings.TrimSpace(dstName)
+	if srcName == "" || relation == "" || dstName == "" {
+		return fmt.Errorf("relation elements cannot be empty")
+	}
+
+	var srcId, dstId string
+	err := s.db.QueryRow(`SELECT id FROM knowledge_entities WHERE name = ?`, srcName).Scan(&srcId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	err = s.db.QueryRow(`SELECT id FROM knowledge_entities WHERE name = ?`, dstName).Scan(&dstId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+
+	_, err = s.db.Exec(`
+DELETE FROM knowledge_relations
+WHERE src_id = ? AND relation = ? AND dst_id = ?`, srcId, relation, dstId)
+	return err
 }
 
 var _ MemoryStore = (*DatabaseStore)(nil)

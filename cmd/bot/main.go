@@ -2444,9 +2444,13 @@ func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore mem
 	prompt := fmt.Sprintf(`你是一个机器人知识图谱提炼专家。请只返回 JSON。
 给定一句话（这是一条已经提炼过的机器人长期记忆），请提取出其中的实体（人、地、物、概念等）以及它们之间的关系三元组。
 
-特别注意提取这两类关键信息：
-1. 【等价实体/别名】：若提到“秋酿是舒舒的微信小号/别名/昵称”，提取实体并建立关系三元组：("秋酿", "is_alias_of", "舒舒")。
-2. 【人际关系或属性】：若关系是亲属/母亲/朋友等，建立三元组：("阿姨", "mother_of", "舒舒")，关系词应当用小写英文蛇形命名法（如 mother_of, friend_of, likes 等）。
+【强制关系 Schema 限制】：为了使图谱关系能演进并自我纠偏，你提炼的关系边名称（relation 字段）必须且只能在以下预定义词中选择（使用小写英文蛇形命名）：
+- is_alias_of : 指代名字别名、大名、网名、昵称（如“秋酿是三哥的别名” -> ("秋酿", "is_alias_of", "三哥")）
+- likes : 指代喜欢的事物、喜好、喜欢的零食/食物等（如“三哥喜欢吃火锅” -> ("三哥", "likes", "火锅")。如果提到“三哥戒了火锅/坚决不吃火锅”，仍然要提炼为关系 ("三哥", "likes", "火锅")，后面的纠偏程序会自动将其处理删除）
+- location : 指代居住地、定居城市、出差所在地等（如“三哥搬去深圳定居了/定居在北京” -> ("三哥", "location", "深圳") / ("三哥", "location", "北京")）
+- colleague_of : 指代同事关系（如“大叔是三哥的同事” -> ("大叔", "colleague_of", "三哥")）
+- friend_of : 指代朋友关系
+- mother_of / father_of : 指代父母关系
 
 你的 JSON 格式必须是：
 {
@@ -2454,7 +2458,7 @@ func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore mem
     {"name": "实体名称，如 舒舒", "category": "person|alias|item|place|concept"}
   ],
   "relations": [
-    {"src_name": "实体A名称", "relation": "关系，如 is_alias_of 或 mother_of", "dst_name": "实体B名称"}
+    {"src_name": "实体A名称", "relation": "必须在上述强 Schema 限定词中选择", "dst_name": "实体B名称"}
   ]
 }
 
@@ -2502,13 +2506,31 @@ func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore mem
 		}
 	}
 
-	// 2. Save all relations
+	// 2. Save all relations with conflict reconciliation
 	for _, rel := range parsed.Relations {
 		src := strings.TrimSpace(rel.SrcName)
 		r := strings.TrimSpace(rel.Relation)
 		dst := strings.TrimSpace(rel.DstName)
 		if src != "" && r != "" && dst != "" {
-			err := memStore.SaveRelation(src, r, dst)
+			existing, err := memStore.GetRelationDestinations(src, r)
+			if err == nil && len(existing) > 0 {
+				action, targetToRemove := reconcileGraphRelation(ctx, llmClient, src, r, existing, dst, content)
+				log.Printf("[图谱调和] 决策: %s -[%s]-> %s, 已有: %v, 动作: %s, 移除目标: %s", src, r, dst, existing, action, targetToRemove)
+
+				if action == "replace" && targetToRemove != "" {
+					_ = memStore.DeleteRelation(src, r, targetToRemove)
+					log.Printf("[图谱纠偏] 已成功删除被替换的关系边: %s -[%s]-> %s", src, r, targetToRemove)
+					if targetToRemove == dst {
+						continue
+					}
+				} else if action == "delete" && targetToRemove != "" {
+					_ = memStore.DeleteRelation(src, r, targetToRemove)
+					log.Printf("[图谱纠偏] 已成功删除被否定的关系边: %s -[%s]-> %s", src, r, targetToRemove)
+					continue
+				}
+			}
+
+			err = memStore.SaveRelation(src, r, dst)
 			if err != nil {
 				log.Printf("[图谱提炼] 保存关系 %s -[%s]-> %s 失败: %v", src, r, dst, err)
 			} else {
@@ -2516,5 +2538,53 @@ func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore mem
 			}
 		}
 	}
+}
+
+func reconcileGraphRelation(ctx stdctx.Context, llmClient *llm.Client, srcName string, relation string, existingDsts []string, newDst string, contextText string) (action string, targetToRemove string) {
+	if llmClient == nil || len(existingDsts) == 0 {
+		return "keep_both", ""
+	}
+
+	prompt := fmt.Sprintf(`你是一个知识图谱关系冲突调和专家。只返回 JSON。
+我们要将一条新提取出的关系，合并至已有的知识图谱中。请分析是否存在时效性或逻辑互斥性冲突。
+
+主语：%s
+关系类型：%s
+当前已有的目标实体值：%v
+新提炼的目标实体值：%s
+背景上下文事实（来源句子）：%s
+
+决策规则：
+1. 【keep_both】：新旧目标值可以并存（例如：“喜欢吃火锅”和“喜欢吃牛肉干”可以并存；同事“小李”和“小王”可以并存）。
+2. 【replace】：新值和旧值存在逻辑排他性冲突（例如：一个人通常只能在一个“location”定居，新的定居地“深圳”应当替换旧的“北京”；感情状态“单身”必须替换“恋爱中”）。你需要明确指出要替换的旧实体值。
+3. 【delete】：新背景上下文事实如果明确表达否定、戒掉、不再做、不再喜欢（例如“戒了火锅”、“不吃火锅了”，即使提炼的新值依然写的是火锅，但由于背景在否定它），必须决策为 delete，并把 target_to_remove 填为被否定的旧实体值（如 火锅）。
+
+请返回以下 JSON 格式：
+{
+  "action": "keep_both|replace|delete",
+  "target_to_remove": "如果选择 replace 或 delete，需要在此填入具体的冲突旧值实体名称（如 北京）。如果没有，返回空字符串"
+}
+
+只返回 JSON。`, srcName, relation, existingDsts, newDst, contextText)
+
+	reply, err := llmClient.Chat(ctx, []llm.Message{
+		{Role: "system", Content: "You are a Knowledge Graph conflict resolver. Output strictly JSON conformant to format constraints."},
+		{Role: "user", Content: prompt},
+	}, llm.WithTemperature(0), llm.WithMaxTokens(150))
+	if err != nil {
+		log.Printf("[图谱调和] 决策调用失败，默认并存: %v", err)
+		return "keep_both", ""
+	}
+
+	var parsed struct {
+		Action         string `json:"action"`
+		TargetToRemove string `json:"target_to_remove"`
+	}
+	if err := json.Unmarshal([]byte(extractJSON(reply)), &parsed); err != nil {
+		log.Printf("[图谱调和] JSON 解析失败 raw=%q, 默认并存", reply)
+		return "keep_both", ""
+	}
+
+	return parsed.Action, parsed.TargetToRemove
 }
 

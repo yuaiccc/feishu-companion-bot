@@ -89,6 +89,14 @@ func (m *mockMemoryStore) ResolveAliases(entityNames []string) []string {
 	return entityNames
 }
 
+func (m *mockMemoryStore) GetRelationDestinations(srcName string, relation string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockMemoryStore) DeleteRelation(srcName string, relation string, dstName string) error {
+	return nil
+}
+
 func init() {
 	dir := "."
 	for i := 0; i < 5; i++ {
@@ -580,6 +588,97 @@ func TestGraphRAGEntityCollisionAndExtraction(t *testing.T) {
 		}
 	}
 }
+
+func TestGraphSelfEvolution(t *testing.T) {
+	cfg := config.Load()
+	if cfg.MemoryDatabaseDSN == "" {
+		t.Skip("MEMORY_DATABASE_DSN not configured, skipping graph self-evolution test")
+	}
+
+	opts := memory.DatabaseOptions{
+		DSN:       cfg.MemoryDatabaseDSN,
+		ProfileID: "test_graph_evo_opt",
+		Embedder:  &mock1024Embedder{},
+	}
+	store, err := memory.NewDatabaseStore(opts)
+	if err != nil {
+		t.Fatalf("Failed to connect to OceanBase: %v", err)
+	}
+	defer store.Close()
+
+	db := store.GetDBConn()
+	_, _ = db.Exec("DELETE FROM knowledge_relations")
+	_, _ = db.Exec("DELETE FROM knowledge_entities")
+
+	// 1. Init original facts
+	_, _ = store.SaveEntity("三哥", "person")
+	_ = store.SaveRelation("三哥", "location", "北京")
+	_ = store.SaveRelation("三哥", "likes", "火锅")
+
+	// 2. Validate original values
+	dsts, err := store.GetRelationDestinations("三哥", "location")
+	if err != nil || len(dsts) != 1 || dsts[0] != "北京" {
+		t.Fatalf("Initial destinations setup failed: got %v, err=%v", dsts, err)
+	}
+
+	llmClient := llm.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
+	if cfg.DeepSeekAPIKey == "" {
+		t.Skip("DeepSeekAPIKey not configured, skipping LLM self-evolution test")
+	}
+
+	ctx := context.Background()
+
+	// 3. Test REPLACE: 三哥搬去深圳定居了
+	extractAndSaveGraph(ctx, llmClient, store, "三哥最近已经决定去深圳定居了，因此不再住在北京。")
+
+	var hasBeijing, hasShenzhen bool
+	for i := 0; i < 15; i++ {
+		time.Sleep(100 * time.Millisecond)
+		dsts, _ = store.GetRelationDestinations("三哥", "location")
+		hasBeijing, hasShenzhen = false, false
+		for _, d := range dsts {
+			if d == "北京" {
+				hasBeijing = true
+			}
+			if d == "深圳" {
+				hasShenzhen = true
+			}
+		}
+		if !hasBeijing && hasShenzhen {
+			break
+		}
+	}
+
+	if hasBeijing {
+		t.Errorf("Self-evolution REPLACE failed: conflicting target '北京' was not removed")
+	}
+	if !hasShenzhen {
+		t.Errorf("Self-evolution REPLACE failed: new target '深圳' was not written")
+	}
+
+	// 4. Test DELETE: 三哥不吃火锅了
+	extractAndSaveGraph(ctx, llmClient, store, "三哥最近因为上火开始减肥，坚决不吃火锅了。")
+
+	var hasHotpot bool
+	for i := 0; i < 15; i++ {
+		time.Sleep(100 * time.Millisecond)
+		dsts, _ = store.GetRelationDestinations("三哥", "likes")
+		hasHotpot = false
+		for _, d := range dsts {
+			if d == "火锅" {
+				hasHotpot = true
+			}
+		}
+		if !hasHotpot {
+			break
+		}
+	}
+
+	if hasHotpot {
+		t.Errorf("Self-evolution DELETE failed: negated target '火锅' was not deleted from likes relation")
+	}
+}
+
 
 
 
