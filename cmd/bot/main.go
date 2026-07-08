@@ -75,12 +75,13 @@ type mediaMemoryStore interface {
 }
 
 type replyPlan struct {
-	ShouldReply bool
-	UseMemory   bool
-	UseMedia    bool
-	ReplyStyle  string
-	MaxTokens   int
-	Reason      string
+	ShouldReply      bool
+	UseMemory        bool
+	UseMedia         bool
+	ReplyStyle       string
+	MaxTokens        int
+	Reason           string
+	DetectedEntities []string
 }
 
 type conversationState struct {
@@ -361,7 +362,7 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 		stateText = "暂无"
 	}
 	prompt := fmt.Sprintf(`你是飞书陪伴机器人的回复前决策器。只返回 JSON：
-{"should_reply":true/false,"use_memory":true/false,"use_media":true/false,"reply_style":"short|normal|comfort|detailed","max_tokens":600,"reason":"极短原因"}
+{"should_reply":true/false,"use_memory":true/false,"use_media":true/false,"reply_style":"short|normal|comfort|detailed","max_tokens":600,"detected_entities":["标准实体名1","标准实体名2"],"reason":"极短原因"}
 
 判断规则：
 - 群聊中被 @ 时通常要回复；私聊通常要回复。
@@ -372,6 +373,7 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 - 如果用户表达低落/生气/累，comfort，并查记忆。
 - 积极开启记忆检索（use_memory 设为 true）。只要用户的发言可能关联到他的偏好、习惯、承诺、过去的约定、或者可能有相关背景事实，就应当开启记忆检索，以便机器人能表现出极强的上下文连贯记忆。
 - 如果问题涉及图片、截图，再 use_media。
+- **核心实体识别 (detected_entities)**：分析最新用户消息和上下文，提取出其中所指的核心人名、外号、别名、宠物名、专属代名词（例如：把错别字“舒叔”、“叔叔”纠正并映射为标准实体名“舒舒”；把代词“她”、“我妈”结合前文还原为标准名“舒舒”或“阿姨”）。如果有提取出来的实体，放进 detected_entities 列表中；如果没有提取出任何特定实体，返回空数组 []。
 - max_tokens 通常推荐在 500 到 600 之间，以保证回答内容丰满有深度。
 
 会话状态：
@@ -391,12 +393,13 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 		return plan
 	}
 	var parsed struct {
-		ShouldReply bool   `json:"should_reply"`
-		UseMemory   bool   `json:"use_memory"`
-		UseMedia    bool   `json:"use_media"`
-		ReplyStyle  string `json:"reply_style"`
-		MaxTokens   int    `json:"max_tokens"`
-		Reason      string `json:"reason"`
+		ShouldReply      bool     `json:"should_reply"`
+		UseMemory        bool     `json:"use_memory"`
+		UseMedia         bool     `json:"use_media"`
+		ReplyStyle       string   `json:"reply_style"`
+		MaxTokens        int      `json:"max_tokens"`
+		Reason           string   `json:"reason"`
+		DetectedEntities []string `json:"detected_entities"`
 	}
 	if err := json.Unmarshal([]byte(extractJSON(reply)), &parsed); err != nil {
 		log.Printf("[回复决策] JSON 解析失败，使用默认计划: %v raw=%q", err, reply)
@@ -416,12 +419,13 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 		parsed.ReplyStyle = plan.ReplyStyle
 	}
 	return replyPlan{
-		ShouldReply: parsed.ShouldReply,
-		UseMemory:   parsed.UseMemory,
-		UseMedia:    parsed.UseMedia,
-		ReplyStyle:  parsed.ReplyStyle,
-		MaxTokens:   parsed.MaxTokens,
-		Reason:      parsed.Reason,
+		ShouldReply:      parsed.ShouldReply,
+		UseMemory:        parsed.UseMemory,
+		UseMedia:         parsed.UseMedia,
+		ReplyStyle:       parsed.ReplyStyle,
+		MaxTokens:        parsed.MaxTokens,
+		Reason:           parsed.Reason,
+		DetectedEntities: parsed.DetectedEntities,
 	}
 }
 
@@ -1979,12 +1983,30 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	var memories []string
 	if mem != nil && plan.UseMemory {
 		trace.Span("search_memory")
-		memories = mem.Search(msg.Content, audience)
+		searchQuery := msg.Content
+		var graphFacts []string
+
+		if len(plan.DetectedEntities) > 0 {
+			resolved := mem.ResolveAliases(plan.DetectedEntities)
+			if len(resolved) > 0 {
+				searchQuery = strings.Join(resolved, " ") + " " + msg.Content
+				relations := mem.GetEntityRelations(resolved)
+				for _, rel := range relations {
+					graphFacts = append(graphFacts, "[图谱关系] "+rel)
+				}
+			}
+		}
+
+		memories = mem.Search(searchQuery, audience)
+		if len(graphFacts) > 0 {
+			memories = append(graphFacts, memories...)
+		}
+
 		if len(memories) > 1 {
 			memories = alignTemporalMemory(ctx, llmClient, memories)
 		}
 		if len(memories) > 0 {
-			log.Printf("[记忆] audience=%s 找到 %d 条相关记忆", audience, len(memories))
+			log.Printf("[记忆] audience=%s 找到 %d 条相关记忆 (包含图谱事实 %d 条)", audience, len(memories), len(graphFacts))
 		}
 	}
 
@@ -2081,6 +2103,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 					log.Printf("[记忆沉淀] 写入记忆库失败: %v", err)
 				} else {
 					log.Printf("[记忆沉淀] 自动整理并成功存入长期记忆: %q", mergedCandidate)
+					go extractAndSaveGraph(ctx, llmClient, mem, mergedCandidate)
 					fs.AddReaction(ctx, msg.MessageID, "SUBMIT")
 				}
 			}
@@ -2413,3 +2436,85 @@ func onCardAction(ctx stdctx.Context, cfg *config.Config, prof *profile.Profile,
 
 var _ = io.Discard
 var _ = bytes.Buffer{}
+
+func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore memory.MemoryStore, content string) {
+	if llmClient == nil || memStore == nil || strings.TrimSpace(content) == "" {
+		return
+	}
+	prompt := fmt.Sprintf(`你是一个机器人知识图谱提炼专家。请只返回 JSON。
+给定一句话（这是一条已经提炼过的机器人长期记忆），请提取出其中的实体（人、地、物、概念等）以及它们之间的关系三元组。
+
+特别注意提取这两类关键信息：
+1. 【等价实体/别名】：若提到“秋酿是舒舒的微信小号/别名/昵称”，提取实体并建立关系三元组：("秋酿", "is_alias_of", "舒舒")。
+2. 【人际关系或属性】：若关系是亲属/母亲/朋友等，建立三元组：("阿姨", "mother_of", "舒舒")，关系词应当用小写英文蛇形命名法（如 mother_of, friend_of, likes 等）。
+
+你的 JSON 格式必须是：
+{
+  "entities": [
+    {"name": "实体名称，如 舒舒", "category": "person|alias|item|place|concept"}
+  ],
+  "relations": [
+    {"src_name": "实体A名称", "relation": "关系，如 is_alias_of 或 mother_of", "dst_name": "实体B名称"}
+  ]
+}
+
+如果没有提取出任何有意义的关系或实体，请返回：
+{"entities":[],"relations":[]}
+
+输入记忆：%s`, content)
+
+	reply, err := llmClient.Chat(ctx, []llm.Message{
+		{Role: "system", Content: "You are a Knowledge Graph entity/relation extractor. Output strictly JSON conformant to format constraints."},
+		{Role: "user", Content: prompt},
+	}, llm.WithTemperature(0), llm.WithMaxTokens(350))
+	if err != nil {
+		log.Printf("[图谱提炼] LLM 调用失败: %v", err)
+		return
+	}
+
+	var parsed struct {
+		Entities []struct {
+			Name     string `json:"name"`
+			Category string `json:"category"`
+		} `json:"entities"`
+		Relations []struct {
+			SrcName  string `json:"src_name"`
+			Relation string `json:"relation"`
+			DstName  string `json:"dst_name"`
+		} `json:"relations"`
+	}
+
+	if err := json.Unmarshal([]byte(extractJSON(reply)), &parsed); err != nil {
+		log.Printf("[图谱提炼] JSON 解析失败 raw=%q error=%v", reply, err)
+		return
+	}
+
+	// 1. Save all entities
+	entityIDMap := make(map[string]string)
+	for _, ent := range parsed.Entities {
+		name := strings.TrimSpace(ent.Name)
+		cat := strings.TrimSpace(ent.Category)
+		if name != "" && cat != "" {
+			id, err := memStore.SaveEntity(name, cat)
+			if err == nil {
+				entityIDMap[name] = id
+			}
+		}
+	}
+
+	// 2. Save all relations
+	for _, rel := range parsed.Relations {
+		src := strings.TrimSpace(rel.SrcName)
+		r := strings.TrimSpace(rel.Relation)
+		dst := strings.TrimSpace(rel.DstName)
+		if src != "" && r != "" && dst != "" {
+			err := memStore.SaveRelation(src, r, dst)
+			if err != nil {
+				log.Printf("[图谱提炼] 保存关系 %s -[%s]-> %s 失败: %v", src, r, dst, err)
+			} else {
+				log.Printf("[图谱提炼] 成功同步图谱三元组: (%s, %s, %s)", src, r, dst)
+			}
+		}
+	}
+}
+

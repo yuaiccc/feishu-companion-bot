@@ -203,6 +203,37 @@ CREATE TABLE IF NOT EXISTS image_hash_cache (
 	if err != nil {
 		return err
 	}
+
+	_, err = s.db.Exec(`
+CREATE TABLE IF NOT EXISTS knowledge_entities (
+  id varchar(64) NOT NULL,
+  name varchar(255) NOT NULL,
+  category varchar(64) NOT NULL,
+  description text DEFAULT NULL,
+  created_at bigint DEFAULT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY idx_name_cat (name, category)
+) DEFAULT CHARSET=utf8mb4`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec(`
+CREATE TABLE IF NOT EXISTS knowledge_relations (
+  id varchar(64) NOT NULL,
+  src_id varchar(64) NOT NULL,
+  relation varchar(64) NOT NULL,
+  dst_id varchar(64) NOT NULL,
+  confidence double DEFAULT 1.0,
+  created_at bigint DEFAULT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY idx_triple (src_id, relation, dst_id),
+  KEY idx_src (src_id),
+  KEY idx_dst (dst_id)
+) DEFAULT CHARSET=utf8mb4`)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1153,6 +1184,147 @@ ON DUPLICATE KEY UPDATE
   ocr_text=VALUES(ocr_text), caption=VALUES(caption)`,
 		hash, ocr, caption, time.Now().Unix())
 	return err
+}
+
+func (s *DatabaseStore) SaveEntity(name string, category string) (string, error) {
+	name = strings.TrimSpace(name)
+	category = strings.TrimSpace(category)
+	if name == "" || category == "" {
+		return "", fmt.Errorf("entity name or category cannot be empty")
+	}
+	id := fmt.Sprintf("ent_%s", HashContent(fmt.Sprintf("%s_%s", category, name))[:16])
+	now := time.Now().Unix()
+
+	_, err := s.db.Exec(`
+INSERT INTO knowledge_entities (id, name, category, created_at)
+VALUES (?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE name=VALUES(name)`, id, name, category, now)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func (s *DatabaseStore) SaveRelation(srcName string, relation string, dstName string) error {
+	srcName = strings.TrimSpace(srcName)
+	dstName = strings.TrimSpace(dstName)
+	relation = strings.TrimSpace(relation)
+	if srcName == "" || dstName == "" || relation == "" {
+		return fmt.Errorf("relation triplet elements cannot be empty")
+	}
+
+	srcCat := "person"
+	dstCat := "person"
+	if relation == "is_alias_of" {
+		srcCat = "alias"
+	}
+
+	srcId, err := s.SaveEntity(srcName, srcCat)
+	if err != nil {
+		return err
+	}
+	dstId, err := s.SaveEntity(dstName, dstCat)
+	if err != nil {
+		return err
+	}
+
+	id := fmt.Sprintf("rel_%s", HashContent(fmt.Sprintf("%s_%s_%s", srcId, relation, dstId))[:16])
+	now := time.Now().Unix()
+
+	_, err = s.db.Exec(`
+INSERT INTO knowledge_relations (id, src_id, relation, dst_id, confidence, created_at)
+VALUES (?, ?, ?, ?, 1.0, ?)
+ON DUPLICATE KEY UPDATE confidence=VALUES(confidence)`, id, srcId, relation, dstId, now)
+	return err
+}
+
+func (s *DatabaseStore) ResolveAliases(entityNames []string) []string {
+	if len(entityNames) == 0 {
+		return entityNames
+	}
+
+	resultMap := make(map[string]bool)
+	for _, name := range entityNames {
+		resultMap[name] = true
+	}
+
+	for _, name := range entityNames {
+		var dstName string
+		err := s.db.QueryRow(`
+SELECT e2.name
+FROM knowledge_entities e1
+JOIN knowledge_relations r ON e1.id = r.src_id
+JOIN knowledge_entities e2 ON r.dst_id = e2.id
+WHERE r.relation = 'is_alias_of' AND e1.name = ?`, name).Scan(&dstName)
+		if err == nil && dstName != "" {
+			resultMap[dstName] = true
+		}
+	}
+
+	var resolved []string
+	for name := range resultMap {
+		resolved = append(resolved, name)
+	}
+	return resolved
+}
+
+func (s *DatabaseStore) GetEntityRelations(entityNames []string) []string {
+	if len(entityNames) == 0 {
+		return nil
+	}
+
+	placeholders := make([]string, len(entityNames))
+	args := make([]interface{}, len(entityNames)*2)
+	for i, name := range entityNames {
+		placeholders[i] = "?"
+		args[i] = name
+		args[len(entityNames)+i] = name
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	query := fmt.Sprintf(`
+SELECT e1.name, r.relation, e2.name
+FROM knowledge_relations r
+JOIN knowledge_entities e1 ON r.src_id = e1.id
+JOIN knowledge_entities e2 ON r.dst_id = e2.id
+WHERE e1.name IN (%s) OR e2.name IN (%s)`, inClause, inClause)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var facts []string
+	seen := make(map[string]bool)
+
+	for rows.Next() {
+		var src, rel, dst string
+		if err := rows.Scan(&src, &rel, &dst); err == nil {
+			var fact string
+			switch rel {
+			case "is_alias_of":
+				fact = fmt.Sprintf("%s是%s的别名。", src, dst)
+			case "mother_of", "mother_is":
+				fact = fmt.Sprintf("%s是%s的妈妈。", src, dst)
+			case "father_of", "father_is":
+				fact = fmt.Sprintf("%s是%s的爸爸。", src, dst)
+			case "friend_of":
+				fact = fmt.Sprintf("%s和%s是朋友。", src, dst)
+			case "colleague_of":
+				fact = fmt.Sprintf("%s和%s是同事关系。", src, dst)
+			case "likes":
+				fact = fmt.Sprintf("%s喜欢%s。", src, dst)
+			default:
+				fact = fmt.Sprintf("%s和%s的关系是：%s。", src, dst, rel)
+			}
+			if !seen[fact] {
+				seen[fact] = true
+				facts = append(facts, fact)
+			}
+		}
+	}
+	return facts
 }
 
 var _ MemoryStore = (*DatabaseStore)(nil)

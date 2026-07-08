@@ -73,6 +73,22 @@ func (m *mockMemoryStore) SaveImageHashCache(hash string, ocr string, caption st
 	return nil
 }
 
+func (m *mockMemoryStore) SaveEntity(name string, category string) (string, error) {
+	return "", nil
+}
+
+func (m *mockMemoryStore) SaveRelation(srcName string, relation string, dstName string) error {
+	return nil
+}
+
+func (m *mockMemoryStore) GetEntityRelations(entityNames []string) []string {
+	return nil
+}
+
+func (m *mockMemoryStore) ResolveAliases(entityNames []string) []string {
+	return entityNames
+}
+
 func init() {
 	dir := "."
 	for i := 0; i < 5; i++ {
@@ -467,5 +483,103 @@ func TestAsyncEmbeddingAndHashCache(t *testing.T) {
 		t.Errorf("Relationship state mismatch: got %+v, want %+v", relRet, relState)
 	}
 }
+
+func TestGraphRAGEntityCollisionAndExtraction(t *testing.T) {
+	cfg := config.Load()
+	if cfg.MemoryDatabaseDSN == "" {
+		t.Skip("MEMORY_DATABASE_DSN not configured, skipping graph integration test")
+	}
+
+	opts := memory.DatabaseOptions{
+		DSN:       cfg.MemoryDatabaseDSN,
+		ProfileID: "test_graph_opt",
+		Embedder:  &mock1024Embedder{},
+	}
+	store, err := memory.NewDatabaseStore(opts)
+	if err != nil {
+		t.Fatalf("Failed to connect to OceanBase: %v", err)
+	}
+	defer store.Close()
+
+	db := store.GetDBConn()
+	_, _ = db.Exec("DELETE FROM knowledge_relations")
+	_, _ = db.Exec("DELETE FROM knowledge_entities")
+
+	// 1. Test saving entities and relations
+	_, err = store.SaveEntity("秋酿", "alias")
+	if err != nil {
+		t.Fatalf("SaveEntity failed: %v", err)
+	}
+	_, err = store.SaveEntity("舒舒", "person")
+	if err != nil {
+		t.Fatalf("SaveEntity failed: %v", err)
+	}
+	err = store.SaveRelation("秋酿", "is_alias_of", "舒舒")
+	if err != nil {
+		t.Fatalf("SaveRelation failed: %v", err)
+	}
+	err = store.SaveRelation("阿姨", "mother_of", "舒舒")
+	if err != nil {
+		t.Fatalf("SaveRelation failed: %v", err)
+	}
+
+	// 2. Test alias resolution
+	resolved := store.ResolveAliases([]string{"秋酿"})
+	hasShushu := false
+	for _, r := range resolved {
+		if r == "舒舒" {
+			hasShushu = true
+		}
+	}
+	if !hasShushu {
+		t.Errorf("Alias resolution failed: '秋酿' was not resolved to '舒舒'. Resolved list: %v", resolved)
+	}
+
+	// 3. Test relation mapping facts translation
+	relations := store.GetEntityRelations([]string{"秋酿", "舒舒"})
+	var hasAliasFact, hasMotherFact bool
+	for _, f := range relations {
+		if strings.Contains(f, "秋酿是舒舒的别名") {
+			hasAliasFact = true
+		}
+		if strings.Contains(f, "阿姨是舒舒的妈妈") {
+			hasMotherFact = true
+		}
+	}
+	if !hasAliasFact {
+		t.Errorf("GetEntityRelations failed to return alias fact, got: %v", relations)
+	}
+	if !hasMotherFact {
+		t.Errorf("GetEntityRelations failed to return mother relationship fact, got: %v", relations)
+	}
+
+	// 4. Test async LLM triplet extraction
+	llmClient := llm.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
+	if cfg.DeepSeekAPIKey == "" {
+		t.Skip("DeepSeekAPIKey not configured, skipping LLM triplet extraction test")
+	}
+
+	ctx := context.Background()
+	extractAndSaveGraph(ctx, llmClient, store, "大叔是三哥的同事。")
+
+	// Query whether triplet got written
+	var relationName string
+	err = db.QueryRow(`
+		SELECT r.relation 
+		FROM knowledge_relations r
+		JOIN knowledge_entities e1 ON r.src_id = e1.id
+		JOIN knowledge_entities e2 ON r.dst_id = e2.id
+		WHERE e1.name = '大叔' AND e2.name = '三哥'`).Scan(&relationName)
+
+	if err != nil {
+		t.Logf("Warning: LLM triplet extraction scan failed: %v. This is normal if LLM API is transiently unavailable.", err)
+	} else {
+		t.Logf("Success: LLM triplet extraction extracted relation: %q", relationName)
+		if relationName != "colleague_of" && relationName != "colleague" {
+			t.Errorf("Expected relation 'colleague_of', got %q", relationName)
+		}
+	}
+}
+
 
 

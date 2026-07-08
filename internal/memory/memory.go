@@ -337,6 +337,12 @@ type MemoryStore interface {
 	// 图片 MD5 缓存管理
 	GetImageHashCache(hash string) (ocr string, caption string, err error)
 	SaveImageHashCache(hash string, ocr string, caption string) error
+
+	// 知识图谱 (GraphRAG) 管理
+	SaveEntity(name string, category string) (string, error)
+	SaveRelation(srcName string, relation string, dstName string) error
+	GetEntityRelations(entityNames []string) []string
+	ResolveAliases(entityNames []string) []string
 }
 
 func (s *Store) GetRelationshipState() (RelationshipState, error) {
@@ -345,6 +351,22 @@ func (s *Store) GetRelationshipState() (RelationshipState, error) {
 
 func (s *Store) UpdateRelationshipState(state RelationshipState) error {
 	return nil
+}
+
+func (s *Store) SaveEntity(name string, category string) (string, error) {
+	return "", nil
+}
+
+func (s *Store) SaveRelation(srcName string, relation string, dstName string) error {
+	return nil
+}
+
+func (s *Store) GetEntityRelations(entityNames []string) []string {
+	return nil
+}
+
+func (s *Store) ResolveAliases(entityNames []string) []string {
+	return entityNames
 }
 
 func (s *Store) GetImageHashCache(hash string) (ocr string, caption string, err error) {
