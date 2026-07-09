@@ -345,6 +345,11 @@ type MemoryStore interface {
 	ResolveAliases(entityNames []string) []string
 	GetRelationDestinations(srcName string, relation string) ([]string, error)
 	DeleteRelation(srcName string, relation string, dstName string) error
+
+	// 配置管理与情感历史
+	GetConfig(key string, defaultVal string) string
+	SetConfig(key string, value string) error
+	GetEmotionHistory() ([]RelationshipState, []int64, error)
 }
 
 func (s *Store) GetRelationshipState() (RelationshipState, error) {
@@ -377,6 +382,18 @@ func (s *Store) GetRelationDestinations(srcName string, relation string) ([]stri
 
 func (s *Store) DeleteRelation(srcName string, relation string, dstName string) error {
 	return nil
+}
+
+func (s *Store) GetConfig(key string, defaultVal string) string {
+	return defaultVal
+}
+
+func (s *Store) SetConfig(key string, value string) error {
+	return nil
+}
+
+func (s *Store) GetEmotionHistory() ([]RelationshipState, []int64, error) {
+	return nil, nil, nil
 }
 
 func (s *Store) GetImageHashCache(hash string) (ocr string, caption string, err error) {

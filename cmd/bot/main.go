@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -35,6 +36,9 @@ import (
 	"feishu-companion-bot/internal/search"
 	"feishu-companion-bot/internal/state"
 )
+
+//go:embed web/dist/*
+var webAssets embed.FS
 
 // ---- Card builders (Feishu Card 2.0) ----
 
@@ -1586,6 +1590,14 @@ func runBotMode() {
 		}
 	}
 
+	if memStore != nil {
+		webPort := os.Getenv("PORT")
+		if webPort == "" {
+			webPort = "8080"
+		}
+		go startHTTPServer(webPort, memStore)
+	}
+
 	llmClient := llm.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
 	fsClient := feishu.NewClient(cfg.FeishuAppID, cfg.FeishuAppSecret, cfg.FeishuBotOpenID)
 	fsClient.SetOwnerOpenID(cfg.FeishuOwnerOpenID)
@@ -2063,7 +2075,9 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	if msg.MessageID != "" {
 		fs.AddReaction(ctx, msg.MessageID, pickEmoji(msg.Content, msg.IsOwner, prof))
 	}
-	go updateEmotionMetrics(ctx, llmClient, mem, msg.Content, reply)
+	if mem != nil && mem.GetConfig("module_emotion_tracker", "true") == "true" {
+		go updateEmotionMetrics(ctx, llmClient, mem, msg.Content, reply)
+	}
 
 	// Autonomous Memory confirmation check
 	if cfg.MemoryConfirmationEnabled && mem != nil && audience != "other" {
@@ -2103,7 +2117,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 					log.Printf("[记忆沉淀] 写入记忆库失败: %v", err)
 				} else {
 					log.Printf("[记忆沉淀] 自动整理并成功存入长期记忆: %q", mergedCandidate)
-					go extractAndSaveGraph(ctx, llmClient, mem, mergedCandidate)
+					go extractAndSaveGraph(ctx, llmClient, mem, mergedCandidate, recentTurns)
 					fs.AddReaction(ctx, msg.MessageID, "SUBMIT")
 				}
 			}
@@ -2437,13 +2451,23 @@ func onCardAction(ctx stdctx.Context, cfg *config.Config, prof *profile.Profile,
 var _ = io.Discard
 var _ = bytes.Buffer{}
 
-func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore memory.MemoryStore, content string) {
+func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore memory.MemoryStore, content string, recentTurns []workingMemoryTurn) {
 	if llmClient == nil || memStore == nil || strings.TrimSpace(content) == "" {
 		return
 	}
+
+	contextBuilder := strings.Builder{}
+	if memStore.GetConfig("module_multi_turn_graph", "true") == "true" && len(recentTurns) > 0 {
+		contextBuilder.WriteString("\n为了帮助你消解代词（如“她/他/它”指代具体谁）以及推断跨对话的隐含关联，以下是产生这句记忆时的最近对话上下文历史：\n=== 最近对话历史 ===\n")
+		for idx, turn := range recentTurns {
+			contextBuilder.WriteString(fmt.Sprintf("[轮次 %d] %s: %s\n", idx+1, turn.Sender, turn.Content))
+		}
+		contextBuilder.WriteString("====================\n\n请结合上述对话背景事实，仔细推理出这句记忆中所指向的标准实体名（例如，通过前文对话推断出“他”其实是“三哥”；“她”其实是“舒舒”）。\n")
+	}
+
 	prompt := fmt.Sprintf(`你是一个机器人知识图谱提炼专家。请只返回 JSON。
 给定一句话（这是一条已经提炼过的机器人长期记忆），请提取出其中的实体（人、地、物、概念等）以及它们之间的关系三元组。
-
+%s
 【强制关系 Schema 限制】：为了使图谱关系能演进并自我纠偏，你提炼的关系边名称（relation 字段）必须且只能在以下预定义词中选择（使用小写英文蛇形命名）：
 - is_alias_of : 指代名字别名、大名、网名、昵称（如“秋酿是三哥的别名” -> ("秋酿", "is_alias_of", "三哥")）
 - likes : 指代喜欢的事物、喜好、喜欢的零食/食物等（如“三哥喜欢吃火锅” -> ("三哥", "likes", "火锅")。如果提到“三哥戒了火锅/坚决不吃火锅”，仍然要提炼为关系 ("三哥", "likes", "火锅")，后面的纠偏程序会自动将其处理删除）
@@ -2465,7 +2489,7 @@ func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore mem
 如果没有提取出任何有意义的关系或实体，请返回：
 {"entities":[],"relations":[]}
 
-输入记忆：%s`, content)
+输入记忆：%s`, contextBuilder.String(), content)
 
 	reply, err := llmClient.Chat(ctx, []llm.Message{
 		{Role: "system", Content: "You are a Knowledge Graph entity/relation extractor. Output strictly JSON conformant to format constraints."},
@@ -2512,21 +2536,23 @@ func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore mem
 		r := strings.TrimSpace(rel.Relation)
 		dst := strings.TrimSpace(rel.DstName)
 		if src != "" && r != "" && dst != "" {
-			existing, err := memStore.GetRelationDestinations(src, r)
-			if err == nil && len(existing) > 0 {
-				action, targetToRemove := reconcileGraphRelation(ctx, llmClient, src, r, existing, dst, content)
-				log.Printf("[图谱调和] 决策: %s -[%s]-> %s, 已有: %v, 动作: %s, 移除目标: %s", src, r, dst, existing, action, targetToRemove)
+			if memStore.GetConfig("module_graph_self_evolution", "true") == "true" {
+				existing, err := memStore.GetRelationDestinations(src, r)
+				if err == nil && len(existing) > 0 {
+					action, targetToRemove := reconcileGraphRelation(ctx, llmClient, src, r, existing, dst, content)
+					log.Printf("[图谱调和] 决策: %s -[%s]-> %s, 已有: %v, 动作: %s, 移除目标: %s", src, r, dst, existing, action, targetToRemove)
 
-				if action == "replace" && targetToRemove != "" {
-					_ = memStore.DeleteRelation(src, r, targetToRemove)
-					log.Printf("[图谱纠偏] 已成功删除被替换的关系边: %s -[%s]-> %s", src, r, targetToRemove)
-					if targetToRemove == dst {
+					if action == "replace" && targetToRemove != "" {
+						_ = memStore.DeleteRelation(src, r, targetToRemove)
+						log.Printf("[图谱纠偏] 已成功删除被替换的关系边: %s -[%s]-> %s", src, r, targetToRemove)
+						if targetToRemove == dst {
+							continue
+						}
+					} else if action == "delete" && targetToRemove != "" {
+						_ = memStore.DeleteRelation(src, r, targetToRemove)
+						log.Printf("[图谱纠偏] 已成功删除被否定的关系边: %s -[%s]-> %s", src, r, targetToRemove)
 						continue
 					}
-				} else if action == "delete" && targetToRemove != "" {
-					_ = memStore.DeleteRelation(src, r, targetToRemove)
-					log.Printf("[图谱纠偏] 已成功删除被否定的关系边: %s -[%s]-> %s", src, r, targetToRemove)
-					continue
 				}
 			}
 
@@ -2586,5 +2612,226 @@ func reconcileGraphRelation(ctx stdctx.Context, llmClient *llm.Client, srcName s
 	}
 
 	return parsed.Action, parsed.TargetToRemove
+}
+
+func startHTTPServer(port string, memStore memory.MemoryStore) {
+	if port == "" {
+		port = "8080"
+	}
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/configs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "*")
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		if r.Method == "GET" {
+			configs := map[string]string{
+				"module_emotion_tracker":      memStore.GetConfig("module_emotion_tracker", "true"),
+				"module_graph_self_evolution": memStore.GetConfig("module_graph_self_evolution", "true"),
+				"module_multi_turn_graph":     memStore.GetConfig("module_multi_turn_graph", "true"),
+				"module_image_dedup":          memStore.GetConfig("module_image_dedup", "true"),
+			}
+			_ = json.NewEncoder(w).Encode(configs)
+			return
+		}
+
+		if r.Method == "POST" {
+			var body struct {
+				Key   string `json:"key"`
+				Value string `json:"value"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			err := memStore.SetConfig(body.Key, body.Value)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			return
+		}
+	})
+
+	mux.HandleFunc("/api/emotion-trends", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "*")
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		states, times, err := memStore.GetEmotionHistory()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		type TrendPoint struct {
+			Timestamp int64  `json:"timestamp"`
+			Mood      int    `json:"mood"`
+			Affinity  int    `json:"affinity"`
+			Sentiment string `json:"sentiment"`
+		}
+
+		var trends []TrendPoint
+		for i := 0; i < len(states); i++ {
+			trends = append(trends, TrendPoint{
+				Timestamp: times[i],
+				Mood:      states[i].MoodScore,
+				Affinity:  states[i].AffinityScore,
+				Sentiment: states[i].LastSentiment,
+			})
+		}
+
+		if trends == nil {
+			trends = []TrendPoint{}
+		}
+
+		_ = json.NewEncoder(w).Encode(trends)
+	})
+
+	mux.HandleFunc("/api/graph", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "*")
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		dbStore, ok := memStore.(*memory.DatabaseStore)
+		if !ok {
+			http.Error(w, "Graph RAG is only supported in database mode", http.StatusBadRequest)
+			return
+		}
+		dbConn := dbStore.GetDBConn()
+
+		if r.Method == "GET" {
+			rows, err := dbConn.Query(`
+SELECT e1.name, r.relation, e2.name
+FROM knowledge_relations r
+JOIN knowledge_entities e1 ON r.src_id = e1.id
+JOIN knowledge_entities e2 ON r.dst_id = e2.id
+ORDER BY r.created_at DESC`)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer rows.Close()
+
+			type Trio struct {
+				Src      string `json:"src"`
+				Relation string `json:"relation"`
+				Dst      string `json:"dst"`
+			}
+			var trios []Trio
+			for rows.Next() {
+				var t Trio
+				if err := rows.Scan(&t.Src, &t.Relation, &t.Dst); err == nil {
+					trios = append(trios, t)
+				}
+			}
+			if trios == nil {
+				trios = []Trio{}
+			}
+			_ = json.NewEncoder(w).Encode(trios)
+			return
+		}
+
+		if r.Method == "POST" {
+			var body struct {
+				Src      string `json:"src"`
+				Relation string `json:"relation"`
+				Dst      string `json:"dst"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			_, _ = memStore.SaveEntity(body.Src, "concept")
+			_, _ = memStore.SaveEntity(body.Dst, "concept")
+			err := memStore.SaveRelation(body.Src, body.Relation, body.Dst)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			return
+		}
+
+		if r.Method == "DELETE" {
+			var body struct {
+				Src      string `json:"src"`
+				Relation string `json:"relation"`
+				Dst      string `json:"dst"`
+			}
+			if r.ContentLength > 0 {
+				_ = json.NewDecoder(r.Body).Decode(&body)
+			} else {
+				body.Src = r.URL.Query().Get("src")
+				body.Relation = r.URL.Query().Get("relation")
+				body.Dst = r.URL.Query().Get("dst")
+			}
+
+			err := memStore.DeleteRelation(body.Src, body.Relation, body.Dst)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			return
+		}
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasPrefix(path, "/api") {
+			http.NotFound(w, r)
+			return
+		}
+
+		filePath := "web/dist" + path
+		if path == "/" {
+			filePath = "web/dist/index.html"
+		}
+
+		content, err := webAssets.ReadFile(filePath)
+		if err != nil {
+			content, err = webAssets.ReadFile("web/dist/index.html")
+			if err != nil {
+				http.Error(w, "Dashboard Front-End not compiled yet. Please run build in web directory.", http.StatusNotFound)
+				return
+			}
+			filePath = "web/dist/index.html"
+		}
+
+		if strings.HasSuffix(filePath, ".html") {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		} else if strings.HasSuffix(filePath, ".js") {
+			w.Header().Set("Content-Type", "application/javascript")
+		} else if strings.HasSuffix(filePath, ".css") {
+			w.Header().Set("Content-Type", "text/css")
+		} else if strings.HasSuffix(filePath, ".png") {
+			w.Header().Set("Content-Type", "image/png")
+		} else if strings.HasSuffix(filePath, ".svg") {
+			w.Header().Set("Content-Type", "image/svg+xml")
+		}
+		_, _ = w.Write(content)
+	})
+
+	log.Printf("[Web控制台] 后台 HTTP 服务器正在启动，监听端口: %s ...", port)
+	log.Printf("[Web控制台] 面板访问地址: http://127.0.0.1:%s/", port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
+		log.Printf("[Web控制台] 服务器异常关闭: %v", err)
+	}
 }
 

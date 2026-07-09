@@ -234,6 +234,32 @@ CREATE TABLE IF NOT EXISTS knowledge_relations (
 	if err != nil {
 		return err
 	}
+
+	_, err = s.db.Exec(`
+CREATE TABLE IF NOT EXISTS bot_configs (
+  config_key varchar(64) NOT NULL,
+  config_value varchar(255) NOT NULL,
+  updated_at bigint DEFAULT NULL,
+  PRIMARY KEY (config_key)
+) DEFAULT CHARSET=utf8mb4`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec(`
+CREATE TABLE IF NOT EXISTS relationship_history (
+  id varchar(64) NOT NULL,
+  profile_id varchar(64) NOT NULL,
+  mood_score int DEFAULT 80,
+  affinity_score int DEFAULT 80,
+  sentiment varchar(32) DEFAULT 'neutral',
+  created_at bigint DEFAULT NULL,
+  PRIMARY KEY (id),
+  KEY idx_profile_created (profile_id, created_at)
+) DEFAULT CHARSET=utf8mb4`)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1158,14 +1184,70 @@ WHERE profile_id=?`, s.profileID).Scan(&state.MoodScore, &state.AffinityScore, &
 }
 
 func (s *DatabaseStore) UpdateRelationshipState(state RelationshipState) error {
+	now := time.Now().Unix()
 	_, err := s.db.Exec(`
 INSERT INTO relationship_state (profile_id, mood_score, affinity_score, last_sentiment, updated_at)
 VALUES (?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   mood_score=VALUES(mood_score), affinity_score=VALUES(affinity_score),
   last_sentiment=VALUES(last_sentiment), updated_at=VALUES(updated_at)`,
-		s.profileID, state.MoodScore, state.AffinityScore, state.LastSentiment, time.Now().Unix())
+		s.profileID, state.MoodScore, state.AffinityScore, state.LastSentiment, now)
+	if err != nil {
+		return err
+	}
+
+	histID := fmt.Sprintf("hist_%s", HashContent(fmt.Sprintf("%s_%d_%d_%d", s.profileID, now, state.MoodScore, state.AffinityScore))[:16])
+	_, _ = s.db.Exec(`
+INSERT INTO relationship_history (id, profile_id, mood_score, affinity_score, sentiment, created_at)
+VALUES (?, ?, ?, ?, ?, ?)`,
+		histID, s.profileID, state.MoodScore, state.AffinityScore, state.LastSentiment, now)
+
+	return nil
+}
+
+func (s *DatabaseStore) GetConfig(key string, defaultVal string) string {
+	var val string
+	err := s.db.QueryRow(`SELECT config_value FROM bot_configs WHERE config_key = ?`, key).Scan(&val)
+	if err == sql.ErrNoRows {
+		return defaultVal
+	}
+	if err != nil {
+		return defaultVal
+	}
+	return val
+}
+
+func (s *DatabaseStore) SetConfig(key string, value string) error {
+	_, err := s.db.Exec(`
+INSERT INTO bot_configs (config_key, config_value, updated_at)
+VALUES (?, ?, ?)
+ON DUPLICATE KEY UPDATE config_value = VALUES(config_value), updated_at = VALUES(updated_at)`,
+		key, value, time.Now().Unix())
 	return err
+}
+
+func (s *DatabaseStore) GetEmotionHistory() ([]RelationshipState, []int64, error) {
+	rows, err := s.db.Query(`
+SELECT mood_score, affinity_score, sentiment, created_at
+FROM relationship_history
+WHERE profile_id = ?
+ORDER BY created_at ASC`, s.profileID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var states []RelationshipState
+	var times []int64
+	for rows.Next() {
+		var state RelationshipState
+		var t int64
+		if err := rows.Scan(&state.MoodScore, &state.AffinityScore, &state.LastSentiment, &t); err == nil {
+			states = append(states, state)
+			times = append(times, t)
+		}
+	}
+	return states, times, nil
 }
 
 func (s *DatabaseStore) GetImageHashCache(hash string) (ocr string, caption string, err error) {

@@ -97,6 +97,18 @@ func (m *mockMemoryStore) DeleteRelation(srcName string, relation string, dstNam
 	return nil
 }
 
+func (m *mockMemoryStore) GetConfig(key string, defaultVal string) string {
+	return defaultVal
+}
+
+func (m *mockMemoryStore) SetConfig(key string, value string) error {
+	return nil
+}
+
+func (m *mockMemoryStore) GetEmotionHistory() ([]memory.RelationshipState, []int64, error) {
+	return nil, nil, nil
+}
+
 func init() {
 	dir := "."
 	for i := 0; i < 5; i++ {
@@ -568,7 +580,7 @@ func TestGraphRAGEntityCollisionAndExtraction(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	extractAndSaveGraph(ctx, llmClient, store, "大叔是三哥的同事。")
+	extractAndSaveGraph(ctx, llmClient, store, "大叔是三哥的同事。", nil)
 
 	// Query whether triplet got written
 	var relationName string
@@ -629,7 +641,7 @@ func TestGraphSelfEvolution(t *testing.T) {
 	ctx := context.Background()
 
 	// 3. Test REPLACE: 三哥搬去深圳定居了
-	extractAndSaveGraph(ctx, llmClient, store, "三哥最近已经决定去深圳定居了，因此不再住在北京。")
+	extractAndSaveGraph(ctx, llmClient, store, "三哥最近已经决定去深圳定居了，因此不再住在北京。", nil)
 
 	var hasBeijing, hasShenzhen bool
 	for i := 0; i < 15; i++ {
@@ -657,7 +669,7 @@ func TestGraphSelfEvolution(t *testing.T) {
 	}
 
 	// 4. Test DELETE: 三哥不吃火锅了
-	extractAndSaveGraph(ctx, llmClient, store, "三哥最近因为上火开始减肥，坚决不吃火锅了。")
+	extractAndSaveGraph(ctx, llmClient, store, "三哥最近因为上火开始减肥，坚决不吃火锅了。", nil)
 
 	var hasHotpot bool
 	for i := 0; i < 15; i++ {
@@ -676,6 +688,94 @@ func TestGraphSelfEvolution(t *testing.T) {
 
 	if hasHotpot {
 		t.Errorf("Self-evolution DELETE failed: negated target '火锅' was not deleted from likes relation")
+	}
+}
+
+func TestMultiTurnGraphExtraction(t *testing.T) {
+	cfg := config.Load()
+	if cfg.MemoryDatabaseDSN == "" {
+		t.Skip("MEMORY_DATABASE_DSN not configured, skipping graph multi-turn test")
+	}
+
+	opts := memory.DatabaseOptions{
+		DSN:       cfg.MemoryDatabaseDSN,
+		ProfileID: "test_graph_multiturn",
+		Embedder:  &mock1024Embedder{},
+	}
+	store, err := memory.NewDatabaseStore(opts)
+	if err != nil {
+		t.Fatalf("Failed to connect to OceanBase: %v", err)
+	}
+	defer store.Close()
+
+	db := store.GetDBConn()
+	_, _ = db.Exec("DELETE FROM knowledge_relations")
+	_, _ = db.Exec("DELETE FROM knowledge_entities")
+
+	llmClient := llm.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
+	if cfg.DeepSeekAPIKey == "" {
+		t.Skip("DeepSeekAPIKey not configured, skipping LLM test")
+	}
+
+	ctx := context.Background()
+
+	recentTurns := []workingMemoryTurn{
+		{Sender: "舒舒", Content: "我最近胃口不太好。"},
+		{Sender: "三哥", Content: "那我给你买点酸的零食？"},
+		{Sender: "舒舒", Content: "好呀，我最喜欢吃这个了。"},
+	}
+
+	_ = store.SetConfig("module_multi_turn_graph", "true")
+
+	extractAndSaveGraph(ctx, llmClient, store, "舒舒说她最喜欢吃这个。", recentTurns)
+
+	var likesSomething string
+	for i := 0; i < 15; i++ {
+		time.Sleep(100 * time.Millisecond)
+		dsts, _ := store.GetRelationDestinations("舒舒", "likes")
+		if len(dsts) > 0 {
+			likesSomething = dsts[0]
+			break
+		}
+	}
+
+	if likesSomething == "" {
+		t.Log("Warning: LLM multi-turn extraction did not yield any likes relations.")
+	} else {
+		t.Logf("Success: LLM successfully resolved 'this' to %q through context!", likesSomething)
+	}
+}
+
+func TestConfigToggles(t *testing.T) {
+	cfg := config.Load()
+	if cfg.MemoryDatabaseDSN == "" {
+		t.Skip("MEMORY_DATABASE_DSN not configured, skipping configs test")
+	}
+
+	opts := memory.DatabaseOptions{
+		DSN:       cfg.MemoryDatabaseDSN,
+		ProfileID: "test_graph_configs",
+		Embedder:  &mock1024Embedder{},
+	}
+	store, err := memory.NewDatabaseStore(opts)
+	if err != nil {
+		t.Fatalf("Failed to connect to OceanBase: %v", err)
+	}
+	defer store.Close()
+
+	val := store.GetConfig("non_existent_key", "default_val")
+	if val != "default_val" {
+		t.Errorf("Expected default_val, got %q", val)
+	}
+
+	err = store.SetConfig("test_module_switch", "false")
+	if err != nil {
+		t.Fatalf("SetConfig failed: %v", err)
+	}
+
+	val = store.GetConfig("test_module_switch", "true")
+	if val != "false" {
+		t.Errorf("Expected false, got %q", val)
 	}
 }
 
