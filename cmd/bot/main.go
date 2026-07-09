@@ -40,6 +40,8 @@ import (
 //go:embed web/dist/*
 var webAssets embed.FS
 
+var globalMemStore memory.MemoryStore
+
 // ---- Card builders (Feishu Card 2.0) ----
 
 // buildCard creates a proper Feishu Card 2.0 structure with body.elements.
@@ -1031,7 +1033,23 @@ func senderLabel(cfg *config.Config, prof *profile.Profile, fs *feishu.Client, o
 	if member, ok := prof.MemberByOpenID(openID); ok {
 		return member.DisplayName()
 	}
-	return fs.LabelSender(openID, prof.OwnerDisplay(), prof.BotName, prof.TargetDisplay())
+	ownerDisp := prof.OwnerDisplay()
+	botDisp := prof.BotName
+	targetDisp := prof.TargetDisplay()
+
+	if globalMemStore != nil {
+		if u := globalMemStore.GetConfig("user_name", ""); u != "" {
+			ownerDisp = u
+		}
+		if b := globalMemStore.GetConfig("bot_name", ""); b != "" {
+			botDisp = b
+		}
+		if t := globalMemStore.GetConfig("partner_name", ""); t != "" {
+			targetDisp = t
+		}
+	}
+
+	return fs.LabelSender(openID, ownerDisp, botDisp, targetDisp)
 }
 
 func audienceForSender(cfg *config.Config, prof *profile.Profile, msg feishu.Message) string {
@@ -1583,6 +1601,7 @@ func runBotMode() {
 			if err != nil {
 				log.Printf("初始化数据库记忆库失败: %v", err)
 			} else {
+				globalMemStore = memStore
 				if embedder != nil {
 					log.Printf("[记忆] 使用 OceanBase/MySQL + Ollama hybrid retrieval: profile=%s include_chat_archive=%v include_media_archive=%v embed=%s/%s", cfg.ProfileID, cfg.MemoryIncludeChatArchive, cfg.MemoryIncludeMediaArchive, cfg.OllamaBaseURL, cfg.OllamaModel)
 				} else {
@@ -1599,6 +1618,8 @@ func runBotMode() {
 			memStore, err = memory.NewSearchStore(cfg.ProfileID, "memory_data", embedder)
 			if err != nil {
 				log.Printf("初始化记忆库失败: %v", err)
+			} else {
+				globalMemStore = memStore
 			}
 		}
 	}
@@ -2549,6 +2570,10 @@ func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore mem
 		r := strings.TrimSpace(rel.Relation)
 		dst := strings.TrimSpace(rel.DstName)
 		if src != "" && r != "" && dst != "" {
+			// 确保主语与宾语实体已保存，防范 JOIN 检索丢失
+			_, _ = memStore.SaveEntity(src, "concept")
+			_, _ = memStore.SaveEntity(dst, "concept")
+
 			if memStore.GetConfig("module_graph_self_evolution", "true") == "true" {
 				existing, err := memStore.GetRelationDestinations(src, r)
 				if err == nil && len(existing) > 0 {
