@@ -2621,6 +2621,56 @@ func startHTTPServer(port string, memStore memory.MemoryStore) {
 
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("/api/db-status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "*")
+		if r.Method == "OPTIONS" {
+			return
+		}
+
+		dbStore, ok := memStore.(*memory.DatabaseStore)
+		if !ok {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "offline",
+				"error":  "not in database mode",
+			})
+			return
+		}
+		dbConn := dbStore.GetDBConn()
+
+		status := "online"
+		pingErr := dbConn.Ping()
+		if pingErr != nil {
+			status = "offline"
+		}
+
+		var version string
+		_ = dbConn.QueryRow("SELECT VERSION()").Scan(&version)
+
+		stats := dbConn.Stats()
+
+		var entityCount, relationCount int
+		_ = dbConn.QueryRow("SELECT COUNT(*) FROM knowledge_entities").Scan(&entityCount)
+		_ = dbConn.QueryRow("SELECT COUNT(*) FROM knowledge_relations").Scan(&relationCount)
+
+		response := map[string]interface{}{
+			"status":         status,
+			"version":        version,
+			"max_open_conns": stats.MaxOpenConnections,
+			"open_conns":     stats.OpenConnections,
+			"in_use_conns":   stats.InUse,
+			"idle_conns":     stats.Idle,
+			"wait_count":     stats.WaitCount,
+			"entity_count":   entityCount,
+			"relation_count": relationCount,
+			"profile_id":     dbStore.GetProfileID(),
+		}
+
+		_ = json.NewEncoder(w).Encode(response)
+	})
+
 	mux.HandleFunc("/api/configs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")

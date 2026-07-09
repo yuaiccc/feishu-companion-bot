@@ -20,6 +20,20 @@ interface Trio {
   dst: string;
 }
 
+interface DBStatus {
+  status: string;
+  version: string;
+  max_open_conns: number;
+  open_conns: number;
+  in_use_conns: number;
+  idle_conns: number;
+  wait_count: number;
+  entity_count: number;
+  relation_count: number;
+  profile_id: string;
+  error?: string;
+}
+
 function App() {
   const [configs, setConfigs] = useState<Configs>({
     module_emotion_tracker: 'true',
@@ -30,6 +44,18 @@ function App() {
 
   const [trends, setTrends] = useState<TrendPoint[]>([]);
   const [trios, setTrios] = useState<Trio[]>([]);
+  const [dbStatus, setDbStatus] = useState<DBStatus>({
+    status: 'offline',
+    version: 'Unknown',
+    max_open_conns: 0,
+    open_conns: 0,
+    in_use_conns: 0,
+    idle_conns: 0,
+    wait_count: 0,
+    entity_count: 0,
+    relation_count: 0,
+    profile_id: 'unknown',
+  });
 
   // Triplet input fields
   const [newSrc, setNewSrc] = useState('');
@@ -76,10 +102,30 @@ function App() {
     }
   };
 
+  const fetchDbStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/db-status`);
+      const data = await res.json();
+      setDbStatus(data);
+    } catch (e) {
+      console.error('Failed to fetch db status', e);
+      setDbStatus(prev => ({ ...prev, status: 'offline' }));
+    }
+  };
+
   useEffect(() => {
     fetchConfigs();
     fetchTrends();
     fetchTrios();
+    fetchDbStatus();
+
+    // Poll DB status and trends every 5 seconds to show real-time changes
+    const timer = setInterval(() => {
+      fetchDbStatus();
+      fetchTrends();
+    }, 5000);
+
+    return () => clearInterval(timer);
   }, []);
 
   const handleToggle = async (key: keyof Configs) => {
@@ -94,7 +140,6 @@ function App() {
       });
     } catch (e) {
       console.error('Failed to update config', e);
-      // rollback
       setConfigs(prev => ({ ...prev, [key]: configs[key] }));
     }
   };
@@ -117,6 +162,7 @@ function App() {
         setNewSrc('');
         setNewDst('');
         fetchTrios();
+        fetchDbStatus(); // update entity counts
       }
     } catch (e) {
       console.error('Failed to add triplet', e);
@@ -136,35 +182,31 @@ function App() {
       });
       if (res.ok) {
         fetchTrios();
+        fetchDbStatus(); // update entity counts
       }
     } catch (e) {
       console.error('Failed to delete triplet', e);
     }
   };
 
-  // Render Premium SVG Chart for trends
   const renderSVGChart = () => {
     if (trends.length === 0) {
       return <div className="empty-state">暂无情感亲密度温度计数据，机器人需要先进行聊天会话</div>;
     }
 
-    // SVG width & height variables
     const width = 500;
     const height = 200;
     const padding = 25;
 
-    // Helper to calculate X/Y mappings
     const getX = (index: number) => {
       if (trends.length <= 1) return width / 2;
       return padding + (index * (width - 2 * padding)) / (trends.length - 1);
     };
 
     const getY = (score: number) => {
-      // mapping 0-100 score to height-padding viewport
       return height - padding - (score * (height - 2 * padding)) / 100;
     };
 
-    // Build line path strings
     let moodPoints = '';
     let affinityPoints = '';
     let moodArea = `M ${getX(0)} ${height - padding} `;
@@ -208,7 +250,6 @@ function App() {
           </linearGradient>
         </defs>
 
-        {/* Y grid lines */}
         {[20, 50, 80, 100].map(val => (
           <line
             key={val}
@@ -221,15 +262,12 @@ function App() {
           />
         ))}
 
-        {/* Underlay area masks */}
         <path d={moodArea} fill="url(#moodGrad)" />
         <path d={affinityArea} fill="url(#affGrad)" />
 
-        {/* Lines */}
         <path d={moodPoints} fill="none" stroke="#ff4983" strokeWidth="2.5" strokeLinecap="round" />
         <path d={affinityPoints} fill="none" stroke="#00b4ff" strokeWidth="2.5" strokeLinecap="round" />
 
-        {/* Data points */}
         {trends.map((pt, idx) => (
           <g key={idx}>
             <circle cx={getX(idx)} cy={getY(pt.mood)} r="4" fill="#ff4983" stroke="#080a13" strokeWidth="1.5" />
@@ -245,6 +283,11 @@ function App() {
     );
   };
 
+  const getPoolUsagePercentage = () => {
+    if (dbStatus.max_open_conns <= 0) return 0;
+    return (dbStatus.in_use_conns / dbStatus.max_open_conns) * 100;
+  };
+
   return (
     <div className="app-container">
       <header>
@@ -258,97 +301,167 @@ function App() {
       </header>
 
       <div className="dashboard-grid">
-        {/* Card 1: Modular Config Toggles */}
-        <div className="glass-card">
-          <h2 className="card-title">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-            智能模块热配置
-          </h2>
-          <div className="settings-list">
-            <div className="setting-item">
-              <div className="setting-info">
-                <h4>情感亲密度温度计 (Emotion Tracker)</h4>
-                <p>实时分析主人的言语态度，动态调整恋爱关系评分与对话亲密人设</p>
+        {/* Left Column: Settings & Database Panel */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '30px' }}>
+          {/* Card 1: Modular Config Toggles */}
+          <div className="glass-card">
+            <h2 className="card-title">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+              智能模块热配置
+            </h2>
+            <div className="settings-list">
+              <div className="setting-item">
+                <div className="setting-info">
+                  <h4>情感亲密度温度计 (Emotion Tracker)</h4>
+                  <p>实时分析主人的言语态度，动态调整恋爱关系评分与对话人设</p>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={configs.module_emotion_tracker === 'true'}
+                    onChange={() => handleToggle('module_emotion_tracker')}
+                  />
+                  <span className="slider"></span>
+                </label>
               </div>
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={configs.module_emotion_tracker === 'true'}
-                  onChange={() => handleToggle('module_emotion_tracker')}
-                />
-                <span className="slider"></span>
-              </label>
-            </div>
 
-            <div className="setting-item">
-              <div className="setting-info">
-                <h4>图谱冲突演进与纠偏 (Self-Evolution)</h4>
-                <p>自动识别新老事实逻辑互斥冲突，由 LLM 主动对旧关系进行删除/覆盖</p>
+              <div className="setting-item">
+                <div className="setting-info">
+                  <h4>图谱冲突演进与纠偏 (Self-Evolution)</h4>
+                  <p>自动识别逻辑冲突，由 LLM 主动对旧关系进行删除/覆盖</p>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={configs.module_graph_self_evolution === 'true'}
+                    onChange={() => handleToggle('module_graph_self_evolution')}
+                  />
+                  <span className="slider"></span>
+                </label>
               </div>
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={configs.module_graph_self_evolution === 'true'}
-                  onChange={() => handleToggle('module_graph_self_evolution')}
-                />
-                <span className="slider"></span>
-              </label>
-            </div>
 
-            <div className="setting-item">
-              <div className="setting-info">
-                <h4>跨会话上下文推理 (Multi-turn GraphRAG)</h4>
-                <p>提取图谱时融合最近 8 轮聊天历史，精准推断人称代词（如“她”）所指实体</p>
+              <div className="setting-item">
+                <div className="setting-info">
+                  <h4>跨会话上下文推理 (Multi-turn GraphRAG)</h4>
+                  <p>提炼图谱时融合最近对话上下文历史，消解隐含代词指代</p>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={configs.module_multi_turn_graph === 'true'}
+                    onChange={() => handleToggle('module_multi_turn_graph')}
+                  />
+                  <span className="slider"></span>
+                </label>
               </div>
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={configs.module_multi_turn_graph === 'true'}
-                  onChange={() => handleToggle('module_multi_turn_graph')}
-                />
-                <span className="slider"></span>
-              </label>
-            </div>
 
-            <div className="setting-item">
-              <div className="setting-info">
-                <h4>表情包与图片秒懂 (Image Dedup Cache)</h4>
-                <p>运用 MD5 静默秒回已识图片 OCR 及描述，省去重复视觉大模型识别延时</p>
+              <div className="setting-item">
+                <div className="setting-info">
+                  <h4>表情包与图片秒懂 (Image Dedup Cache)</h4>
+                  <p>运用 MD5 静默秒回复已识图片，免除视觉大模型重复提取</p>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={configs.module_image_dedup === 'true'}
+                    onChange={() => handleToggle('module_image_dedup')}
+                  />
+                  <span className="slider"></span>
+                </label>
               </div>
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={configs.module_image_dedup === 'true'}
-                  onChange={() => handleToggle('module_image_dedup')}
-                />
-                <span className="slider"></span>
-              </label>
+            </div>
+          </div>
+
+          {/* Card 2: OceanBase Monitor Status */}
+          <div className="glass-card">
+            <h2 className="card-title" style={{ justifyContent: 'space-between' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+                OceanBase 数据库监控
+              </span>
+              <span style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                color: dbStatus.status === 'online' ? '#10b981' : '#ef4444'
+              }}>
+                <span className={`status-dot ${dbStatus.status === 'online' ? 'online' : 'offline'}`} />
+                {dbStatus.status === 'online' ? 'ONLINE' : 'OFFLINE'}
+              </span>
+            </h2>
+
+            <div className="db-metrics-list" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
+                <span style={{ color: 'var(--text-muted)' }}>数据库版本</span>
+                <span style={{ fontFamily: 'monospace', color: 'var(--text-main)' }}>{dbStatus.version}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem' }}>
+                <span style={{ color: 'var(--text-muted)' }}>当前 Profile</span>
+                <span style={{ fontWeight: 500 }}>{dbStatus.profile_id}</span>
+              </div>
+
+              {/* Pool utilization bar */}
+              <div style={{ marginTop: '4px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', marginBottom: '6px' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>连接池开销 (Active/Idle)</span>
+                  <span style={{ fontWeight: 500 }}>
+                    {dbStatus.in_use_conns} / {dbStatus.idle_conns} (Max: {dbStatus.max_open_conns})
+                  </span>
+                </div>
+                <div className="progress-bar-bg">
+                  <div
+                    className="progress-bar-fill"
+                    style={{ width: `${Math.max(4, getPoolUsagePercentage())}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Grid counters */}
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: '12px',
+                marginTop: '8px'
+              }}>
+                <div className="db-metric-box">
+                  <div className="metric-num">{dbStatus.entity_count}</div>
+                  <div className="metric-lbl">图谱实体 (Entities)</div>
+                </div>
+                <div className="db-metric-box">
+                  <div className="metric-num">{dbStatus.relation_count}</div>
+                  <div className="metric-lbl">关系数量 (Relations)</div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Card 2: Emotion Trends Chart */}
-        <div className="glass-card">
-          <h2 className="card-title">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-            恋爱亲密温度波动计
-          </h2>
-          <div className="chart-legend">
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#ff4983' }}></span>
-              情绪分 (Mood)
-            </div>
-            <div className="legend-item">
-              <span className="legend-color" style={{ backgroundColor: '#00b4ff' }}></span>
-              好感度 (Affinity)
+        {/* Right Column: Emotion Trends Chart */}
+        <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+          <div>
+            <h2 className="card-title">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+              恋爱亲密温度波动计
+            </h2>
+            <div className="chart-legend">
+              <div className="legend-item">
+                <span className="legend-color" style={{ backgroundColor: '#ff4983' }}></span>
+                情绪分 (Mood)
+              </div>
+              <div className="legend-item">
+                <span className="legend-color" style={{ backgroundColor: '#00b4ff' }}></span>
+                好感度 (Affinity)
+              </div>
             </div>
           </div>
-          <div className="chart-container">
+          <div className="chart-container" style={{ flexGrow: 1, display: 'flex', alignItems: 'center' }}>
             {renderSVGChart()}
           </div>
         </div>
 
-        {/* Card 3: Graph RAG Auditor */}
+        {/* Bottom Column: Graph RAG Auditor */}
         <div className="glass-card graph-card">
           <h2 className="card-title">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3zM6 21a3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3v12a3 3 0 0 0 3 3z"/></svg>

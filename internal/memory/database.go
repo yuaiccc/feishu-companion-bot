@@ -1171,6 +1171,10 @@ func (s *DatabaseStore) GetDBConn() *sql.DB {
 	return s.db
 }
 
+func (s *DatabaseStore) GetProfileID() string {
+	return s.profileID
+}
+
 func (s *DatabaseStore) GetRelationshipState() (RelationshipState, error) {
 	var state RelationshipState
 	err := s.db.QueryRow(`

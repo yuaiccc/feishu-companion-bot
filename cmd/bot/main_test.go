@@ -109,6 +109,10 @@ func (m *mockMemoryStore) GetEmotionHistory() ([]memory.RelationshipState, []int
 	return nil, nil, nil
 }
 
+func (m *mockMemoryStore) GetProfileID() string {
+	return "test"
+}
+
 func init() {
 	dir := "."
 	for i := 0; i < 5; i++ {

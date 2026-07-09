@@ -350,6 +350,7 @@ type MemoryStore interface {
 	GetConfig(key string, defaultVal string) string
 	SetConfig(key string, value string) error
 	GetEmotionHistory() ([]RelationshipState, []int64, error)
+	GetProfileID() string
 }
 
 func (s *Store) GetRelationshipState() (RelationshipState, error) {
@@ -394,6 +395,10 @@ func (s *Store) SetConfig(key string, value string) error {
 
 func (s *Store) GetEmotionHistory() ([]RelationshipState, []int64, error) {
 	return nil, nil, nil
+}
+
+func (s *Store) GetProfileID() string {
+	return "dummy"
 }
 
 func (s *Store) GetImageHashCache(hash string) (ocr string, caption string, err error) {
