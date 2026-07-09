@@ -526,8 +526,11 @@ func TestGraphRAGEntityCollisionAndExtraction(t *testing.T) {
 	defer store.Close()
 
 	db := store.GetDBConn()
-	_, _ = db.Exec("DELETE FROM knowledge_relations")
-	_, _ = db.Exec("DELETE FROM knowledge_entities")
+	_, _ = db.Exec(`
+		DELETE FROM knowledge_relations 
+		WHERE src_id IN (SELECT id FROM knowledge_entities WHERE name IN ('秋酿', '舒舒', '阿姨', '大叔', '三哥'))
+		   OR dst_id IN (SELECT id FROM knowledge_entities WHERE name IN ('秋酿', '舒舒', '阿姨', '大叔', '三哥'))`)
+	_, _ = db.Exec("DELETE FROM knowledge_entities WHERE name IN ('秋酿', '舒舒', '阿姨', '大叔', '三哥')")
 
 	// 1. Test saving entities and relations
 	_, err = store.SaveEntity("秋酿", "alias")
@@ -599,8 +602,8 @@ func TestGraphRAGEntityCollisionAndExtraction(t *testing.T) {
 		t.Logf("Warning: LLM triplet extraction scan failed: %v. This is normal if LLM API is transiently unavailable.", err)
 	} else {
 		t.Logf("Success: LLM triplet extraction extracted relation: %q", relationName)
-		if relationName != "colleague_of" && relationName != "colleague" {
-			t.Errorf("Expected relation 'colleague_of', got %q", relationName)
+		if relationName != "同事" {
+			t.Errorf("Expected relation '同事', got %q", relationName)
 		}
 	}
 }
@@ -623,16 +626,19 @@ func TestGraphSelfEvolution(t *testing.T) {
 	defer store.Close()
 
 	db := store.GetDBConn()
-	_, _ = db.Exec("DELETE FROM knowledge_relations")
-	_, _ = db.Exec("DELETE FROM knowledge_entities")
+	_, _ = db.Exec(`
+		DELETE FROM knowledge_relations 
+		WHERE src_id IN (SELECT id FROM knowledge_entities WHERE name IN ('三哥', '北京', '深圳', '火锅'))
+		   OR dst_id IN (SELECT id FROM knowledge_entities WHERE name IN ('三哥', '北京', '深圳', '火锅'))`)
+	_, _ = db.Exec("DELETE FROM knowledge_entities WHERE name IN ('三哥', '北京', '深圳', '火锅')")
 
 	// 1. Init original facts
 	_, _ = store.SaveEntity("三哥", "person")
-	_ = store.SaveRelation("三哥", "location", "北京")
-	_ = store.SaveRelation("三哥", "likes", "火锅")
+	_ = store.SaveRelation("三哥", "所在地", "北京")
+	_ = store.SaveRelation("三哥", "喜欢", "火锅")
 
 	// 2. Validate original values
-	dsts, err := store.GetRelationDestinations("三哥", "location")
+	dsts, err := store.GetRelationDestinations("三哥", "所在地")
 	if err != nil || len(dsts) != 1 || dsts[0] != "北京" {
 		t.Fatalf("Initial destinations setup failed: got %v, err=%v", dsts, err)
 	}
@@ -650,7 +656,7 @@ func TestGraphSelfEvolution(t *testing.T) {
 	var hasBeijing, hasShenzhen bool
 	for i := 0; i < 15; i++ {
 		time.Sleep(100 * time.Millisecond)
-		dsts, _ = store.GetRelationDestinations("三哥", "location")
+		dsts, _ = store.GetRelationDestinations("三哥", "所在地")
 		hasBeijing, hasShenzhen = false, false
 		for _, d := range dsts {
 			if d == "北京" {
@@ -678,7 +684,7 @@ func TestGraphSelfEvolution(t *testing.T) {
 	var hasHotpot bool
 	for i := 0; i < 15; i++ {
 		time.Sleep(100 * time.Millisecond)
-		dsts, _ = store.GetRelationDestinations("三哥", "likes")
+		dsts, _ = store.GetRelationDestinations("三哥", "喜欢")
 		hasHotpot = false
 		for _, d := range dsts {
 			if d == "火锅" {
@@ -713,8 +719,11 @@ func TestMultiTurnGraphExtraction(t *testing.T) {
 	defer store.Close()
 
 	db := store.GetDBConn()
-	_, _ = db.Exec("DELETE FROM knowledge_relations")
-	_, _ = db.Exec("DELETE FROM knowledge_entities")
+	_, _ = db.Exec(`
+		DELETE FROM knowledge_relations 
+		WHERE src_id IN (SELECT id FROM knowledge_entities WHERE name IN ('舒舒', '梅子', '酸的零食', '这个'))
+		   OR dst_id IN (SELECT id FROM knowledge_entities WHERE name IN ('舒舒', '梅子', '酸的零食', '这个'))`)
+	_, _ = db.Exec("DELETE FROM knowledge_entities WHERE name IN ('舒舒', '梅子', '酸的零食', '这个')")
 
 	llmClient := llm.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
 	if cfg.DeepSeekAPIKey == "" {
@@ -736,7 +745,7 @@ func TestMultiTurnGraphExtraction(t *testing.T) {
 	var likesSomething string
 	for i := 0; i < 15; i++ {
 		time.Sleep(100 * time.Millisecond)
-		dsts, _ := store.GetRelationDestinations("舒舒", "likes")
+		dsts, _ := store.GetRelationDestinations("舒舒", "喜欢")
 		if len(dsts) > 0 {
 			likesSomething = dsts[0]
 			break

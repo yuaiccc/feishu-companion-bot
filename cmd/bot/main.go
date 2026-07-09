@@ -978,6 +978,19 @@ func endsWithPunct(s string) bool {
 // ---- Build prompt ----
 
 func buildSystemPrompt(prof *profile.Profile, mem memory.MemoryStore) string {
+	if mem != nil {
+		if customPrompt := mem.GetConfig("system_prompt", ""); customPrompt != "" {
+			var b strings.Builder
+			b.WriteString(customPrompt)
+			if state, err := mem.GetRelationshipState(); err == nil {
+				b.WriteString(fmt.Sprintf(" 【当前情感氛围】当前大哥的情绪指数为 %d/100（状态：%s，当分值较小如小于70时，说明他疲惫或受挫，请加倍温和与多给安慰；分值正常时可幽默）；你们当前的亲密度分值为 %d/100。请根据此分值自动微调你的语调。", state.MoodScore, state.LastSentiment, state.AffinityScore))
+			}
+			b.WriteString(" 【重要记忆与会话一体化原则】提供给你的“相关记忆”中如果包含 `[聊天记录 YYYY-MM-DD HH:MM]` 前缀的文本，这与“对话历史”一样，全都是你与 owner 过去在不同渠道（如微信、飞书等）留下的连续会话足迹。你必须把它们视为一个整体且连贯的聊天时间线。在回复时，请极其自然、直接地融入这些过去的聊天背景，像是一直在同一个会话中无间断聊天一样，直接使用这些历史内容作为你回答的背景和默契事实。绝不要生硬地向用户提及“根据我的记忆”、“在微信聊天记录里查到”等带有机器痕迹的词汇，让所有历史对话上下文与当前对话浑然一体。")
+			b.WriteString(" 不要在回复末尾加\"正在输入\"或\"整理中\"这类占位文字。")
+			return b.String()
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("你是%s，%s的小助手。", prof.BotRoleText(), prof.OwnerName))
 	if prof.TargetName != "" {
@@ -2468,13 +2481,13 @@ func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore mem
 	prompt := fmt.Sprintf(`你是一个机器人知识图谱提炼专家。请只返回 JSON。
 给定一句话（这是一条已经提炼过的机器人长期记忆），请提取出其中的实体（人、地、物、概念等）以及它们之间的关系三元组。
 %s
-【强制关系 Schema 限制】：为了使图谱关系能演进并自我纠偏，你提炼的关系边名称（relation 字段）必须且只能在以下预定义词中选择（使用小写英文蛇形命名）：
-- is_alias_of : 指代名字别名、大名、网名、昵称（如“秋酿是三哥的别名” -> ("秋酿", "is_alias_of", "三哥")）
-- likes : 指代喜欢的事物、喜好、喜欢的零食/食物等（如“三哥喜欢吃火锅” -> ("三哥", "likes", "火锅")。如果提到“三哥戒了火锅/坚决不吃火锅”，仍然要提炼为关系 ("三哥", "likes", "火锅")，后面的纠偏程序会自动将其处理删除）
-- location : 指代居住地、定居城市、出差所在地等（如“三哥搬去深圳定居了/定居在北京” -> ("三哥", "location", "深圳") / ("三哥", "location", "北京")）
-- colleague_of : 指代同事关系（如“大叔是三哥的同事” -> ("大叔", "colleague_of", "三哥")）
-- friend_of : 指代朋友关系
-- mother_of / father_of : 指代父母关系
+【强制关系 Schema 限制】：为了使图谱关系能演进并自我纠偏，你提炼的关系边名称（relation 字段）必须且只能在以下预定义词中选择（直接输出中文名词）：
+- 别名 : 指代名字别名、大名、网名、昵称（如“秋酿是三哥的别名” -> ("秋酿", "别名", "三哥")）
+- 喜欢 : 指代喜欢的事物、喜好、喜欢的零食/食物等（如“三哥喜欢吃火锅” -> ("三哥", "喜欢", "火锅")。如果提到“三哥戒了火锅/坚决不吃火锅”，仍然要提炼为关系 ("三哥", "喜欢", "火锅")，后面的纠偏程序会自动将其处理删除）
+- 所在地 : 指代居住地、定居城市、出差所在地等（如“三哥搬去深圳定居了/定居在北京” -> ("三哥", "所在地", "深圳") / ("三哥", "所在地", "北京")）
+- 同事 : 指代同事关系（如“大叔是三哥的同事” -> ("大叔", "同事", "三哥")）
+- 朋友 : 指代朋友关系
+- 妈妈 / 爸爸 : 指代父母关系
 
 你的 JSON 格式必须是：
 {
@@ -2686,6 +2699,11 @@ func startHTTPServer(port string, memStore memory.MemoryStore) {
 				"module_graph_self_evolution": memStore.GetConfig("module_graph_self_evolution", "true"),
 				"module_multi_turn_graph":     memStore.GetConfig("module_multi_turn_graph", "true"),
 				"module_image_dedup":          memStore.GetConfig("module_image_dedup", "true"),
+				"system_prompt":               memStore.GetConfig("system_prompt", ""),
+				"user_name":                   memStore.GetConfig("user_name", ""),
+				"bot_name":                    memStore.GetConfig("bot_name", ""),
+				"partner_name":                memStore.GetConfig("partner_name", ""),
+				"init_completed":              memStore.GetConfig("init_completed", "false"),
 			}
 			_ = json.NewEncoder(w).Encode(configs)
 			return
@@ -2693,18 +2711,27 @@ func startHTTPServer(port string, memStore memory.MemoryStore) {
 
 		if r.Method == "POST" {
 			var body struct {
-				Key   string `json:"key"`
-				Value string `json:"value"`
+				Key     string            `json:"key"`
+				Value   string            `json:"value"`
+				Configs map[string]string `json:"configs"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			err := memStore.SetConfig(body.Key, body.Value)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+
+			if len(body.Configs) > 0 {
+				for k, v := range body.Configs {
+					_ = memStore.SetConfig(k, v)
+				}
+			} else if body.Key != "" {
+				err := memStore.SetConfig(body.Key, body.Value)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
+
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 			return
 		}

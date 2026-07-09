@@ -446,3 +446,21 @@ tr:hover td {
     box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
   }
 }
+
+/* Onboarding wizard custom styling */
+.onboarding-card {
+  box-shadow: 0 20px 80px rgba(162, 53, 255, 0.15), 
+              0 0 40px rgba(255, 255, 255, 0.02) !important;
+}
+
+.onboarding-card input, 
+.onboarding-card textarea {
+  transition: all 0.3s ease;
+}
+
+.onboarding-card input:focus, 
+.onboarding-card textarea:focus {
+  border-color: #a235ff !important;
+  box-shadow: 0 0 15px rgba(162, 53, 255, 0.15) !important;
+  background: rgba(0, 0, 0, 0.3) !important;
+}

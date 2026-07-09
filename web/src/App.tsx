@@ -5,6 +5,11 @@ interface Configs {
   module_graph_self_evolution: string;
   module_multi_turn_graph: string;
   module_image_dedup: string;
+  system_prompt: string;
+  user_name: string;
+  bot_name: string;
+  partner_name: string;
+  init_completed: string;
 }
 
 interface TrendPoint {
@@ -40,6 +45,11 @@ function App() {
     module_graph_self_evolution: 'true',
     module_multi_turn_graph: 'true',
     module_image_dedup: 'true',
+    system_prompt: '',
+    user_name: '',
+    bot_name: '',
+    partner_name: '',
+    init_completed: 'false',
   });
 
   const [trends, setTrends] = useState<TrendPoint[]>([]);
@@ -59,10 +69,16 @@ function App() {
 
   // Triplet input fields
   const [newSrc, setNewSrc] = useState('');
-  const [newRelation, setNewRelation] = useState('is_alias_of');
+  const [newRelation, setNewRelation] = useState('别名');
   const [newDst, setNewDst] = useState('');
 
-  // Auto detect port for local developer hot reload (5173 -> 8080 proxy bypass)
+  // Onboarding Wizard Fields
+  const [wizardUser, setWizardUser] = useState('');
+  const [wizardBot, setWizardBot] = useState('');
+  const [wizardPartner, setWizardPartner] = useState('');
+  const [wizardPrompt, setWizardPrompt] = useState('');
+
+  // Auto detect port for local developer proxy bypass
   const getBaseUrl = () => {
     if (window.location.port === '5173') {
       return 'http://127.0.0.1:8080';
@@ -77,6 +93,13 @@ function App() {
       const res = await fetch(`${API_BASE}/api/configs`);
       const data = await res.json();
       setConfigs(data);
+      if (data.init_completed === 'true') {
+        // sync wizard fields from loaded config
+        setWizardUser(data.user_name || '');
+        setWizardBot(data.bot_name || '');
+        setWizardPartner(data.partner_name || '');
+        setWizardPrompt(data.system_prompt || '');
+      }
     } catch (e) {
       console.error('Failed to fetch configs', e);
     }
@@ -119,7 +142,6 @@ function App() {
     fetchTrios();
     fetchDbStatus();
 
-    // Poll DB status and trends every 5 seconds to show real-time changes
     const timer = setInterval(() => {
       fetchDbStatus();
       fetchTrends();
@@ -144,9 +166,64 @@ function App() {
     }
   };
 
+  const handleOnboardingSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!wizardUser.trim() || !wizardBot.trim() || !wizardPrompt.trim()) {
+      alert('请完整填写主人称呼、机器人称呼以及系统提示词！');
+      return;
+    }
+
+    const payload = {
+      configs: {
+        user_name: wizardUser.trim(),
+        bot_name: wizardBot.trim(),
+        partner_name: wizardPartner.trim(),
+        system_prompt: wizardPrompt.trim(),
+        init_completed: 'true',
+      }
+    };
+
+    try {
+      const res = await fetch(`${API_BASE}/api/configs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        // Automatically inject alias rules for user/partner on onboarding complete
+        await fetch(`${API_BASE}/api/graph`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ src: wizardBot.trim(), relation: '别名', dst: '机器人' })
+        });
+        if (wizardPartner.trim()) {
+          await fetch(`${API_BASE}/api/graph`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ src: wizardPartner.trim(), relation: '别名', dst: '女主角' })
+          });
+        }
+        fetchConfigs();
+        fetchTrios();
+        fetchDbStatus();
+      }
+    } catch (e) {
+      console.error('Failed to submit onboarding', e);
+    }
+  };
+
+  const loadDefaultTemplate = () => {
+    const userName = wizardUser || '三哥';
+    const botName = wizardBot || '小弟';
+    const partnerName = wizardPartner || '舒舒';
+    setWizardPrompt(
+      `你是${botName}，${userName}的小助手。${partnerName ? `和${partnerName}关系亲密。` : ''}你不是主导人，语气轻松、幽默自然，偶尔皮一下但克制不腻。分清发言人身份。不要说多余的解释。`
+    );
+  };
+
   const handleAddTriplet = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newSrc.trim() || !newDst.trim()) return;
+    if (!newSrc.trim() || !newRelation.trim() || !newDst.trim()) return;
 
     try {
       const res = await fetch(`${API_BASE}/api/graph`, {
@@ -154,7 +231,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           src: newSrc.trim(),
-          relation: newRelation,
+          relation: newRelation.trim(),
           dst: newDst.trim(),
         }),
       });
@@ -162,7 +239,7 @@ function App() {
         setNewSrc('');
         setNewDst('');
         fetchTrios();
-        fetchDbStatus(); // update entity counts
+        fetchDbStatus();
       }
     } catch (e) {
       console.error('Failed to add triplet', e);
@@ -182,7 +259,7 @@ function App() {
       });
       if (res.ok) {
         fetchTrios();
-        fetchDbStatus(); // update entity counts
+        fetchDbStatus();
       }
     } catch (e) {
       console.error('Failed to delete triplet', e);
@@ -288,6 +365,96 @@ function App() {
     return (dbStatus.in_use_conns / dbStatus.max_open_conns) * 100;
   };
 
+  // Render Onboarding Screen if the bot setup hasn't been initialized
+  if (configs.init_completed !== 'true') {
+    return (
+      <div className="app-container" style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+        <div className="glass-card onboarding-card" style={{ maxWidth: '600px', width: '100%', padding: '40px' }}>
+          <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+            <h1 style={{ fontSize: '2rem', marginBottom: '10px', background: 'var(--primary-gradient)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+              初始化飞书陪伴小弟
+            </h1>
+            <p style={{ color: 'var(--text-muted)' }}>设定角色人设与专属称呼，零门槛快速接入您的专属 Bot 体验</p>
+          </div>
+
+          <form onSubmit={handleOnboardingSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
+              <div>
+                <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>主人的称呼 (User Name) *</label>
+                <input
+                  type="text"
+                  placeholder="如 三哥"
+                  value={wizardUser}
+                  onChange={e => setWizardUser(e.target.value)}
+                  style={{ width: '100%' }}
+                  required
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>机器人的称呼 (Bot Name) *</label>
+                <input
+                  type="text"
+                  placeholder="如 小弟"
+                  value={wizardBot}
+                  onChange={e => setWizardBot(e.target.value)}
+                  style={{ width: '100%' }}
+                  required
+                />
+              </div>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>陪伴角色名字 (Partner Name - 可空)</label>
+              <input
+                type="text"
+                placeholder="如 舒舒 (用于消解图谱与关系关联)"
+                value={wizardPartner}
+                onChange={e => setWizardPartner(e.target.value)}
+                style={{ width: '100%' }}
+              />
+            </div>
+
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>自定义系统人设提示词 (System Prompt) *</label>
+                <button
+                  type="button"
+                  onClick={loadDefaultTemplate}
+                  style={{ background: 'none', border: 'none', color: '#a235ff', cursor: 'pointer', fontSize: '0.82rem', padding: 0 }}
+                >
+                  ⚡ 装载推荐模板
+                </button>
+              </div>
+              <textarea
+                placeholder="请定义机器人的性格特征、回复语气、以及它的世界观设定..."
+                value={wizardPrompt}
+                onChange={e => setWizardPrompt(e.target.value)}
+                rows={6}
+                style={{
+                  width: '100%',
+                  background: 'rgba(0, 0, 0, 0.2)',
+                  border: '1px solid rgba(255, 255, 255, 0.08)',
+                  borderRadius: '10px',
+                  padding: '12px',
+                  color: 'white',
+                  fontFamily: 'inherit',
+                  fontSize: '0.9rem',
+                  resize: 'vertical',
+                }}
+                required
+              />
+            </div>
+
+            <button type="submit" className="btn" style={{ width: '100%', marginTop: '10px' }}>
+              完成人设并开启仪表盘
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // Render Dashboard
   return (
     <div className="app-container">
       <header>
@@ -295,8 +462,26 @@ function App() {
           <h1>Feishu Companion Bot</h1>
           <p>小弟机器人控制台 & 陪伴情感看板</p>
         </div>
-        <div>
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
           <span className="badge">长连接正常运行中</span>
+          <button
+            onClick={() => {
+              if (window.confirm('重置人设将会返回到向导页，您需要重新填写，确认吗？')) {
+                handleToggle('init_completed');
+              }
+            }}
+            style={{
+              background: 'rgba(255, 255, 255, 0.05)',
+              border: '1px solid rgba(255, 255, 255, 0.08)',
+              color: 'var(--text-muted)',
+              padding: '6px 12px',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              fontSize: '0.8rem'
+            }}
+          >
+            ⚙️ 重置角色引导
+          </button>
         </div>
       </header>
 
@@ -313,7 +498,7 @@ function App() {
               <div className="setting-item">
                 <div className="setting-info">
                   <h4>情感亲密度温度计 (Emotion Tracker)</h4>
-                  <p>实时分析主人的言语态度，动态调整恋爱关系评分与对话人设</p>
+                  <p>实时分析主人的言语态度，动态调整关系评分与对话人设</p>
                 </div>
                 <label className="switch">
                   <input
@@ -343,7 +528,7 @@ function App() {
               <div className="setting-item">
                 <div className="setting-info">
                   <h4>跨会话上下文推理 (Multi-turn GraphRAG)</h4>
-                  <p>提炼图谱时融合最近对话上下文历史，消解隐含代词指代</p>
+                  <p>提炼图谱时融合最近对话上下文历史，消解隐式代词指代</p>
                 </div>
                 <label className="switch">
                   <input
@@ -358,7 +543,7 @@ function App() {
               <div className="setting-item">
                 <div className="setting-info">
                   <h4>表情包与图片秒懂 (Image Dedup Cache)</h4>
-                  <p>运用 MD5 静默秒回复已识图片，免除视觉大模型重复提取</p>
+                  <p>运用 MD5 静默秒回复已识图片，免除大模型重复视觉提炼</p>
                 </div>
                 <label className="switch">
                   <input
@@ -468,36 +653,63 @@ function App() {
             Companion GraphRAG 关系图谱审计
           </h2>
 
-          <form onSubmit={handleAddTriplet} className="triplet-form">
+          <form onSubmit={handleAddTriplet} className="triplet-form" style={{ gap: '10px', flexWrap: 'wrap' }}>
             <input
               type="text"
               placeholder="主语 (如 三哥)"
               value={newSrc}
               onChange={e => setNewSrc(e.target.value)}
+              style={{ flex: 1, minWidth: '120px' }}
               required
             />
-            <select value={newRelation} onChange={e => setNewRelation(e.target.value)}>
-              <option value="is_alias_of">is_alias_of (等价别名)</option>
-              <option value="likes">likes (喜好/偏爱)</option>
-              <option value="location">location (所在地)</option>
-              <option value="colleague_of">colleague_of (同事)</option>
-              <option value="friend_of">friend_of (朋友)</option>
-              <option value="mother_of">mother_of (母亲)</option>
-              <option value="father_of">father_of (父亲)</option>
-            </select>
+            
+            {/* Custom Free-form input for relation with fast tags */}
+            <div style={{ flex: 1, minWidth: '180px', display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              <input
+                type="text"
+                placeholder="关系边 (如 喜欢、别名、同事)"
+                value={newRelation}
+                onChange={e => setNewRelation(e.target.value)}
+                style={{ width: '100%' }}
+                required
+              />
+              <div className="quick-tags" style={{ display: 'flex', gap: '6px', overflowX: 'auto', padding: '2px 0' }}>
+                {['别名', '喜欢', '所在地', '同事', '朋友', '妈妈', '爸爸'].map(t => (
+                  <span
+                    key={t}
+                    onClick={() => setNewRelation(t)}
+                    style={{
+                      fontSize: '0.72rem',
+                      background: newRelation === t ? 'rgba(162, 53, 255, 0.25)' : 'rgba(255, 255, 255, 0.05)',
+                      border: `1px solid ${newRelation === t ? '#a235ff' : 'rgba(255, 255, 255, 0.08)'}`,
+                      color: newRelation === t ? '#c58dff' : 'var(--text-muted)',
+                      padding: '2px 8px',
+                      borderRadius: '12px',
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    {t}
+                  </span>
+                ))}
+              </div>
+            </div>
+
             <input
               type="text"
               placeholder="宾语 (如 许君山)"
               value={newDst}
               onChange={e => setNewDst(e.target.value)}
+              style={{ flex: 1, minWidth: '120px' }}
               required
             />
-            <button type="submit" className="btn">
+            <button type="submit" className="btn" style={{ minWidth: '100px' }}>
               添加边
             </button>
           </form>
 
-          <div className="table-container">
+          <div className="table-container" style={{ marginTop: '10px' }}>
             {trios.length === 0 ? (
               <div className="empty-state">图谱关系目前为空，可在上方手动添加，或等待聊天会话自动提取沉淀。</div>
             ) : (
