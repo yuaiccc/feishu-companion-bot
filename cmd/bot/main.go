@@ -1678,9 +1678,43 @@ func runBotMode() {
 	}
 
 	log.Println("启动飞书长连接监听...")
-	if err := fsClient.StartListening(ctx, handlers); err != nil {
-		log.Fatalf("长连接退出: %v", err)
-	}
+	go func() {
+		backoff := 1 * time.Second
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			err := fsClient.StartListening(ctx, handlers)
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					log.Println("[飞书长连接] 优雅退出。")
+					return
+				default:
+				}
+
+				log.Printf("[飞书长连接] 异常断开: %v。将在 %v 后尝试自动重新连接...", err, backoff)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+
+				backoff *= 2
+				if backoff > 60 * time.Second {
+					backoff = 60 * time.Second
+				}
+			} else {
+				backoff = 1 * time.Second
+			}
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("机器人主程序已优雅退出。")
 }
 
 // loadProfile loads the profile for cfg.ProfileID, falling back to a generic
