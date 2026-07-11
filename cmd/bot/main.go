@@ -1450,34 +1450,77 @@ func understandIncomingImage(ctx stdctx.Context, cfg *config.Config, fs *feishu.
 			return strings.Join(cacheParts, "\n")
 		}
 	}
-
 	var ocrText string
 	var captionText string
-	var parts []string
 
-	if cfg.FeishuOCREnabled {
+	type understandResult struct {
+		ocr     string
+		caption string
+		err     error
+	}
+	resChan := make(chan understandResult, 2)
+
+	// 1. 并发协程 A: 飞书 OCR 文本识别
+	go func() {
+		if !cfg.FeishuOCREnabled {
+			resChan <- understandResult{}
+			return
+		}
 		texts, err := fs.RecognizeImageText(ctx, image, cfg.FeishuOCRCooldown)
 		if err != nil {
-			if feishu.IsRateLimitError(err) {
-				log.Printf("[图片理解] 飞书 OCR 触发限流，进入冷却并改用本地视觉模型: %v", err)
-			} else {
-				log.Printf("[图片理解] 飞书 OCR 失败，改用本地视觉模型: %v", err)
-			}
-		} else if len(texts) > 0 {
-			ocrText = strings.Join(texts, " / ")
-			parts = append(parts, "OCR文字："+ocrText)
+			resChan <- understandResult{err: fmt.Errorf("feishu OCR error: %w", err)}
+			return
 		}
-	}
-	if cfg.LocalVisionEnabled && cfg.OllamaVisionModel != "" {
-		if desc, err := describeImageWithOllama(ctx, cfg, image); err != nil {
-			log.Printf("[图片理解] 本地视觉模型失败: %v", err)
-		} else if desc != "" {
-			captionText = desc
-			parts = append(parts, "视觉描述："+captionText)
+		if len(texts) > 0 {
+			resChan <- understandResult{ocr: strings.Join(texts, " / ")}
+		} else {
+			resChan <- understandResult{}
+		}
+	}()
+
+	// 2. 并发协程 B: Ollama 本地多模态 Vision 图像描述
+	go func() {
+		if !cfg.LocalVisionEnabled || cfg.OllamaVisionModel == "" {
+			resChan <- understandResult{}
+			return
+		}
+		desc, err := describeImageWithOllama(ctx, cfg, image)
+		if err != nil {
+			resChan <- understandResult{err: fmt.Errorf("ollama vision error: %w", err)}
+			return
+		}
+		resChan <- understandResult{caption: desc}
+	}()
+
+	// 3. 阻塞等待两个协程的结果，同时支持上下文超时/取消退出
+	for i := 0; i < 2; i++ {
+		select {
+		case <-ctx.Done():
+			log.Printf("[图片理解] 上下文结束，终止图片并发分析等待")
+			return ""
+		case res := <-resChan:
+			if res.err != nil {
+				log.Printf("[图片理解] 协程执行出错: %v", res.err)
+				continue
+			}
+			if res.ocr != "" {
+				ocrText = res.ocr
+			}
+			if res.caption != "" {
+				captionText = res.caption
+			}
 		}
 	}
 
-	// Save to hash cache database if any description generated
+	var parts []string
+	if ocrText != "" {
+		parts = append(parts, "OCR文字："+ocrText)
+	}
+	if captionText != "" {
+		parts = append(parts, "视觉描述："+captionText)
+	}
+
+	// 4. 对生成的图片细节存入 MD5 秒懂缓存，防范重复提取
 	if mem != nil && (ocrText != "" || captionText != "") {
 		_ = mem.SaveImageHashCache(hash, ocrText, captionText)
 	}
