@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -789,6 +792,63 @@ func TestConfigToggles(t *testing.T) {
 	val = store.GetConfig("test_module_switch", "true")
 	if val != "false" {
 		t.Errorf("Expected false, got %q", val)
+	}
+}
+
+func TestDeerFlowHTTPSearch(t *testing.T) {
+	mockResponse := []search.Result{
+		{
+			Title:   "DeepSeek V3 released",
+			URL:     "https://example.com/deepseek-v3",
+			Summary: "DeepSeek V3 is a powerful open source mixture of experts model.",
+		},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/search" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Method != "POST" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		var reqBody struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(mockResponse)
+	}))
+	defer server.Close()
+
+	client := search.NewClient(
+		"deerflow",
+		"",
+		"",
+		server.URL,
+		"",
+	)
+
+	results, err := client.Search(context.Background(), "DeepSeek V3")
+	if err != nil {
+		t.Fatalf("HTTP search failed: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result, got %d", len(results))
+	}
+
+	if results[0].Title != "DeepSeek V3 released" {
+		t.Errorf("Expected 'DeepSeek V3 released', got %q", results[0].Title)
+	}
+	if results[0].URL != "https://example.com/deepseek-v3" {
+		t.Errorf("Expected URL to match, got %q", results[0].URL)
 	}
 }
 
