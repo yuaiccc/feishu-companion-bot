@@ -707,7 +707,11 @@ type workingMemoryTurn struct {
 }
 
 func shouldRememberViaLLM(ctx stdctx.Context, content string, fromOwner bool, prof *profile.Profile, llmClient *llm.Client, recentTurns []workingMemoryTurn) (bool, string, string) {
-	if llmClient == nil || content == "" || len(content) < 3 || len(content) > 500 {
+	limit := 500
+	if strings.Contains(content, "图片理解：") {
+		limit = 2000
+	}
+	if llmClient == nil || content == "" || len(content) < 3 || len(content) > limit {
 		return false, "", ""
 	}
 
@@ -740,6 +744,7 @@ func shouldRememberViaLLM(ctx stdctx.Context, content string, fromOwner bool, pr
 
 判断标准：
 - 记住稳定偏好、重要事实、长期习惯、关系边界、称呼方式、明确承诺、重要计划。
+- 如果消息中包含“图片理解：视觉描述/OCR文字”，说明发送人发了一张照片。请结合视觉描述或文字提炼出生活相关的重要事实、动作、喜好或场景状态（例如：‘三哥和朋友去吃了烤肉’，‘舒舒发了自拍，表示今天很开心’）。对于这类视觉相关的具体动作/事件记忆，memory_type 优先归类为 episodic；如果是图片反映出的长期稳定喜好，则归类为 semantic。
 - memory_type 含义：semantic=稳定事实/偏好保存，relational=相处方式/边界/称呼/安慰方式，episodic=值得长期留痕的重要事件。
 - 不记普通寒暄、即时情绪、重复废话、临时闲聊、表情语气、已经过时的细枝末节。
 - 不要编造消息里没有的信息。

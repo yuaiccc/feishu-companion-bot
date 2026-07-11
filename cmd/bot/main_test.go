@@ -852,6 +852,87 @@ func TestDeerFlowHTTPSearch(t *testing.T) {
 	}
 }
 
+func TestMultiModalMemoryAndGraphExtraction(t *testing.T) {
+	cfg := config.Load()
+	if cfg.MemoryDatabaseDSN == "" {
+		t.Skip("MEMORY_DATABASE_DSN not configured, skipping multimodal graph test")
+	}
+
+	llmClient := llm.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
+	prof := &profile.Profile{
+		OwnerName: "三哥",
+		BotName:   "小弟",
+	}
+
+	opts := memory.DatabaseOptions{
+		DSN:       cfg.MemoryDatabaseDSN,
+		ProfileID: "test_multimodal_graph",
+		Embedder:  &mock1024Embedder{},
+	}
+	store, err := memory.NewDatabaseStore(opts)
+	if err != nil {
+		t.Fatalf("Failed to connect to OceanBase: %v", err)
+	}
+	defer store.Close()
+
+	db := store.GetDBConn()
+	_, _ = db.Exec("DELETE FROM knowledge_relations WHERE src_id IN (SELECT id FROM knowledge_entities WHERE profile_id = 'test_multimodal_graph')")
+	_, _ = db.Exec("DELETE FROM knowledge_entities WHERE profile_id = 'test_multimodal_graph'")
+
+	ctx := context.Background()
+	content := "发张图给你看哈\n图片理解：视觉描述：在烤肉店里，三哥正和同事大叔一起吃晚饭，大叔说深圳的新项目下周一启动。"
+
+	recentTurns := []workingMemoryTurn{
+		{Sender: "三哥", Content: content},
+	}
+
+	shouldRemember, candidate, mType := shouldRememberViaLLM(ctx, content, true, prof, llmClient, recentTurns)
+	if !shouldRemember || candidate == "" {
+		t.Fatalf("Expected shouldRemember=true, got %v candidate=%q", shouldRemember, candidate)
+	}
+	t.Logf("Multimodal memory extracted: type=%s candidate=%q", mType, candidate)
+
+	_, _ = store.SaveEntity("三哥", "concept")
+	_, _ = store.SaveEntity("大叔", "concept")
+
+	extractAndSaveGraph(ctx, llmClient, store, candidate, recentTurns)
+
+	var found bool
+	for i := 0; i < 35; i++ {
+		time.Sleep(100 * time.Millisecond)
+		// 校验 1：是否能提取出 (同事大叔, 同事, 三哥) 或者是 (三哥, 同事, 大叔)
+		dsts1, _ := store.GetRelationDestinations("三哥", "同事")
+		dsts2, _ := store.GetRelationDestinations("同事大叔", "同事")
+		// 校验 2：是否能提取出 (三哥, 所在地, 深圳)
+		dsts3, _ := store.GetRelationDestinations("三哥", "所在地")
+
+		for _, d := range dsts1 {
+			if d == "大叔" || d == "同事大叔" {
+				found = true
+			}
+		}
+		for _, d := range dsts2 {
+			if d == "三哥" {
+				found = true
+			}
+		}
+		for _, d := range dsts3 {
+			if d == "深圳" {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected to extract either coworker or location relations from multi-modal memory context, but not found")
+	} else {
+		t.Log("Success: Multimodal GraphRAG relations extracted and verified successfully!")
+	}
+}
+
 
 
 
