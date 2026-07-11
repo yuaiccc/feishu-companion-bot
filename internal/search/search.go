@@ -26,20 +26,22 @@ type Result struct {
 }
 
 type Client struct {
-	backend       Backend
-	deerflowDir   string
-	deerflowPython string
-	openclawCLI   string
-	httpCli       *http.Client
+	backend            Backend
+	deerflowDir        string
+	deerflowPython     string
+	deerflowGatewayURL string
+	openclawCLI        string
+	httpCli            *http.Client
 }
 
-func NewClient(backend, deerflowDir, deerflowPython, openclawCLI string) *Client {
+func NewClient(backend, deerflowDir, deerflowPython, deerflowGatewayURL, openclawCLI string) *Client {
 	return &Client{
-		backend:        Backend(backend),
-		deerflowDir:    deerflowDir,
-		deerflowPython: deerflowPython,
-		openclawCLI:    openclawCLI,
-		httpCli:        &http.Client{Timeout: 60 * time.Second},
+		backend:            Backend(backend),
+		deerflowDir:        deerflowDir,
+		deerflowPython:     deerflowPython,
+		deerflowGatewayURL: deerflowGatewayURL,
+		openclawCLI:        openclawCLI,
+		httpCli:            &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -55,6 +57,10 @@ func (c *Client) Search(ctx context.Context, query string) ([]Result, error) {
 }
 
 func (c *Client) searchDeerFlow(ctx context.Context, query string) ([]Result, error) {
+	if c.deerflowGatewayURL != "" {
+		return c.searchDeerFlowHTTP(ctx, query)
+	}
+
 	// Call local DeerFlow Python client
 	python := c.deerflowPython
 	if python == "" {
@@ -146,4 +152,36 @@ func Summarize(query string, results []Result) string {
 		}
 	}
 	return b.String()
+}
+
+func (c *Client) searchDeerFlowHTTP(ctx context.Context, query string) ([]Result, error) {
+	reqBody, err := json.Marshal(map[string]string{"query": query})
+	if err != nil {
+		return nil, err
+	}
+
+	url := strings.TrimSuffix(c.deerflowGatewayURL, "/") + "/api/search"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpCli.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http request to deerflow gateway failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errData bytes.Buffer
+		_, _ = errData.ReadFrom(resp.Body)
+		return nil, fmt.Errorf("deerflow gateway returned status %d: %s", resp.StatusCode, errData.String())
+	}
+
+	var results []Result
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		return nil, fmt.Errorf("failed to parse deerflow gateway response: %w", err)
+	}
+	return results, nil
 }

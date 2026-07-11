@@ -1252,6 +1252,7 @@ func webSearch(query string, cfg *config.Config) ([]search.Result, error) {
 		cfg.ExternalSearchBackend,
 		cfg.DeerFlowBackendDir,
 		cfg.DeerFlowPython,
+		cfg.DeerFlowGatewayURL,
 		cfg.OpenClawCLI,
 	)
 	return searchClient.Search(stdctx.Background(), query)

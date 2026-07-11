@@ -81,6 +81,7 @@ type Config struct {
 	ExternalSearchFallbackOC bool
 	DeerFlowBackendDir       string
 	DeerFlowPython           string
+	DeerFlowGatewayURL       string
 	OpenClawCLI              string
 
 	// Local daily job
@@ -154,6 +155,7 @@ func Load() *Config {
 		ExternalSearchFallbackOC: getEnvBool("EXTERNAL_SEARCH_FALLBACK_OPENCLAW", true),
 		DeerFlowBackendDir:       getEnv("DEERFLOW_BACKEND_DIR", ""),
 		DeerFlowPython:           getEnv("DEERFLOW_PYTHON", "python"),
+		DeerFlowGatewayURL:       getEnv("DEERFLOW_GATEWAY_URL", ""),
 		OpenClawCLI:              getEnv("OPENCLAW_CLI", "openclaw"),
 
 		LocalDailyJobModule: getEnv("LOCAL_DAILY_JOB_MODULE", ""),
