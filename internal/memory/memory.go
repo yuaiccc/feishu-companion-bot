@@ -60,6 +60,17 @@ type RetrievedMemory struct {
 	CreatedAt  int64
 }
 
+type RetrievalOptions struct {
+	TopK                int
+	IncludeBotMemory    bool
+	IncludeChatArchive  bool
+	IncludeMediaArchive bool
+}
+
+type PlannedRetriever interface {
+	SearchRelevantWithOptions(query, audience string, opts RetrievalOptions) []RetrievedMemory
+}
+
 type MediaResult struct {
 	MessageID string
 	MsgID     string
@@ -212,10 +223,25 @@ func NewStore(profileID, dataDir string) (*Store, error) {
 func (s *Store) Add(m Memory) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if m.ID == "" {
+		m.ID = fmt.Sprintf("mem_%d", time.Now().UnixNano())
+	}
+	if m.CreatedAt == 0 {
+		m.CreatedAt = time.Now().Unix()
+	}
+	if m.Hash == "" {
+		m.Hash = HashContent(m.Content)
+	}
 	m.MemoryType = NormalizeMemoryType(m.MemoryType, m.Content)
 	m.Importance = NormalizeImportance(m.Importance, m.MemoryType)
 	m.Confidence = NormalizeConfidence(m.Confidence, m.MemoryType)
 	m.ExpiresAt = NormalizeExpiresAt(m.ExpiresAt, m.MemoryType)
+	for i := range s.Items {
+		if s.Items[i].ID == m.ID {
+			s.Items[i] = m
+			return s.flush()
+		}
+	}
 	s.Items = append(s.Items, m)
 	return s.flush()
 }
@@ -230,8 +256,18 @@ func (s *Store) Search(query string, audience string) []string {
 }
 
 func (s *Store) SearchRelevant(query string, audience string) []RetrievedMemory {
+	return s.SearchRelevantWithOptions(query, audience, RetrievalOptions{TopK: 8, IncludeBotMemory: true})
+}
+
+func (s *Store) SearchRelevantWithOptions(query string, audience string, opts RetrievalOptions) []RetrievedMemory {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !opts.IncludeBotMemory {
+		return nil
+	}
+	if opts.TopK <= 0 {
+		opts.TopK = 8
+	}
 	var results []RetrievedMemory
 	for _, m := range s.Items {
 		if IsExpired(m.ExpiresAt) {
@@ -253,6 +289,9 @@ func (s *Store) SearchRelevant(query string, audience string) []RetrievedMemory 
 		})
 	}
 	sortRetrievedMemories(results)
+	if len(results) > opts.TopK {
+		results = results[:opts.TopK]
+	}
 	s.touchRetrieved(results)
 	return results
 }

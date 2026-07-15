@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"unicode/utf8"
 )
 
 type Budget struct {
@@ -29,7 +30,7 @@ func (b *Budget) CanFit(length int) bool {
 // Reserve allocates budget for a content. It returns true if it fits, otherwise false.
 // If it fits, b.Used is incremented.
 func (b *Budget) Reserve(section string, content string) bool {
-	l := len(content)
+	l := utf8.RuneCountInString(content)
 	if b.Used+l > b.MaxChars {
 		return false
 	}

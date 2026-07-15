@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type Client struct {
 	httpCli   *http.Client
 	token     string
 	tokenTime time.Time
+	tokenMu   sync.Mutex
 }
 
 func NewClient(appID, appSecret string) *Client {
@@ -27,7 +29,9 @@ func NewClient(appID, appSecret string) *Client {
 }
 
 func (c *Client) refreshToken(ctx context.Context) error {
-	if c.token != "" && time.Since(c.tokenTime) < 2*time.Hour {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.token != "" && time.Since(c.tokenTime) < 110*time.Minute {
 		return nil
 	}
 	body, _ := json.Marshal(map[string]string{"app_id": c.appID, "app_secret": c.appSecret})
@@ -57,38 +61,54 @@ func (c *Client) refreshToken(ctx context.Context) error {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body interface{}) (json.RawMessage, error) {
-	if err := c.refreshToken(ctx); err != nil {
-		return nil, err
-	}
-	var reqBody io.Reader
-	if body != nil {
-		data, _ := json.Marshal(body)
-		reqBody = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, "https://open.feishu.cn/open-apis"+path, reqBody)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	var result struct {
-		Code int             `json:"code"`
-		Msg  string          `json:"msg"`
-		Data json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, err
-	}
-	if result.Code != 0 {
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := c.refreshToken(ctx); err != nil {
+			return nil, err
+		}
+		var reqBody io.Reader
+		if body != nil {
+			data, _ := json.Marshal(body)
+			reqBody = bytes.NewReader(data)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, "https://open.feishu.cn/open-apis"+path, reqBody)
+		if err != nil {
+			return nil, err
+		}
+		c.tokenMu.Lock()
+		token := c.token
+		c.tokenMu.Unlock()
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.httpCli.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		data, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		var result struct {
+			Code int             `json:"code"`
+			Msg  string          `json:"msg"`
+			Data json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(data, &result); err != nil {
+			return nil, err
+		}
+		if result.Code == 0 {
+			return result.Data, nil
+		}
+		if result.Code == 99991663 && attempt == 0 {
+			c.tokenMu.Lock()
+			c.token = ""
+			c.tokenTime = time.Time{}
+			c.tokenMu.Unlock()
+			continue
+		}
 		return nil, fmt.Errorf("api %d: %s", result.Code, result.Msg)
 	}
-	return result.Data, nil
+	return nil, fmt.Errorf("api token refresh retry exhausted")
 }
 
 // Comment represents a document comment.

@@ -1,14 +1,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"feishu-companion-bot/internal/config"
+	"feishu-companion-bot/internal/llm"
 	"feishu-companion-bot/internal/memory"
+	"feishu-companion-bot/internal/memoryquality"
 )
 
 func main() {
@@ -19,6 +25,9 @@ func main() {
 	showVis := flag.Bool("show-vis", false, "显示可见性标签")
 	migrateJSON := flag.Bool("migrate-json", false, "将当前 profile 的 JSON 记忆迁移到数据库记忆库")
 	diagnose := flag.Bool("diagnose", false, "检查数据库版本、向量覆盖率和索引")
+	qualityAudit := flag.Bool("quality-audit", false, "使用 DeepSeek 审计记忆质量并生成报告")
+	qualityApply := flag.Bool("quality-apply", false, "执行高置信度的审计建议")
+	qualityThreshold := flag.Float64("quality-threshold", 0.92, "执行删除/改写的最低置信度")
 	flag.Parse()
 
 	cfg := config.Load()
@@ -40,6 +49,11 @@ func main() {
 		return
 	}
 
+	if *qualityAudit || *qualityApply {
+		runQualityAudit(cfg, store, *qualityApply, *qualityThreshold)
+		return
+	}
+
 	if *list {
 		listMemories(store, *showVis)
 		return
@@ -55,7 +69,41 @@ func main() {
 		return
 	}
 
-	fmt.Println("用法: memtool -list | -search <关键词> | -clean [-dry-run=false] | -migrate-json | -diagnose")
+	fmt.Println("用法: memtool -list | -search <关键词> | -clean [-dry-run=false] | -migrate-json | -diagnose | -quality-audit [-quality-apply]")
+}
+
+func runQualityAudit(cfg *config.Config, store memory.MemoryStore, apply bool, threshold float64) {
+	client := llm.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	report, err := memoryquality.New(client).Audit(ctx, store.All())
+	if err != nil {
+		log.Fatalf("记忆质量审计失败: %v", err)
+	}
+	dir := filepath.Join("memory_data", cfg.ProfileID, "audits")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		log.Fatal(err)
+	}
+	path := filepath.Join(dir, "memory-quality-"+time.Now().Format("20060102-150405")+".json")
+	data, _ := json.MarshalIndent(report, "", "  ")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("审计 %d 条记忆，报告：%s\n", report.Total, path)
+	for _, d := range report.Decisions {
+		if d.Action != "keep" {
+			fmt.Printf("- %s confidence=%.2f id=%s: %s\n", d.Action, d.Confidence, d.ID, d.Reason)
+		}
+	}
+	if !apply {
+		fmt.Println("当前仅生成报告；确认后使用 -quality-apply 执行高置信度建议。")
+		return
+	}
+	stats, err := memoryquality.Apply(store, report, threshold)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("执行完成：保留 %d，删除 %d，改写 %d，跳过 %d\n", stats.Kept, stats.Deleted, stats.Rewritten, stats.Skipped)
 }
 
 func diagnoseDatabase(store memory.MemoryStore) {
@@ -126,6 +174,7 @@ func openMemoryStore(cfg *config.Config) (memory.MemoryStore, error) {
 			MediaMsgIDColumn:      cfg.MemoryMediaMsgIDColumn,
 			MediaStatusColumn:     cfg.MemoryMediaStatusColumn,
 			MediaRoot:             cfg.MemoryMediaRoot,
+			MediaVault:            cfg.MemoryMediaVault,
 			Embedder:              embedder,
 			EmbeddingDimension:    cfg.MemoryEmbeddingDimension,
 		})
@@ -157,7 +206,7 @@ func listMemories(store memory.MemoryStore, showVis bool) {
 	for _, m := range all {
 		if showVis {
 			vis := string(m.Visibility)
-			fmt.Printf("[%s] %s\n    来源: %s | 创建: %d\n\n", vis, m.Content, m.SourceType, m.CreatedAt)
+			fmt.Printf("[%s] %s\n    ID: %s | 来源: %s | 创建: %d\n\n", vis, m.Content, m.ID, m.SourceType, m.CreatedAt)
 		} else {
 			fmt.Printf("- %s\n", m.Content)
 		}

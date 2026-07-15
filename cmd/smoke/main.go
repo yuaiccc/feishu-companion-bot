@@ -195,6 +195,7 @@ func testImage(ctx context.Context, cfg *config.Config, fs *feishu.Client, recei
 			MediaMsgIDColumn:    cfg.MemoryMediaMsgIDColumn,
 			MediaStatusColumn:   cfg.MemoryMediaStatusColumn,
 			MediaRoot:           cfg.MemoryMediaRoot,
+			MediaVault:          cfg.MemoryMediaVault,
 		})
 		if err != nil {
 			log.Printf("初始化媒体库失败: %v", err)

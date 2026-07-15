@@ -32,6 +32,7 @@ import (
 	"feishu-companion-bot/internal/localapps"
 	"feishu-companion-bot/internal/lovenote"
 	"feishu-companion-bot/internal/memory"
+	localocr "feishu-companion-bot/internal/ocr"
 	"feishu-companion-bot/internal/profile"
 	"feishu-companion-bot/internal/safety"
 	"feishu-companion-bot/internal/search"
@@ -81,10 +82,23 @@ type mediaMemoryStore interface {
 	SearchMedia(query string, audience string, limit int) []memory.MediaResult
 }
 
+type managedMediaStore interface {
+	SaveManagedMedia(ctx stdctx.Context, input memory.ManagedMediaInput) (memory.ManagedMediaAsset, error)
+}
+
 type replyPlan struct {
 	ShouldReply      bool
 	UseMemory        bool
 	UseMedia         bool
+	MemoryQuery      string
+	MemoryTopK       int
+	IncludeChat      bool
+	IncludeMedia     bool
+	RecentLimit      int
+	ContextMaxChars  int
+	UseGraph         bool
+	TemporalAlign    bool
+	DetectedEmotion  string
 	ReplyStyle       string
 	MaxTokens        int
 	Reason           string
@@ -132,10 +146,24 @@ func (m *stateManager) UpdateMessage(msg feishu.Message, audience string) *conve
 	if topic := inferTopic(msg.Content); topic != "" {
 		st.RecentTopic = topic
 	}
-	if emotion := inferEmotion(msg.Content); emotion != "" {
-		st.LastEmotion = emotion
-	}
 	return st.Clone()
+}
+
+func (m *stateManager) SetEmotion(chatID, emotion string) {
+	emotion = strings.ToLower(strings.TrimSpace(emotion))
+	switch emotion {
+	case "neutral", "happy", "sad", "angry", "tired", "anxious":
+	default:
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.items[chatID]
+	if st == nil {
+		st = &conversationState{ChatID: chatID}
+		m.items[chatID] = st
+	}
+	st.LastEmotion = emotion
 }
 
 func (m *stateManager) MarkBotReply(chatID string) {
@@ -201,60 +229,35 @@ func (s conversationState) PromptText() string {
 	return strings.Join(parts, "\n")
 }
 
-var (
-	statusKeywords = []string{
-		"在干嘛", "在干啥", "干嘛", "干啥", "忙什么", "忙啥",
-		"在做什么", "在搞什么", "最近怎么样", "最近忙不忙",
-		"最近活动", "最近在", "最近进度", "电脑活动", "窗口",
-	}
-	githubKeywords = []string{
-		"github", "commit", "提交", "代码", "项目进度", "最近提交",
-		"仓库", "push", "pr", "issue",
-	}
-	searchKeywords = []string{
-		"搜索", "搜一下", "查一下", "网上", "外部", "最新", "热门",
-		"排行", "排行榜", "新闻", "b站", "B站", "bilibili", "新番", "动漫",
-	}
-	mediaKeywords = []string{
-		"图片", "照片", "截图", "那张图", "找图", "发图", "相册",
-		"回忆", "我们做了什么", "之前做了什么", "以前做了什么",
-		"票据", "地图", "聊天截图",
-	}
-	healthKeywords = []string{
-		"健康检查", "服务状态", "自检", "机器人状态", "状态面板",
-	}
-	memoryAuditKeywords = []string{
-		"记忆审计", "记忆面板", "记忆状态", "记忆检查", "审计记忆",
-	}
-)
-
 func classifyIntent(ctx stdctx.Context, llmClient *llm.Client, content string, isRecentMediaSearch bool) Intent {
 	if llmClient == nil {
-		return classifyIntentFallback(content)
+		return IntentNone
 	}
 
 	prompt := fmt.Sprintf(`你是飞书陪伴机器人的消息意图分类器。只返回 JSON：
-{"intent":"github|health|memory_audit|search|recall|media|none","reason":"极短原因"}
+{"intent":"github|health|memory_audit|search|status|recall|media|none","reason":"极短原因"}
 
 分类规则：
 - github：查询主人在 GitHub 的 commit 提交、代码变动、近期活动等。
 - health：自检命令，包含健康检查、服务状态、自检、自测状态等。
 - memory_audit：审计记忆、看我的记忆、记忆审计面板、管理记忆等。
 - search：要求去上网搜索、查百度、看网页、联网查询最新资讯、搜索当前新闻等。
+- status：询问主人现在在做什么、是否在电脑前、当前电脑活动等。
 - recall：要求机器人撤回消息（如‘撤回刚才发错的消息’、‘把刚才那条收回’、‘撤回’、‘发错了收回’）。
 - media：看照片、看截图、回忆图片、发张图、有没有照片、换一张、看别的图片等。
 - none：其他普通的闲聊、询问、指令等。
 
 如果 context 表明刚刚发生过图片查询，且用户当前输入如“换一张”、“再来一张”、“下一张”，则必须判定为 "media"。
 
-用户消息：%s`, safety.SanitizeForLLM(content))
+刚刚是否发生过图片查询：%v
+用户消息：%s`, isRecentMediaSearch, safety.SanitizeForLLM(content))
 
 	reply, err := llmClient.Chat(ctx, []llm.Message{
 		{Role: "user", Content: prompt},
 	}, llm.WithTemperature(0), llm.WithMaxTokens(100))
 	if err != nil {
-		log.Printf("[意图分类] LLM 调用失败，使用本地兜底: %v", err)
-		return classifyIntentFallback(content)
+		log.Printf("[意图分类] LLM 调用失败，按普通对话处理: %v", err)
+		return IntentNone
 	}
 
 	var parsed struct {
@@ -262,7 +265,7 @@ func classifyIntent(ctx stdctx.Context, llmClient *llm.Client, content string, i
 	}
 	if err := json.Unmarshal([]byte(extractJSON(reply)), &parsed); err != nil {
 		log.Printf("[意图分类] JSON 解析失败: %v raw=%q", err, reply)
-		return classifyIntentFallback(content)
+		return IntentNone
 	}
 
 	switch parsed.Intent {
@@ -274,6 +277,8 @@ func classifyIntent(ctx stdctx.Context, llmClient *llm.Client, content string, i
 		return IntentMemoryAudit
 	case "search":
 		return IntentSearch
+	case "status":
+		return IntentStatus
 	case "recall":
 		return IntentRecall
 	case "media":
@@ -281,49 +286,6 @@ func classifyIntent(ctx stdctx.Context, llmClient *llm.Client, content string, i
 	default:
 		return IntentNone
 	}
-}
-
-func classifyIntentFallback(content string) Intent {
-	if len(content) <= 2 {
-		return IntentNone
-	}
-	lower := strings.ToLower(content)
-	for _, kw := range memoryAuditKeywords {
-		if strings.Contains(content, kw) {
-			return IntentMemoryAudit
-		}
-	}
-	for _, kw := range healthKeywords {
-		if strings.Contains(content, kw) || strings.Contains(lower, strings.ToLower(kw)) {
-			return IntentHealth
-		}
-	}
-	for _, kw := range githubKeywords {
-		if strings.Contains(lower, kw) {
-			return IntentGitHub
-		}
-	}
-	for _, kw := range mediaKeywords {
-		if strings.Contains(content, kw) || strings.Contains(lower, strings.ToLower(kw)) {
-			return IntentMedia
-		}
-	}
-	for _, kw := range searchKeywords {
-		if strings.Contains(content, kw) || strings.Contains(lower, strings.ToLower(kw)) {
-			if !strings.Contains(content, "最近活动") && !strings.Contains(content, "电脑活动") {
-				return IntentSearch
-			}
-		}
-	}
-	for _, kw := range statusKeywords {
-		if strings.Contains(content, kw) {
-			return IntentStatus
-		}
-	}
-	if strings.Contains(content, "撤回") || strings.Contains(content, "发错了") || strings.Contains(content, "收回") || strings.Contains(lower, "recall") {
-		return IntentRecall
-	}
-	return IntentNone
 }
 
 func inferTopic(content string) string {
@@ -336,21 +298,6 @@ func inferTopic(content string) string {
 		text = string(runes[:36]) + "..."
 	}
 	return text
-}
-
-func inferEmotion(content string) string {
-	switch {
-	case strings.ContainsAny(content, "难过哭委屈烦累崩溃疼痛"):
-		return "低落或需要安慰"
-	case strings.ContainsAny(content, "生气气死讨厌"):
-		return "生气"
-	case strings.ContainsAny(content, "开心哈哈嘻喜欢爱亲抱"):
-		return "开心或亲近"
-	case strings.ContainsAny(content, "困睡晚安"):
-		return "困倦"
-	default:
-		return ""
-	}
 }
 
 func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, intent Intent, st conversationState, prof *profile.Profile, senderLabel string, mem memory.MemoryStore) replyPlan {
@@ -368,18 +315,21 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 	if stateText == "" {
 		stateText = "暂无"
 	}
-	prompt := fmt.Sprintf(`你是飞书陪伴机器人的回复前决策器。只返回 JSON：
-{"should_reply":true/false,"use_memory":true/false,"use_media":true/false,"reply_style":"short|normal|comfort|detailed","max_tokens":600,"detected_entities":["标准实体名1","标准实体名2"],"reason":"极短原因"}
+	prompt := fmt.Sprintf(`你是飞书陪伴机器人的上下文 Planner。只返回 JSON：
+{"should_reply":true/false,"use_memory":true/false,"use_media":true/false,"memory_query":"适合检索的独立问题","memory_top_k":6,"include_chat_archive":true/false,"include_media_archive":true/false,"recent_message_limit":20,"context_max_chars":12000,"use_graph":true/false,"temporal_align":true/false,"detected_emotion":"neutral|happy|sad|angry|tired|anxious","reply_style":"short|normal|comfort|detailed","max_tokens":600,"detected_entities":["标准实体名1","标准实体名2"],"reason":"极短原因"}
 
 判断规则：
 - 群聊中被 @ 时通常要回复；私聊通常要回复。
 - 群聊未 @ 时必须由你理解语义后决定是否插话，不能按关键词机械匹配；只有你确实能帮上忙、接住情绪、回答问题、补充图片/记忆时才插话。
 - 群聊未 @ 且机器人刚回复过时，要更克制，除非用户明显在接着问你或需要帮助。
 - 当前发言人是 %s。不要把当前发言人和被提到的人混淆；不要把当前发言人叫成另一个成员。
-- 回复倾向于使用 "detailed" 详细风格（提供依据、论据充实，不要三言两语应付），除非是单字寒暄/语气词，否则绝对避免使用 "short" 极简风格。
+- 回复长度服从当前问题：寒暄和简单确认用 short，日常聊天用 normal，需要安慰用 comfort，只有解释复杂问题时才用 detailed。
 - 如果用户表达低落/生气/累，comfort，并查记忆。
-- 积极开启记忆检索（use_memory 设为 true）。只要用户的发言可能关联到他的偏好、习惯、承诺、过去的约定、或者可能有相关背景事实，就应当开启记忆检索，以便机器人能表现出极强的上下文连贯记忆。
+- 只有当前问题确实依赖偏好、习惯、承诺、过去经历或关系背景时才开启记忆检索；普通寒暄不要查长期记忆。
 - 如果问题涉及图片、截图，再 use_media。
+- memory_query 要补全代词和省略信息，成为不依赖当前消息也能理解的检索问题；不查记忆时留空。
+- 仅在确有需要时打开聊天归档、图片归档、图谱和时间对齐。普通寒暄只读近期消息；回忆共同经历可查聊天归档；找图才查图片归档。
+- memory_top_k 通常 4-8；recent_message_limit 通常 8-30；context_max_chars 通常 6000-16000。
 - **核心实体识别 (detected_entities)**：分析最新用户消息和上下文，提取其中所指的人名、外号、别名、宠物名和专属代名词（例如：结合成员资料纠正昵称错别字；把“她”、“我妈”等代词结合前文还原为标准实体名）。如果有提取出来的实体，放进 detected_entities 列表中；如果没有提取出任何特定实体，返回空数组 []。
 - max_tokens 通常推荐在 500 到 600 之间，以保证回答内容丰满有深度。
 
@@ -403,6 +353,15 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 		ShouldReply      bool     `json:"should_reply"`
 		UseMemory        bool     `json:"use_memory"`
 		UseMedia         bool     `json:"use_media"`
+		MemoryQuery      string   `json:"memory_query"`
+		MemoryTopK       int      `json:"memory_top_k"`
+		IncludeChat      bool     `json:"include_chat_archive"`
+		IncludeMedia     bool     `json:"include_media_archive"`
+		RecentLimit      int      `json:"recent_message_limit"`
+		ContextMaxChars  int      `json:"context_max_chars"`
+		UseGraph         bool     `json:"use_graph"`
+		TemporalAlign    bool     `json:"temporal_align"`
+		DetectedEmotion  string   `json:"detected_emotion"`
 		ReplyStyle       string   `json:"reply_style"`
 		MaxTokens        int      `json:"max_tokens"`
 		Reason           string   `json:"reason"`
@@ -425,10 +384,22 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 	if parsed.ReplyStyle == "" {
 		parsed.ReplyStyle = plan.ReplyStyle
 	}
+	parsed.MemoryTopK = clamp(parsed.MemoryTopK, 1, 12, plan.MemoryTopK)
+	parsed.RecentLimit = clamp(parsed.RecentLimit, 6, 40, plan.RecentLimit)
+	parsed.ContextMaxChars = clamp(parsed.ContextMaxChars, 4000, 18000, plan.ContextMaxChars)
 	return replyPlan{
 		ShouldReply:      parsed.ShouldReply,
 		UseMemory:        parsed.UseMemory,
 		UseMedia:         parsed.UseMedia,
+		MemoryQuery:      strings.TrimSpace(parsed.MemoryQuery),
+		MemoryTopK:       parsed.MemoryTopK,
+		IncludeChat:      parsed.IncludeChat,
+		IncludeMedia:     parsed.IncludeMedia,
+		RecentLimit:      parsed.RecentLimit,
+		ContextMaxChars:  parsed.ContextMaxChars,
+		UseGraph:         parsed.UseGraph,
+		TemporalAlign:    parsed.TemporalAlign,
+		DetectedEmotion:  parsed.DetectedEmotion,
 		ReplyStyle:       parsed.ReplyStyle,
 		MaxTokens:        parsed.MaxTokens,
 		Reason:           parsed.Reason,
@@ -436,8 +407,21 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 	}
 }
 
+func clamp(value, low, high, fallback int) int {
+	if value == 0 {
+		value = fallback
+	}
+	if value < low {
+		return low
+	}
+	if value > high {
+		return high
+	}
+	return value
+}
+
 func defaultReplyPlan(msg feishu.Message, intent Intent, st conversationState) replyPlan {
-	plan := replyPlan{ShouldReply: true, UseMemory: true, UseMedia: false, ReplyStyle: "detailed", MaxTokens: 600, Reason: "default"}
+	plan := replyPlan{ShouldReply: true, UseMemory: true, UseMedia: false, MemoryTopK: 6, RecentLimit: 20, ContextMaxChars: 12000, UseGraph: true, TemporalAlign: true, ReplyStyle: "normal", MaxTokens: 500, Reason: "default"}
 	if msg.ChatType == "group" && !msg.IsMentioned {
 		plan.ShouldReply = false
 		plan.Reason = "passive_wait_llm"
@@ -450,13 +434,12 @@ func defaultReplyPlan(msg feishu.Message, intent Intent, st conversationState) r
 		plan.Reason = "intent"
 		return plan
 	}
-	content := msg.Content
-	if len([]rune(content)) <= 3 {
+	if len([]rune(msg.Content)) <= 3 {
 		plan.UseMemory = false
 		plan.ReplyStyle = "short"
 		plan.MaxTokens = 160
 	}
-	if inferEmotion(content) != "" || st.LastEmotion == "低落或需要安慰" || st.LastEmotion == "生气" {
+	if st.LastEmotion == "sad" || st.LastEmotion == "angry" || st.LastEmotion == "anxious" {
 		plan.UseMemory = true
 		plan.ReplyStyle = "comfort"
 		plan.MaxTokens = 500
@@ -476,7 +459,7 @@ func replyStyleInstruction(plan replyPlan, st conversationState) string {
 	case "comfort":
 		parts = append(parts, "优先安慰和接住情绪，先表明态度，再轻轻回应事情本身。")
 	case "detailed":
-		parts = append(parts, "回复要非常详尽、饱满且有事实依据，应当主动展开多写几段。把所有可能相关的细节、背景事实、跨渠道微信历史聊天上下文都融汇并丰富地叙述出来，展现出你对大哥事情的极度了解和丰富记忆，同时保持轻松亲切的语气，尽量多写，不要写得太短太敷衍。")
+		parts = append(parts, "把问题说明清楚并给出必要依据，只使用与当前问题直接相关且对当前发言人可见的记忆；避免堆砌无关私人细节。")
 	default:
 		parts = append(parts, "回复自然，不要过长。")
 	}
@@ -1462,22 +1445,17 @@ func understandIncomingImage(ctx stdctx.Context, cfg *config.Config, fs *feishu.
 	}
 	resChan := make(chan understandResult, 2)
 
-	// 1. 并发协程 A: 飞书 OCR 文本识别
+	// 1. OCR chain: Apple Vision locally, then Feishu as a cross-platform fallback.
 	go func() {
-		if !cfg.FeishuOCREnabled {
-			resChan <- understandResult{}
-			return
-		}
-		texts, err := fs.RecognizeImageText(ctx, image, cfg.FeishuOCRCooldown)
+		text, backend, err := recognizeImageText(ctx, cfg, fs, image)
 		if err != nil {
-			resChan <- understandResult{err: fmt.Errorf("feishu OCR error: %w", err)}
+			resChan <- understandResult{err: err}
 			return
 		}
-		if len(texts) > 0 {
-			resChan <- understandResult{ocr: strings.Join(texts, " / ")}
-		} else {
-			resChan <- understandResult{}
+		if text != "" {
+			log.Printf("[图片理解] OCR backend=%s chars=%d", backend, len([]rune(text)))
 		}
+		resChan <- understandResult{ocr: text}
 	}()
 
 	// 2. 并发协程 B: Ollama 本地多模态 Vision 图像描述
@@ -1526,8 +1504,54 @@ func understandIncomingImage(ctx stdctx.Context, cfg *config.Config, fs *feishu.
 	if mem != nil && (ocrText != "" || captionText != "") {
 		_ = mem.SaveImageHashCache(hash, ocrText, captionText)
 	}
+	if saver, ok := mem.(managedMediaStore); ok {
+		mediaKey := msg.MessageID
+		if mediaKey == "" {
+			mediaKey = msg.ImageKey
+		}
+		data := append([]byte(nil), image...)
+		go func() {
+			saveCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 45*time.Second)
+			defer cancel()
+			_, saveErr := saver.SaveManagedMedia(saveCtx, memory.ManagedMediaInput{
+				MediaKey: mediaKey, Data: data, SourcePath: mediaKey,
+				Sender: msg.Sender, SentAt: time.Now().Unix(), OCRText: ocrText, Caption: captionText,
+			})
+			if saveErr != nil {
+				log.Printf("[媒体入库] 保存失败 message_id=%s: %v", msg.MessageID, saveErr)
+			}
+		}()
+	}
 
 	return strings.Join(parts, "\n")
+}
+
+func recognizeImageText(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, image []byte) (string, string, error) {
+	backend := strings.ToLower(strings.TrimSpace(cfg.LocalOCRBackend))
+	if backend == "" {
+		backend = "auto"
+	}
+	if cfg.LocalOCREnabled && backend != "feishu" {
+		engine := localocr.NewAppleVision(cfg.AppleVisionOCRPath, cfg.LocalOCRTimeout)
+		result, err := engine.RecognizeBytes(ctx, image)
+		if err == nil && result.Text != "" {
+			return result.Text, fmt.Sprintf("apple_vision/%dms", result.ElapsedMS), nil
+		}
+		if err != nil {
+			log.Printf("[图片理解] Apple Vision OCR 不可用: %v", err)
+		}
+		if backend == "apple_vision" {
+			return "", "apple_vision", err
+		}
+	}
+	if !cfg.FeishuOCREnabled {
+		return "", "disabled", nil
+	}
+	texts, err := fs.RecognizeImageText(ctx, image, cfg.FeishuOCRCooldown)
+	if err != nil {
+		return "", "feishu", fmt.Errorf("feishu OCR error: %w", err)
+	}
+	return strings.Join(texts, "\n"), "feishu", nil
 }
 
 func describeImageWithOllama(ctx stdctx.Context, cfg *config.Config, image []byte) (string, error) {
@@ -1649,6 +1673,7 @@ func runBotMode() {
 				MediaMsgIDColumn:      cfg.MemoryMediaMsgIDColumn,
 				MediaStatusColumn:     cfg.MemoryMediaStatusColumn,
 				MediaRoot:             cfg.MemoryMediaRoot,
+				MediaVault:            cfg.MemoryMediaVault,
 				Embedder:              embedder,
 				EmbeddingDimension:    cfg.MemoryEmbeddingDimension,
 			})
@@ -2088,7 +2113,10 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	}
 	currentSender := label(msg.Sender)
 	plan := planReply(ctx, llmClient, msg, intent, *st, prof, currentSender, mem)
-	log.Printf("[回复决策] reply=%v memory=%v media=%v style=%s max_tokens=%d reason=%s", plan.ShouldReply, plan.UseMemory, plan.UseMedia, plan.ReplyStyle, plan.MaxTokens, plan.Reason)
+	convoState.SetEmotion(msg.ChatID, plan.DetectedEmotion)
+	log.Printf("[上下文计划] reply=%v memory=%v query=%q top_k=%d chat=%v media=%v recent=%d budget=%d graph=%v temporal=%v style=%s reason=%s",
+		plan.ShouldReply, plan.UseMemory, plan.MemoryQuery, plan.MemoryTopK, plan.IncludeChat, plan.IncludeMedia,
+		plan.RecentLimit, plan.ContextMaxChars, plan.UseGraph, plan.TemporalAlign, plan.ReplyStyle, plan.Reason)
 	if !plan.ShouldReply {
 		return
 	}
@@ -2136,16 +2164,19 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 
 	// Read recent messages for context
 	trace.Span("read_messages")
-	recentMsgs, _ := fs.ListMessages(ctx, msg.ChatID, 100)
+	recentMsgs, _ := fs.ListMessages(ctx, msg.ChatID, plan.RecentLimit)
 
 	// Search relevant memories
 	var memories []string
 	if mem != nil && plan.UseMemory {
 		trace.Span("search_memory")
-		searchQuery := msg.Content
+		searchQuery := strings.TrimSpace(plan.MemoryQuery)
+		if searchQuery == "" {
+			searchQuery = msg.Content
+		}
 		var graphFacts []string
 
-		if len(plan.DetectedEntities) > 0 {
+		if plan.UseGraph && len(plan.DetectedEntities) > 0 {
 			resolved := mem.ResolveAliases(plan.DetectedEntities)
 			if len(resolved) > 0 {
 				searchQuery = strings.Join(resolved, " ") + " " + msg.Content
@@ -2156,12 +2187,25 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 			}
 		}
 
-		memories = mem.Search(searchQuery, audience)
+		if retriever, ok := mem.(memory.PlannedRetriever); ok {
+			retrieved := retriever.SearchRelevantWithOptions(searchQuery, audience, memory.RetrievalOptions{
+				TopK: plan.MemoryTopK, IncludeBotMemory: true,
+				IncludeChatArchive: plan.IncludeChat, IncludeMediaArchive: plan.IncludeMedia,
+			})
+			for _, item := range retrieved {
+				memories = append(memories, item.PromptText())
+			}
+		} else {
+			memories = mem.Search(searchQuery, audience)
+			if len(memories) > plan.MemoryTopK {
+				memories = memories[:plan.MemoryTopK]
+			}
+		}
 		if len(graphFacts) > 0 {
 			memories = append(graphFacts, memories...)
 		}
 
-		if len(memories) > 1 {
+		if plan.TemporalAlign && len(memories) > 1 {
 			memories = alignTemporalMemory(ctx, llmClient, memories)
 		}
 		if len(memories) > 0 {
@@ -2170,7 +2214,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	}
 
 	// Build prompt and call LLM
-	budget := ctxmgr.NewBudget(16000)
+	budget := ctxmgr.NewBudget(plan.ContextMaxChars)
 	llmMsgs := buildChatMessages(prof, mem, msg.Content, currentSender, msg.MessageID, recentMsgs, memories, replyStyleInstruction(plan, *st), budget, label)
 
 	trace.Span("deepseek_call")

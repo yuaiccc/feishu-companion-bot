@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,10 @@ type Config struct {
 	// Image understanding
 	FeishuOCREnabled   bool
 	FeishuOCRCooldown  time.Duration
+	LocalOCREnabled    bool
+	LocalOCRBackend    string
+	AppleVisionOCRPath string
+	LocalOCRTimeout    time.Duration
 	LocalVisionEnabled bool
 
 	// GitHub
@@ -65,6 +70,7 @@ type Config struct {
 	MemoryMediaMsgIDColumn      string
 	MemoryMediaStatusColumn     string
 	MemoryMediaRoot             string
+	MemoryMediaVault            string
 	MemoryMediaSendImage        bool
 
 	// Profile
@@ -123,6 +129,10 @@ func Load() *Config {
 		OllamaVisionModel:  getEnv("OLLAMA_VISION_MODEL", "qwen2.5vl:3b"),
 		FeishuOCREnabled:   getEnvBool("FEISHU_OCR_ENABLED", true),
 		FeishuOCRCooldown:  getEnvDuration("FEISHU_OCR_COOLDOWN_SECONDS", 5*time.Minute),
+		LocalOCREnabled:    getEnvBool("LOCAL_OCR_ENABLED", true),
+		LocalOCRBackend:    getEnv("LOCAL_OCR_BACKEND", "auto"),
+		AppleVisionOCRPath: getEnv("APPLE_VISION_OCR_BINARY", "bin/macos-vision-ocr"),
+		LocalOCRTimeout:    getEnvDuration("LOCAL_OCR_TIMEOUT_SECONDS", 15*time.Second),
 		LocalVisionEnabled: getEnvBool("LOCAL_VISION_ENABLED", true),
 
 		GitHubUsername: getEnv("GH_USERNAME", getEnv("GITHUB_USERNAME", "")),
@@ -150,6 +160,7 @@ func Load() *Config {
 		MemoryMediaMsgIDColumn:      getEnv("MEMORY_MEDIA_MSGID_COLUMN", "msgid"),
 		MemoryMediaStatusColumn:     getEnv("MEMORY_MEDIA_STATUS_COLUMN", "path_status"),
 		MemoryMediaRoot:             getEnv("MEMORY_MEDIA_ROOT", ""),
+		MemoryMediaVault:            getEnv("MEMORY_MEDIA_VAULT", filepath.Join("memory_data", getEnv("PROFILE_ID", "default"), "media")),
 		MemoryMediaSendImage:        getEnvBool("MEMORY_MEDIA_SEND_IMAGE", true),
 
 		ProfileID: getEnv("PROFILE_ID", "default"),

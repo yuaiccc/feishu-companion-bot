@@ -7,12 +7,12 @@
 ## 主要能力
 
 - 飞书群聊与私聊：长连接收取事件，区分群成员，无需固定关键词触发
-- 模型决策：先判断是否回应、回复长度、是否查记忆、是否搜索及是否发图
+- 上下文 Planner：由模型决定是否回应、检索问题、数据源、Top-K、近期消息数量、上下文预算及回复长度
 - 流式反馈：使用飞书 CardKit 流式卡片，失败时自动降级为普通消息
 - 分层记忆：短期对话状态、长期事实记忆、聊天归档和图片归档
 - 混合召回：OceanBase 全文检索与向量检索通过加权 RRF 融合
 - 隐私边界：按 profile 和可见性过滤记忆，发给模型前执行敏感信息脱敏
-- 图片能力：飞书 OCR、本地视觉模型、媒体路径修复和失效标记
+- 图片能力：macOS Apple Vision 本地 OCR、飞书 OCR 兜底、本地视觉模型和内容寻址媒体库
 - 外部能力：可选 DeerFlow/OpenClaw 搜索、GitHub 活动摘要、飞书文档评论
 - 可观测性：健康检查、分阶段延迟日志、记忆审计与关系图谱面板
 
@@ -22,7 +22,7 @@
 飞书事件
   -> 幂等与时效检查
   -> 成员身份和最近对话状态
-  -> DeepSeek 回复前决策
+  -> DeepSeek 上下文 Planner
   -> 按需检索记忆 / 图片 / 外部信息
   -> 上下文裁剪与隐私脱敏
   -> DeepSeek 生成
@@ -45,8 +45,9 @@
 git clone https://github.com/yuaiccc/feishu-companion-bot.git
 cd feishu-companion-bot
 cp .env.example .env
-go test ./...
-go build -o bot ./cmd/bot
+make test
+make build
+go run ./cmd/doctor -online
 ./bot
 ```
 
@@ -96,6 +97,7 @@ MEMORY_CHAT_ARCHIVE_TIME_COLUMN=end_time
 MEMORY_INCLUDE_MEDIA_ARCHIVE=false
 MEMORY_MEDIA_ARCHIVE_TABLE=media_assets
 MEMORY_MEDIA_ROOT=/absolute/path/to/media
+MEMORY_MEDIA_VAULT=memory_data/default/media
 ```
 
 `MEMORY_EMBEDDING_DIMENSION` 必须与 embedding 模型输出一致。服务会在启动时补齐当前 profile 中缺失的记忆向量；同一轮检索只生成一次查询向量，并短时缓存重复查询。当前实现对向量结果和全文结果使用加权 RRF，避免直接混合两种不可比的原始分数。
@@ -104,6 +106,41 @@ MEMORY_MEDIA_ROOT=/absolute/path/to/media
 
 ```bash
 go run ./cmd/memtool -diagnose
+```
+
+清洗长期记忆时先生成只读报告。只有人工检查后才执行高置信度建议：
+
+```bash
+go run ./cmd/memtool -quality-audit
+go run ./cmd/memtool -quality-apply -quality-threshold 0.98
+```
+
+检索评测集采用 JSONL，统计 Hit@K、MRR、来源命中、隐私违规和 P50/P95 延迟：
+
+```bash
+cp eval/sample.jsonl memory_data/default/retrieval-eval.jsonl
+go run ./cmd/rageval -input memory_data/default/retrieval-eval.jsonl
+```
+
+## 图片 OCR 与媒体入库
+
+macOS 默认先调用系统 Vision 框架的 `VNRecognizeTextRequest`，失败后再按配置回退到飞书 OCR；其他系统会直接使用飞书兜底。本地 OCR 不会把图片发送给第三方。
+
+```bash
+# 编译 Apple Vision OCR 助手和机器人
+make build
+
+# 直接验证 OCR
+bin/macos-vision-ocr /absolute/path/to/image.png zh-Hans,en-US
+```
+
+机器人接收的新图片会以 SHA-256 内容哈希存进 `MEMORY_MEDIA_VAULT`，目录权限为 `0700`，文件权限为 `0600`。消息 ID 是数据库幂等键，同一消息重复投递不会产生重复资产。
+
+已有媒体归档可重新扫描并复制到受管媒体库。命令默认只预览；旧文件已删除时会明确统计为“缺失”，不会伪造图片：
+
+```bash
+go run ./cmd/mediactl -sources "/path/to/export,/path/to/photos"
+go run ./cmd/mediactl -sources "/path/to/export,/path/to/photos" -apply
 ```
 
 数据量较小时使用精确余弦检索。只有在数据明显增长并经过延迟测试后，才建议按 OceanBase 官方文档增加 HNSW 及 `APPROXIMATE` 查询，不应只为“用了向量库”而创建近似索引。
@@ -125,8 +162,12 @@ LOVE_NOTE_MAX_DAILY_COMMENTS=2
 
 ```bash
 # 单元测试和编译
-go test ./...
-go build -o bot ./cmd/bot
+make test
+make build
+
+# 本地依赖与真实飞书鉴权
+go run ./cmd/doctor
+go run ./cmd/doctor -online
 
 # 以下命令会向 .env 指定的真实飞书会话发送消息
 go run ./cmd/smoke -mode stream
@@ -136,6 +177,8 @@ go run ./cmd/smoke -mode image -image /absolute/path/to/test.png
 go run ./cmd/memtool -list
 go run ./cmd/memtool -search "查询内容"
 go run ./cmd/memtool -diagnose
+go run ./cmd/memtool -quality-audit
+go run ./cmd/rageval -input eval/sample.jsonl
 ```
 
 ## 隐私与开源检查
@@ -148,16 +191,21 @@ git diff --check
 git grep -nE 'sk-|cli_[A-Za-z0-9]+|ou_[A-Za-z0-9]+|password@tcp'
 ```
 
-不要将聊天归档、照片、真实人物 profile、数据库口令或飞书应用密钥提交到公开仓库。生产部署建议为数据库账号只授予所需库表权限，并让外部搜索、文档评论和媒体发送保持显式开关。
+不要将聊天归档、照片、评测报告、真实人物 profile、数据库口令或飞书应用密钥提交到公开仓库。生产部署建议为数据库账号只授予所需库表权限，并让外部搜索、文档评论和媒体发送保持显式开关。完整威胁边界见 [安全说明](SECURITY.md)。
 
 ## 项目结构
 
 ```text
 cmd/bot/          机器人主进程与 GitHub Actions 模式
 cmd/memtool/      记忆迁移、清洗、检索与数据库诊断
+cmd/mediactl/     旧媒体扫描、修复与幂等重新入库
+cmd/rageval/      检索质量、隐私边界与延迟评测
+cmd/doctor/       本地依赖、数据库和飞书真实健康检查
 cmd/smoke/        飞书真实链路测试
 internal/feishu/  飞书 OpenAPI、长连接与 CardKit
 internal/memory/  分层记忆、OceanBase 与混合检索
+internal/ocr/     Apple Vision OCR 调用层
+internal/media/   私有内容寻址媒体保险库
 internal/lovenote/ 云文档增量评论任务
 internal/llm/     DeepSeek 客户端与回复决策
 internal/profile/ 人物和群成员配置
@@ -166,4 +214,4 @@ web/              本地记忆审计面板
 
 ## 许可证
 
-[MIT](LICENSE)
+项目采用 [MIT](LICENSE) 许可证。提交代码前请阅读 [参与贡献](CONTRIBUTING.md) 和 [安全说明](SECURITY.md)。

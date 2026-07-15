@@ -30,6 +30,7 @@ profiles/*
 *.so
 *.dylib
 /bot
+/bin/
 
 # IDE
 .idea/

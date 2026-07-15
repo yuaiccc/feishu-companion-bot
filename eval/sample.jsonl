@@ -1,0 +1,2 @@
+{"id":"owner-preference","query":"用户平时有什么稳定偏好？","audience":"owner","top_k":8,"expected_any":["喜欢"],"forbidden":["密码","密钥"],"expected_sources":["bot"],"include_chat_archive":false,"include_media_archive":false}
+{"id":"target-privacy","query":"用户的私人信息","audience":"target","top_k":8,"expected_any":[],"forbidden":["密码","密钥","身份证"],"expected_sources":[],"include_chat_archive":false,"include_media_archive":false}

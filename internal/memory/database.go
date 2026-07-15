@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	mediavault "feishu-companion-bot/internal/media"
+
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -35,6 +37,7 @@ type DatabaseOptions struct {
 	MediaMsgIDColumn      string
 	MediaStatusColumn     string
 	MediaRoot             string
+	MediaVault            string
 	Embedder              Embedder
 	EmbeddingDimension    int
 }
@@ -58,9 +61,11 @@ type DatabaseStore struct {
 	mediaMsgIDColumn      string
 	mediaStatusColumn     string
 	mediaRoot             string
+	mediaVault            *mediavault.Vault
 	embedder              Embedder
 	embeddingDimension    int
 	embedQueue            chan string
+	embedCancel           context.CancelFunc
 	queryVectorMu         sync.Mutex
 	queryVectorCache      map[string]cachedVectorLiteral
 }
@@ -155,6 +160,14 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 		db.Close()
 		return nil, err
 	}
+	var vault *mediavault.Vault
+	if strings.TrimSpace(opts.MediaVault) != "" {
+		vault, err = mediavault.NewVault(opts.MediaVault)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("initialize media vault: %w", err)
+		}
+	}
 	store := &DatabaseStore{
 		db:                    db,
 		profileID:             opts.ProfileID,
@@ -174,6 +187,7 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 		mediaMsgIDColumn:      opts.MediaMsgIDColumn,
 		mediaStatusColumn:     opts.MediaStatusColumn,
 		mediaRoot:             opts.MediaRoot,
+		mediaVault:            vault,
 		embedder:              opts.Embedder,
 		embeddingDimension:    opts.EmbeddingDimension,
 		embedQueue:            make(chan string, 500),
@@ -187,8 +201,11 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 		store.detectMediaStatusColumn()
 		go store.auditMediaPaths(context.Background())
 	}
-	// Start async embedding background worker
-	go store.startEmbeddingWorker(context.Background())
+	// Start an explicitly cancellable worker so tests and graceful shutdown do
+	// not leave database goroutines behind.
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	store.embedCancel = cancelWorker
+	go store.startEmbeddingWorker(workerCtx)
 	store.enqueueMissingEmbeddings()
 	return store, nil
 }
@@ -235,6 +252,33 @@ CREATE TABLE IF NOT EXISTS bot_memories (
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
 		}
+	}
+	_, err = s.db.Exec(fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS bot_media_assets (
+  id varchar(64) NOT NULL,
+  profile_id varchar(128) NOT NULL,
+  media_key varchar(255) NOT NULL,
+  content_hash varchar(64) NOT NULL,
+  relative_path text NOT NULL,
+  source_path text DEFAULT NULL,
+  mime_type varchar(128) DEFAULT NULL,
+  file_size bigint DEFAULT NULL,
+  sender varchar(255) DEFAULT NULL,
+  sent_at bigint DEFAULT NULL,
+  ocr_text longtext DEFAULT NULL,
+  caption longtext DEFAULT NULL,
+  visibility varchar(32) NOT NULL,
+  status varchar(16) NOT NULL DEFAULT 'valid',
+  embedding vector(%d) DEFAULT NULL,
+  created_at bigint NOT NULL,
+  updated_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY idx_profile_media_key (profile_id, media_key),
+  KEY idx_profile_media_sent (profile_id, sent_at),
+  KEY idx_media_content_hash (content_hash)
+) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`, s.embeddingDimension))
+	if err != nil {
+		return err
 	}
 	_, err = s.db.Exec(`
 CREATE TABLE IF NOT EXISTS relationship_state (
@@ -471,18 +515,32 @@ func (s *DatabaseStore) Search(query string, audience string) []string {
 }
 
 func (s *DatabaseStore) SearchRelevant(query string, audience string) []RetrievedMemory {
+	return s.SearchRelevantWithOptions(query, audience, RetrievalOptions{
+		TopK: 8, IncludeBotMemory: true, IncludeChatArchive: s.includeChatArchive, IncludeMediaArchive: s.includeMediaArchive,
+	})
+}
+
+func (s *DatabaseStore) SearchRelevantWithOptions(query string, audience string, opts RetrievalOptions) []RetrievedMemory {
 	var results []RetrievedMemory
-	vecLiteral, _ := s.queryVectorLiteral(query)
-	chatEnabled := s.includeChatArchive && s.chatVisibleTo(audience)
-	mediaEnabled := s.includeMediaArchive && s.mediaVisibleTo(audience)
-	botLimit := 8
-	if chatEnabled {
-		botLimit -= 2
+	if opts.TopK <= 0 {
+		opts.TopK = 8
 	}
-	if mediaEnabled {
+	if opts.TopK > 20 {
+		opts.TopK = 20
+	}
+	vecLiteral, _ := s.queryVectorLiteral(query)
+	chatEnabled := opts.IncludeChatArchive && s.includeChatArchive && s.chatVisibleTo(audience)
+	mediaEnabled := opts.IncludeMediaArchive && s.includeMediaArchive && s.mediaVisibleTo(audience)
+	botLimit := opts.TopK
+	if chatEnabled {
+		botLimit -= minInt(2, botLimit)
+	}
+	if mediaEnabled && botLimit > 0 {
 		botLimit--
 	}
-	results = append(results, s.searchBotMemories(query, audience, botLimit, vecLiteral)...)
+	if opts.IncludeBotMemory && botLimit > 0 {
+		results = append(results, s.searchBotMemories(query, audience, botLimit, vecLiteral)...)
+	}
 	if chatEnabled {
 		if vecLiteral != "" {
 			results = append(results, wrapRetrievedTexts(s.searchChatArchiveHybrid(query, vecLiteral, 2), MemoryTypeArchiveChat, "chat_archive")...)
@@ -499,12 +557,22 @@ func (s *DatabaseStore) SearchRelevant(query string, audience string) []Retrieve
 			})
 		}
 	}
-	sortRetrievedMemories(results)
-	if len(results) > 8 {
-		results = results[:8]
+	// Each source has already ranked its own candidates by hybrid relevance.
+	// Re-sorting here by memory type/importance would destroy that ordering
+	// (for example, an exact episodic answer could be pushed behind vague
+	// relational memories). Keep retrieval relevance as the primary signal.
+	if len(results) > opts.TopK {
+		results = results[:opts.TopK]
 	}
 	s.touchRetrieved(results)
 	return results
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func wrapRetrievedTexts(texts []string, mt MemoryType, source string) []RetrievedMemory {
@@ -952,9 +1020,13 @@ func (s *DatabaseStore) searchMedia(query string, audience string, limit int, ve
 	if limit > 10 {
 		limit = 10
 	}
+	managed := s.searchManagedMedia(query, audience, limit, vecLiteral)
+	if len(managed) >= limit {
+		return managed[:limit]
+	}
 	term := cleanMediaQuery(query)
 	if term == "" {
-		return s.filterMediaPaths(s.recentMedia(limit))
+		return mergeMediaResults(managed, s.filterMediaPaths(s.recentMedia(limit)), limit)
 	}
 	var results []MediaResult
 	if vecLiteral != "" {
@@ -969,7 +1041,26 @@ func (s *DatabaseStore) searchMedia(query string, audience string, limit int, ve
 	if len(results) == 0 && isVagueMediaQuery(query) {
 		results = s.recentMedia(limit)
 	}
-	return s.filterMediaPaths(results)
+	return mergeMediaResults(managed, s.filterMediaPaths(results), limit)
+}
+
+func mergeMediaResults(primary, secondary []MediaResult, limit int) []MediaResult {
+	out := make([]MediaResult, 0, limit)
+	seen := make(map[string]struct{})
+	for _, group := range [][]MediaResult{primary, secondary} {
+		for _, item := range group {
+			key := mediaResultKey(item)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, item)
+			if len(out) >= limit {
+				return out
+			}
+		}
+	}
+	return out
 }
 
 // detectMediaStatusColumn enables durable invalid-path marking when the
@@ -1386,6 +1477,9 @@ func allowedVisibility(audience string) []Visibility {
 }
 
 func (s *DatabaseStore) Close() error {
+	if s.embedCancel != nil {
+		s.embedCancel()
+	}
 	return s.db.Close()
 }
 
@@ -1426,7 +1520,7 @@ ORDER BY TABLE_NAME`)
 		}
 		tableRows.Close()
 	}
-	tables := []string{"bot_memories"}
+	tables := []string{"bot_memories", "bot_media_assets"}
 	if s.includeChatArchive {
 		tables = append(tables, s.chatArchiveTable)
 	}
