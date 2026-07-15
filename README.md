@@ -1,86 +1,169 @@
-# Feishu Companion Bot (飞书专属陪伴小弟) 🚀
+# 飞书陪伴机器人
 
-这是一个**高解耦、通用化、以情感与认知网络为核心**的飞书陪伴机器人框架。
-它能够适配任何想要快速接入的个人用户，提供温暖、连贯、且具备长短期记忆和动态关系图谱提炼能力的飞书专属聊天体验。
+一个使用 Go 编写、可自行部署的飞书陪伴机器人。机器人通过飞书长连接实时接收消息，由大模型决定是否回应、如何回应以及是否检索记忆；也可按需接入 OceanBase SeekDB、Ollama、图片归档、外部搜索、飞书云文档和 GitHub 动态。
 
----
+项目提供的是通用底座。人物设定、成员关系、称呼、记忆边界和可选能力均通过配置完成，仓库不包含个人聊天记录、媒体文件、访问令牌或私有 profile。
 
-## 🌟 核心特色 (Features)
+## 主要能力
 
-### 1. ⚙️ 热插拔式模块化开关 (Feature Toggles)
-所有的核心记忆与情感处理逻辑皆已完全解耦。您可以在内嵌的 Web 面板上，一键开启或关闭以下模块：
-*   **情感温度计 (`module_emotion_tracker`)**：实时计算主人的“情绪值”与“亲密度”，并基于波动记录写入历史变化表。
-*   **图谱纠偏与演进 (`module_graph_self_evolution`)**：自动识别新老记忆中的三元组逻辑冲突，并由大模型进行关系覆盖/否定句物理删除。
-*   **跨会话多轮提炼 (`module_multi_turn_graph`)**：跨对话识别“他/她/这个”等隐含代词，将其消解并提炼为标准的图谱实体。
-*   **图片 MD5 去重缓存 (`module_image_dedup`)**：静默秒回复已识图片，免去大模型重复视觉提炼。
+- 飞书群聊与私聊：长连接收取事件，区分群成员，无需固定关键词触发
+- 模型决策：先判断是否回应、回复长度、是否查记忆、是否搜索及是否发图
+- 流式反馈：使用飞书 CardKit 流式卡片，失败时自动降级为普通消息
+- 分层记忆：短期对话状态、长期事实记忆、聊天归档和图片归档
+- 混合召回：OceanBase 全文检索与向量检索通过加权 RRF 融合
+- 隐私边界：按 profile 和可见性过滤记忆，发给模型前执行敏感信息脱敏
+- 图片能力：飞书 OCR、本地视觉模型、媒体路径修复和失效标记
+- 外部能力：可选 DeerFlow/OpenClaw 搜索、GitHub 活动摘要、飞书文档评论
+- 可观测性：健康检查、分阶段延迟日志、记忆审计与关系图谱面板
 
-### 2. 🧠 开放式 GraphRAG 关系图谱
-*   **双轨并行存储**：使用 `bot_memories` 物理表存储非结构化的长期记忆，使用 `knowledge_relations` 物理表存储关系图谱。
-*   **自由关系边**：图谱支持完全开放式的 Predicate 关系命名（如：别名、同事、喜欢、毕业于、前女友、讨厌等），用户可在控制台无限制自由定义并直接写回库中。
+## 工作流程
 
-### 3. 🎨 单二进制内嵌极简 Web 控制面板 (SPA Go Embed)
-*   **一体化极简发布**：无需配置 Nginx 等繁琐代理，Vite + React (TypeScript) 静态资源完美内嵌在 Go 的可执行程序中，开箱即用。
-*   **原生 SVG 双折线趋势图**：手写响应式 SVG Canvas 绘制 Mood & Affinity 历史起伏。
-*   **实时 OceanBase 监控**：带动态呼吸灯，实时轮询并展示 OB 的版本、连接池负载 (Active/Idle) 与图谱数据行数。
-
----
-
-## 🚀 快速启动指南 (Quick Start)
-
-### 1. 配置文件设置
-将项目根目录下的 `.env.example` 复制为 `.env`，并配置您的环境参数：
-```ini
-# 飞书应用凭证
-FEISHU_APP_ID=cli_xxx
-FEISHU_APP_SECRET=xxx
-
-# 飞书用户 OpenID (用于标识主人)
-FEISHU_OWNER_OPENID=ou_xxx
-
-# 大模型配置 (推荐使用 DeepSeek V3)
-DEEPSEEK_API_KEY=sk-xxx
-DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
-DEEPSEEK_MODEL=deepseek-chat
-
-# OceanBase 数据库连接串
-MEMORY_DATABASE_DSN="user:password@tcp(127.0.0.1:3306)/database_name?charset=utf8mb4&parseTime=True&loc=Local"
+```text
+飞书事件
+  -> 幂等与时效检查
+  -> 成员身份和最近对话状态
+  -> DeepSeek 回复前决策
+  -> 按需检索记忆 / 图片 / 外部信息
+  -> 上下文裁剪与隐私脱敏
+  -> DeepSeek 生成
+  -> 飞书流式回复或文本降级
 ```
 
-### 2. 前端静态网页打包
-在 `/web` 目录下进行前端 TypeScript 编译与 Vite 打包：
-```bash
-cd web
-npm run build
-```
-*(打包后的资源会自动重定向复制进 `cmd/bot/web/dist` 下，完美越过 Go embed 的父级目录限制)*
+本地进程在线时，飞书事件通过长连接即时到达。GitHub Actions 仅用于机器离线时的轮询兜底，不能代替实时消息长连接。
 
-### 3. 编译并启动机器人
-回到项目根目录下：
+## 环境要求
+
+- Go 1.26.2（以 `go.mod` 为准）
+- 一个已发布的飞书企业自建应用
+- DeepSeek 或兼容 OpenAI Chat Completions 的模型服务
+- 可选：OceanBase SeekDB/MySQL 兼容数据库
+- 可选：Ollama 与 `qwen3-embedding:0.6b`
+
+## 快速开始
+
 ```bash
-# 编译
+git clone https://github.com/yuaiccc/feishu-companion-bot.git
+cd feishu-companion-bot
+cp .env.example .env
+go test ./...
 go build -o bot ./cmd/bot
-
-# 启动
 ./bot
 ```
-后台服务拉起后，会在终端打印监听地址，您可以直接在浏览器中打开：
-👉 **`http://127.0.0.1:8080/`**
 
----
+默认启用 `DRY_RUN=true`，只打印而不发送消息。完成飞书配置并通过 smoke 测试后，再将其改为 `false`。
 
-## ⚙️ 角色初始化引导 (Onboarding Wizard)
+最低限度配置：
 
-对于第一天新接入的用户，Web 控制面板提供了直观的**新手角色配置向导**：
-1.  **称呼定义**：填入“主人称呼”（如：三哥）、“机器人称呼”（如：小弟）、以及“陪伴伴侣的称呼”（如：舒舒）；
-2.  **角色 Prompt 写入**：点击“装载推荐模板”或手写您的个性化机器人 System Prompt；
-3.  **确认保存**：一键保存后，机器人将立即热装载最新的配置，并为您在图谱中预设好初始别名映射关系！
+```env
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=xxx
+FEISHU_BOT_OPEN_ID=ou_xxx
+FEISHU_CHAT_ID=oc_xxx
+FEISHU_OWNER_OPEN_ID=ou_xxx
 
----
+DEEPSEEK_API_KEY=sk_xxx
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
 
-## 🧪 单元与集成测试 (Test Suite)
-
-运行以下命令执行全回归测试：
-```bash
-go test -v ./cmd/bot
+PROFILE_ID=default
+DRY_RUN=true
 ```
-测试覆盖了**多轮代词指代消解、自适应情感微调、图片去重校验、及图谱纠偏冲突调和**等 11 项核心场景，确保系统在更新时的 100% 稳定性。
+
+飞书权限、事件订阅和 CardKit 配置见 [飞书配置](docs/飞书配置.md)，本地常驻与 GitHub Actions 说明见 [开源部署](docs/开源部署.md)。
+
+## 人物与成员配置
+
+复制 `profiles/default.json` 或 `profiles/example-couple.json` 创建自己的 profile。多人群聊应为每位成员配置 `open_id`、名称、角色和别名，避免模型混淆说话者。
+
+私有 profile 默认被 `.gitignore` 排除；仓库只跟踪两个示例文件。
+
+## OceanBase 记忆库
+
+不配置数据库时，记忆保存在本地 `memory_data/<PROFILE_ID>/memories.json`。配置 SeekDB/OceanBase 后，机器人会把自身记忆写入 `bot_memories`，并可只读接入已有聊天归档和媒体归档。
+
+```env
+MEMORY_ENABLED=true
+MEMORY_DATABASE_DSN=user:password@tcp(127.0.0.1:2881)/companion_memory?charset=utf8mb4&parseTime=True&loc=Local
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3-embedding:0.6b
+MEMORY_EMBEDDING_DIMENSION=1024
+
+MEMORY_INCLUDE_CHAT_ARCHIVE=false
+MEMORY_CHAT_ARCHIVE_TABLE=chat_message_chunks
+MEMORY_CHAT_ARCHIVE_TEXT_COLUMN=chunk_text
+MEMORY_CHAT_ARCHIVE_TIME_COLUMN=end_time
+
+MEMORY_INCLUDE_MEDIA_ARCHIVE=false
+MEMORY_MEDIA_ARCHIVE_TABLE=media_assets
+MEMORY_MEDIA_ROOT=/absolute/path/to/media
+```
+
+`MEMORY_EMBEDDING_DIMENSION` 必须与 embedding 模型输出一致。服务会在启动时补齐当前 profile 中缺失的记忆向量；同一轮检索只生成一次查询向量，并短时缓存重复查询。当前实现对向量结果和全文结果使用加权 RRF，避免直接混合两种不可比的原始分数。
+
+检查数据库版本、表映射、embedding 覆盖率和索引：
+
+```bash
+go run ./cmd/memtool -diagnose
+```
+
+数据量较小时使用精确余弦检索。只有在数据明显增长并经过延迟测试后，才建议按 OceanBase 官方文档增加 HNSW 及 `APPROXIMATE` 查询，不应只为“用了向量库”而创建近似索引。
+
+## 可选能力
+
+恋爱笔记评论任务默认关闭。启用后首次运行只建立文档块基线，之后仅处理新增内容，并按每日上限控制评论数量：
+
+```env
+LOVE_NOTE_ENABLED=false
+LOVE_NOTE_DOC_TOKEN=
+LOVE_NOTE_WIKI_TOKEN=
+LOVE_NOTE_MAX_DAILY_COMMENTS=2
+```
+
+外部搜索、主动话题、图片理解和 GitHub 轮询的开关与路径均在 [.env.example](.env.example) 中说明。
+
+## 验证与诊断
+
+```bash
+# 单元测试和编译
+go test ./...
+go build -o bot ./cmd/bot
+
+# 以下命令会向 .env 指定的真实飞书会话发送消息
+go run ./cmd/smoke -mode stream
+go run ./cmd/smoke -mode image -image /absolute/path/to/test.png
+
+# 记忆工具
+go run ./cmd/memtool -list
+go run ./cmd/memtool -search "查询内容"
+go run ./cmd/memtool -diagnose
+```
+
+## 隐私与开源检查
+
+仓库已忽略 `.env`、日志、二进制、运行状态、媒体文件、私有 profile 和本地扩展脚本。公开或部署前仍应执行：
+
+```bash
+git status --short
+git diff --check
+git grep -nE 'sk-|cli_[A-Za-z0-9]+|ou_[A-Za-z0-9]+|password@tcp'
+```
+
+不要将聊天归档、照片、真实人物 profile、数据库口令或飞书应用密钥提交到公开仓库。生产部署建议为数据库账号只授予所需库表权限，并让外部搜索、文档评论和媒体发送保持显式开关。
+
+## 项目结构
+
+```text
+cmd/bot/          机器人主进程与 GitHub Actions 模式
+cmd/memtool/      记忆迁移、清洗、检索与数据库诊断
+cmd/smoke/        飞书真实链路测试
+internal/feishu/  飞书 OpenAPI、长连接与 CardKit
+internal/memory/  分层记忆、OceanBase 与混合检索
+internal/lovenote/ 云文档增量评论任务
+internal/llm/     DeepSeek 客户端与回复决策
+internal/profile/ 人物和群成员配置
+web/              本地记忆审计面板
+```
+
+## 许可证
+
+[MIT](LICENSE)

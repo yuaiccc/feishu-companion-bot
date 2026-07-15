@@ -98,13 +98,124 @@ type Comment struct {
 	Position string `json:"position"`
 }
 
+type Block struct {
+	ID         string
+	Text       string
+	CommentIDs []string
+}
+
+// ResolveWikiDocToken converts a wiki node token to its underlying docx token.
+func (c *Client) ResolveWikiDocToken(ctx context.Context, wikiToken string) (string, error) {
+	if wikiToken == "" {
+		return "", fmt.Errorf("wiki token is empty")
+	}
+	data, err := c.do(ctx, "GET", "/wiki/v2/spaces/get_node?token="+wikiToken, nil)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		Node struct {
+			ObjType  string `json:"obj_type"`
+			ObjToken string `json:"obj_token"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", err
+	}
+	if result.Node.ObjType != "docx" {
+		return "", fmt.Errorf("wiki node is %s, not docx", result.Node.ObjType)
+	}
+	return result.Node.ObjToken, nil
+}
+
+// GetBlocks returns top-level text blocks used as stable incremental anchors.
+func (c *Client) GetBlocks(ctx context.Context, docToken string) ([]Block, error) {
+	data, err := c.do(ctx, "GET", fmt.Sprintf("/docx/v1/documents/%s/blocks", docToken), nil)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Items []struct {
+			BlockID    string   `json:"block_id"`
+			CommentIDs []string `json:"comment_ids"`
+			Text       struct {
+				Elements []struct {
+					TextRun struct {
+						Content string `json:"content"`
+					} `json:"text_run"`
+				} `json:"elements"`
+			} `json:"text"`
+			Heading1 struct {
+				Elements []struct {
+					TextRun struct {
+						Content string `json:"content"`
+					} `json:"text_run"`
+				} `json:"elements"`
+			} `json:"heading1"`
+			Heading2 struct {
+				Elements []struct {
+					TextRun struct {
+						Content string `json:"content"`
+					} `json:"text_run"`
+				} `json:"elements"`
+			} `json:"heading2"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	blocks := make([]Block, 0, len(result.Items))
+	for _, item := range result.Items {
+		text := ""
+		for _, e := range item.Text.Elements {
+			text += e.TextRun.Content
+		}
+		if text == "" {
+			for _, e := range item.Heading1.Elements {
+				text += e.TextRun.Content
+			}
+		}
+		if text == "" {
+			for _, e := range item.Heading2.Elements {
+				text += e.TextRun.Content
+			}
+		}
+		if item.BlockID != "" && text != "" {
+			blocks = append(blocks, Block{ID: item.BlockID, Text: text, CommentIDs: item.CommentIDs})
+		}
+	}
+	return blocks, nil
+}
+
+// CreateDocxComment adds a reply anchored to a document block.
+func (c *Client) CreateDocxComment(ctx context.Context, docToken, blockID, content string) (string, error) {
+	data, err := c.do(ctx, "POST", fmt.Sprintf("/drive/v1/files/%s/new_comments", docToken), map[string]interface{}{
+		"file_type": "docx", "anchor": map[string]string{"block_id": blockID},
+		"reply_elements": []interface{}{map[string]interface{}{"type": "text", "text": content}},
+	})
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		CommentID string `json:"comment_id"`
+		ReplyID   string `json:"reply_id"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", err
+	}
+	if result.CommentID != "" {
+		return result.CommentID, nil
+	}
+	return result.ReplyID, nil
+}
+
 // AddComment adds a comment to a Feishu document.
 // The docToken and docRevision come from the document URL.
 func (c *Client) AddComment(ctx context.Context, docToken, content, position string) (string, error) {
 	data, err := c.do(ctx, "POST",
 		fmt.Sprintf("/doc/v1/documents/%s/comments", docToken),
 		map[string]interface{}{
-			"content": map[string]string{"text": content},
+			"content":  map[string]string{"text": content},
 			"position": map[string]string{"index_node_id": position},
 		})
 	if err != nil {

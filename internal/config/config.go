@@ -45,6 +45,7 @@ type Config struct {
 	MemoryEnabled             bool
 	MemoryConfirmationEnabled bool
 	MemoryDatabaseDSN         string
+	MemoryEmbeddingDimension  int
 	MemoryIncludeChatArchive  bool
 	MemoryChatVisibility      string
 	// Chat archive source (read-only long-term chat memory). Table/column
@@ -62,6 +63,8 @@ type Config struct {
 	MemoryMediaSenderColumn     string
 	MemoryMediaFilePathColumn   string
 	MemoryMediaMsgIDColumn      string
+	MemoryMediaStatusColumn     string
+	MemoryMediaRoot             string
 	MemoryMediaSendImage        bool
 
 	// Profile
@@ -85,8 +88,13 @@ type Config struct {
 	OpenClawCLI              string
 
 	// Local daily job
-	LocalDailyJobModule string
-	LocalDailyJobRunAt  string
+	LocalDailyJobModule      string
+	LocalDailyJobRunAt       string
+	LoveNoteDocToken         string
+	LoveNoteWikiToken        string
+	LoveNoteEnabled          bool
+	LoveNoteCheckInterval    time.Duration
+	LoveNoteMaxDailyComments int
 
 	// Health
 	HealthCheckCooldown time.Duration
@@ -111,7 +119,7 @@ func Load() *Config {
 		DeepSeekModel:   getEnv("DEEPSEEK_MODEL", "deepseek-chat"),
 
 		OllamaBaseURL:      getEnv("OLLAMA_BASE_URL", getEnv("MEMORY_OLLAMA_BASE_URL", "http://localhost:11434")),
-		OllamaModel:        getEnv("OLLAMA_MODEL", getEnv("MEMORY_OLLAMA_EMBED_MODEL", "nomic-embed-text")),
+		OllamaModel:        getEnv("OLLAMA_MODEL", getEnv("MEMORY_OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")),
 		OllamaVisionModel:  getEnv("OLLAMA_VISION_MODEL", "qwen2.5vl:3b"),
 		FeishuOCREnabled:   getEnvBool("FEISHU_OCR_ENABLED", true),
 		FeishuOCRCooldown:  getEnvDuration("FEISHU_OCR_COOLDOWN_SECONDS", 5*time.Minute),
@@ -124,6 +132,7 @@ func Load() *Config {
 		MemoryEnabled:             getEnvBool("MEMORY_ENABLED", true),
 		MemoryConfirmationEnabled: getEnvBool("MEMORY_CONFIRMATION_ENABLED", true),
 		MemoryDatabaseDSN:         normalizeJDBCMySQLDSN(getEnv("MEMORY_DATABASE_DSN", "")),
+		MemoryEmbeddingDimension:  getEnvInt("MEMORY_EMBEDDING_DIMENSION", 1024),
 		MemoryIncludeChatArchive:  getEnvBool("MEMORY_INCLUDE_CHAT_ARCHIVE", false),
 		MemoryChatVisibility:      getEnv("MEMORY_CHAT_ARCHIVE_VISIBILITY", "owner_only"),
 
@@ -139,6 +148,8 @@ func Load() *Config {
 		MemoryMediaSenderColumn:     getEnv("MEMORY_MEDIA_SENDER_COLUMN", "sender"),
 		MemoryMediaFilePathColumn:   getEnv("MEMORY_MEDIA_FILE_PATH_COLUMN", "file_path"),
 		MemoryMediaMsgIDColumn:      getEnv("MEMORY_MEDIA_MSGID_COLUMN", "msgid"),
+		MemoryMediaStatusColumn:     getEnv("MEMORY_MEDIA_STATUS_COLUMN", "path_status"),
+		MemoryMediaRoot:             getEnv("MEMORY_MEDIA_ROOT", ""),
 		MemoryMediaSendImage:        getEnvBool("MEMORY_MEDIA_SEND_IMAGE", true),
 
 		ProfileID: getEnv("PROFILE_ID", "default"),
@@ -158,8 +169,13 @@ func Load() *Config {
 		DeerFlowGatewayURL:       getEnv("DEERFLOW_GATEWAY_URL", ""),
 		OpenClawCLI:              getEnv("OPENCLAW_CLI", "openclaw"),
 
-		LocalDailyJobModule: getEnv("LOCAL_DAILY_JOB_MODULE", ""),
-		LocalDailyJobRunAt:  getEnv("LOCAL_DAILY_JOB_RUN_AT", "23:55"),
+		LocalDailyJobModule:      getEnv("LOCAL_DAILY_JOB_MODULE", ""),
+		LocalDailyJobRunAt:       getEnv("LOCAL_DAILY_JOB_RUN_AT", "23:55"),
+		LoveNoteDocToken:         getEnv("LOVE_NOTE_DOC_TOKEN", ""),
+		LoveNoteWikiToken:        getEnv("LOVE_NOTE_WIKI_TOKEN", ""),
+		LoveNoteEnabled:          getEnvBool("LOVE_NOTE_ENABLED", false),
+		LoveNoteCheckInterval:    getEnvDuration("LOVE_NOTE_CHECK_INTERVAL_SECONDS", 5*time.Minute),
+		LoveNoteMaxDailyComments: getEnvInt("LOVE_NOTE_MAX_DAILY_COMMENTS", 2),
 
 		HealthCheckCooldown: getEnvDuration("STATUS_NOTIFY_COOLDOWN_SECONDS", 5*time.Minute),
 

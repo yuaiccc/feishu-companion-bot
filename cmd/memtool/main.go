@@ -18,6 +18,7 @@ func main() {
 	search := flag.String("search", "", "搜索记忆关键词")
 	showVis := flag.Bool("show-vis", false, "显示可见性标签")
 	migrateJSON := flag.Bool("migrate-json", false, "将当前 profile 的 JSON 记忆迁移到数据库记忆库")
+	diagnose := flag.Bool("diagnose", false, "检查数据库版本、向量覆盖率和索引")
 	flag.Parse()
 
 	cfg := config.Load()
@@ -31,6 +32,11 @@ func main() {
 			log.Fatal("需要先配置 MEMORY_DATABASE_DSN 才能迁移到数据库")
 		}
 		migrateJSONMemories(cfg, store)
+		return
+	}
+
+	if *diagnose {
+		diagnoseDatabase(store)
 		return
 	}
 
@@ -49,7 +55,50 @@ func main() {
 		return
 	}
 
-	fmt.Println("用法: memtool -list | -search <关键词> | -clean [-dry-run=false] | -migrate-json")
+	fmt.Println("用法: memtool -list | -search <关键词> | -clean [-dry-run=false] | -migrate-json | -diagnose")
+}
+
+func diagnoseDatabase(store memory.MemoryStore) {
+	dbStore, ok := store.(*memory.DatabaseStore)
+	if !ok {
+		fmt.Println("当前使用本地 JSON 记忆库，没有 OceanBase/SeekDB 诊断信息")
+		return
+	}
+	diagnostics := dbStore.Diagnostics()
+	fmt.Printf("数据库版本: %s\n", diagnostics.ServerVersion)
+	if len(diagnostics.DiscoveredVectorTables) > 0 {
+		fmt.Printf("发现向量表: %s\n", strings.Join(diagnostics.DiscoveredVectorTables, ", "))
+	}
+	hasUnavailable := false
+	for _, table := range diagnostics.Tables {
+		if !table.Exists {
+			hasUnavailable = true
+			fmt.Printf("\n%s: 不可用（请检查表名或 embedding 列）\n", table.Table)
+			continue
+		}
+		coverage := 0.0
+		if table.Rows > 0 {
+			coverage = float64(table.EmbeddedRows) * 100 / float64(table.Rows)
+		}
+		fmt.Printf("\n%s: %d 行，%d 条 embedding（%.1f%%）\n", table.Table, table.Rows, table.EmbeddedRows, coverage)
+		if len(table.Indexes) == 0 {
+			fmt.Println("  索引: 未读取到")
+			continue
+		}
+		for _, index := range table.Indexes {
+			fmt.Printf("  - %s\n", index)
+		}
+	}
+	if hasUnavailable && len(diagnostics.AvailableTables) > 0 {
+		fmt.Printf("\n当前库中的表: %s\n", strings.Join(diagnostics.AvailableTables, ", "))
+	}
+	if diagnostics.MediaPaths.Checked > 0 {
+		paths := diagnostics.MediaPaths
+		fmt.Printf("\n媒体路径: 检查 %d，有效 %d，缺失 %d，未配置根目录 %d\n", paths.Checked, paths.Valid, paths.Missing, paths.Unresolved)
+		if paths.ExampleMissing != "" {
+			fmt.Printf("  缺失示例: %s\n", paths.ExampleMissing)
+		}
+	}
 }
 
 func openMemoryStore(cfg *config.Config) (memory.MemoryStore, error) {
@@ -75,7 +124,10 @@ func openMemoryStore(cfg *config.Config) (memory.MemoryStore, error) {
 			MediaSenderColumn:     cfg.MemoryMediaSenderColumn,
 			MediaFilePathColumn:   cfg.MemoryMediaFilePathColumn,
 			MediaMsgIDColumn:      cfg.MemoryMediaMsgIDColumn,
+			MediaStatusColumn:     cfg.MemoryMediaStatusColumn,
+			MediaRoot:             cfg.MemoryMediaRoot,
 			Embedder:              embedder,
+			EmbeddingDimension:    cfg.MemoryEmbeddingDimension,
 		})
 	}
 	return memory.NewStore(cfg.ProfileID, "memory_data")

@@ -116,6 +116,16 @@ func (c *Client) SetTargetOpenID(openID string) {
 	c.targetOpenID = openID
 }
 
+// HealthCheck performs a real authenticated Feishu request. When chatID is
+// set, it also verifies that the bot can access the configured chat.
+func (c *Client) HealthCheck(ctx context.Context, chatID string) error {
+	if strings.TrimSpace(chatID) == "" {
+		return c.refreshToken(ctx)
+	}
+	_, err := c.do(ctx, "GET", fmt.Sprintf("/im/v1/chats/%s", url.PathEscape(chatID)), nil)
+	return err
+}
+
 func (c *Client) refreshToken(ctx context.Context) error {
 	// Feishu tenant_access_token expires at 2h. Refresh a bit early (110m) so a
 	// request doesn't slip through in the expiry window with an about-to-expire

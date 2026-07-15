@@ -213,9 +213,9 @@ function App() {
   };
 
   const loadDefaultTemplate = () => {
-    const userName = wizardUser || '三哥';
+    const userName = wizardUser || '主人';
     const botName = wizardBot || '小弟';
-    const partnerName = wizardPartner || '舒舒';
+    const partnerName = wizardPartner || '伴侣';
     setWizardPrompt(
       `你是${botName}，${userName}的小助手。${partnerName ? `和${partnerName}关系亲密。` : ''}你不是主导人，语气轻松、幽默自然，偶尔皮一下但克制不腻。分清发言人身份。不要说多余的解释。`
     );
@@ -383,7 +383,7 @@ function App() {
                 <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>主人的称呼 (User Name) *</label>
                 <input
                   type="text"
-                  placeholder="如 三哥"
+                  placeholder="如 小明"
                   value={wizardUser}
                   onChange={e => setWizardUser(e.target.value)}
                   style={{ width: '100%' }}
@@ -407,7 +407,7 @@ function App() {
               <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>陪伴角色名字 (Partner Name - 可空)</label>
               <input
                 type="text"
-                placeholder="如 舒舒 (用于消解图谱与关系关联)"
+                placeholder="如 小红 (用于消解图谱与关系关联)"
                 value={wizardPartner}
                 onChange={e => setWizardPartner(e.target.value)}
                 style={{ width: '100%' }}
@@ -656,7 +656,7 @@ function App() {
           <form onSubmit={handleAddTriplet} className="triplet-form" style={{ gap: '10px', flexWrap: 'wrap' }}>
             <input
               type="text"
-              placeholder="主语 (如 三哥)"
+              placeholder="主语 (如 小明)"
               value={newSrc}
               onChange={e => setNewSrc(e.target.value)}
               style={{ flex: 1, minWidth: '120px' }}

@@ -4,8 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -29,7 +33,10 @@ type DatabaseOptions struct {
 	MediaSenderColumn     string
 	MediaFilePathColumn   string
 	MediaMsgIDColumn      string
+	MediaStatusColumn     string
+	MediaRoot             string
 	Embedder              Embedder
+	EmbeddingDimension    int
 }
 
 type DatabaseStore struct {
@@ -49,8 +56,43 @@ type DatabaseStore struct {
 	mediaSenderColumn     string
 	mediaFilePathColumn   string
 	mediaMsgIDColumn      string
+	mediaStatusColumn     string
+	mediaRoot             string
 	embedder              Embedder
+	embeddingDimension    int
 	embedQueue            chan string
+	queryVectorMu         sync.Mutex
+	queryVectorCache      map[string]cachedVectorLiteral
+}
+
+type cachedVectorLiteral struct {
+	value     string
+	expiresAt time.Time
+}
+
+type VectorDiagnostic struct {
+	Table        string
+	Exists       bool
+	Rows         int64
+	EmbeddedRows int64
+	Indexes      []string
+	Problem      string
+}
+
+type DatabaseDiagnostics struct {
+	ServerVersion          string
+	Tables                 []VectorDiagnostic
+	DiscoveredVectorTables []string
+	AvailableTables        []string
+	MediaPaths             MediaPathDiagnostic
+}
+
+type MediaPathDiagnostic struct {
+	Checked        int
+	Valid          int
+	Missing        int
+	Unresolved     int
+	ExampleMissing string
 }
 
 func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
@@ -65,6 +107,9 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 	}
 	if opts.MediaVisibility == "" {
 		opts.MediaVisibility = VisOwnerOnly
+	}
+	if opts.EmbeddingDimension <= 0 || opts.EmbeddingDimension > 16000 {
+		opts.EmbeddingDimension = 1024
 	}
 	if !isSafeIdentifier(opts.ChatArchiveTable) {
 		opts.ChatArchiveTable = "chat_message_chunks"
@@ -96,6 +141,9 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 	if !isSafeIdentifier(opts.MediaMsgIDColumn) {
 		opts.MediaMsgIDColumn = "msgid"
 	}
+	if !isSafeIdentifier(opts.MediaStatusColumn) {
+		opts.MediaStatusColumn = "path_status"
+	}
 	db, err := sql.Open("mysql", opts.DSN)
 	if err != nil {
 		return nil, err
@@ -124,15 +172,24 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 		mediaSenderColumn:     opts.MediaSenderColumn,
 		mediaFilePathColumn:   opts.MediaFilePathColumn,
 		mediaMsgIDColumn:      opts.MediaMsgIDColumn,
+		mediaStatusColumn:     opts.MediaStatusColumn,
+		mediaRoot:             opts.MediaRoot,
 		embedder:              opts.Embedder,
+		embeddingDimension:    opts.EmbeddingDimension,
 		embedQueue:            make(chan string, 500),
+		queryVectorCache:      make(map[string]cachedVectorLiteral),
 	}
 	if err := store.ensureSchema(); err != nil {
 		db.Close()
 		return nil, err
 	}
+	if store.includeMediaArchive {
+		store.detectMediaStatusColumn()
+		go store.auditMediaPaths(context.Background())
+	}
 	// Start async embedding background worker
 	go store.startEmbeddingWorker(context.Background())
+	store.enqueueMissingEmbeddings()
 	return store, nil
 }
 
@@ -173,7 +230,7 @@ CREATE TABLE IF NOT EXISTS bot_memories (
 		`ALTER TABLE bot_memories ADD COLUMN confidence double DEFAULT NULL`,
 		`ALTER TABLE bot_memories ADD COLUMN last_used_at bigint DEFAULT NULL`,
 		`ALTER TABLE bot_memories ADD COLUMN expires_at bigint DEFAULT NULL`,
-		`ALTER TABLE bot_memories ADD COLUMN embedding vector(1024) DEFAULT NULL`,
+		fmt.Sprintf(`ALTER TABLE bot_memories ADD COLUMN embedding vector(%d) DEFAULT NULL`, s.embeddingDimension),
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
@@ -199,6 +256,18 @@ CREATE TABLE IF NOT EXISTS image_hash_cache (
   caption longtext DEFAULT NULL,
   created_at bigint DEFAULT NULL,
   PRIMARY KEY (image_hash)
+) DEFAULT CHARSET=utf8mb4`)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+CREATE TABLE IF NOT EXISTS bot_media_path_status (
+  profile_id varchar(128) NOT NULL,
+  media_key varchar(255) NOT NULL,
+  file_path text NOT NULL,
+  status varchar(16) NOT NULL,
+  checked_at bigint NOT NULL,
+  PRIMARY KEY (profile_id, media_key)
 ) DEFAULT CHARSET=utf8mb4`)
 	if err != nil {
 		return err
@@ -310,16 +379,49 @@ func (s *DatabaseStore) startEmbeddingWorker(ctx context.Context) {
 				return
 			}
 			var content string
-			err := s.db.QueryRow(`SELECT content FROM bot_memories WHERE id=?`, id).Scan(&content)
+			err := s.db.QueryRow(`SELECT content FROM bot_memories WHERE profile_id=? AND id=?`, s.profileID, id).Scan(&content)
 			if err != nil || content == "" {
 				continue
 			}
 			if s.embedder != nil {
 				vec, err := s.embedder.Embed(content)
-				if err == nil && len(vec) > 0 {
-					_, _ = s.db.Exec(`UPDATE bot_memories SET embedding=? WHERE id=?`, vectorLiteral(vec), id)
+				if err != nil {
+					log.Printf("[向量索引] 生成记忆 embedding 失败 id=%s: %v", id, err)
+					continue
+				}
+				if len(vec) > 0 && len(vec) != s.embeddingDimension {
+					log.Printf("[向量索引] 跳过维度不匹配的 embedding id=%s got=%d want=%d", id, len(vec), s.embeddingDimension)
+					continue
+				}
+				if len(vec) > 0 {
+					if _, err := s.db.Exec(`UPDATE bot_memories SET embedding=? WHERE profile_id=? AND id=?`, vectorLiteral(vec), s.profileID, id); err != nil {
+						log.Printf("[向量索引] 写入记忆 embedding 失败 id=%s dim=%d: %v", id, len(vec), err)
+					}
 				}
 			}
+		}
+	}
+}
+
+func (s *DatabaseStore) enqueueMissingEmbeddings() {
+	if s.embedder == nil || s.embedQueue == nil {
+		return
+	}
+	rows, err := s.db.Query(`SELECT id FROM bot_memories WHERE profile_id=? AND embedding IS NULL ORDER BY created_at ASC LIMIT 500`, s.profileID)
+	if err != nil {
+		log.Printf("[向量索引] 查询待补记忆失败: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		select {
+		case s.embedQueue <- id:
+		default:
+			return
 		}
 	}
 }
@@ -370,16 +472,26 @@ func (s *DatabaseStore) Search(query string, audience string) []string {
 
 func (s *DatabaseStore) SearchRelevant(query string, audience string) []RetrievedMemory {
 	var results []RetrievedMemory
-	results = append(results, s.searchBotMemories(query, audience, 6)...)
-	if s.includeChatArchive && s.chatVisibleTo(audience) {
-		if vec, ok := s.queryVectorLiteral(query); ok {
-			results = append(results, wrapRetrievedTexts(s.searchChatArchiveHybrid(query, vec, 3), MemoryTypeArchiveChat, "chat_archive")...)
+	vecLiteral, _ := s.queryVectorLiteral(query)
+	chatEnabled := s.includeChatArchive && s.chatVisibleTo(audience)
+	mediaEnabled := s.includeMediaArchive && s.mediaVisibleTo(audience)
+	botLimit := 8
+	if chatEnabled {
+		botLimit -= 2
+	}
+	if mediaEnabled {
+		botLimit--
+	}
+	results = append(results, s.searchBotMemories(query, audience, botLimit, vecLiteral)...)
+	if chatEnabled {
+		if vecLiteral != "" {
+			results = append(results, wrapRetrievedTexts(s.searchChatArchiveHybrid(query, vecLiteral, 2), MemoryTypeArchiveChat, "chat_archive")...)
 		} else {
-			results = append(results, wrapRetrievedTexts(s.searchChatArchive(query, 3), MemoryTypeArchiveChat, "chat_archive")...)
+			results = append(results, wrapRetrievedTexts(s.searchChatArchive(query, 2), MemoryTypeArchiveChat, "chat_archive")...)
 		}
 	}
-	if s.includeMediaArchive && s.mediaVisibleTo(audience) {
-		for _, media := range s.SearchMedia(query, audience, 2) {
+	if mediaEnabled {
+		for _, media := range s.searchMedia(query, audience, 1, vecLiteral) {
 			results = append(results, RetrievedMemory{
 				Text:       media.ContextText(),
 				MemoryType: MemoryTypeArchiveMedia,
@@ -387,10 +499,10 @@ func (s *DatabaseStore) SearchRelevant(query string, audience string) []Retrieve
 			})
 		}
 	}
+	sortRetrievedMemories(results)
 	if len(results) > 8 {
 		results = results[:8]
 	}
-	sortRetrievedMemories(results)
 	s.touchRetrieved(results)
 	return results
 }
@@ -414,11 +526,42 @@ func (s *DatabaseStore) queryVectorLiteral(query string) (string, bool) {
 	if query == "" || s.embedder == nil {
 		return "", false
 	}
+	now := time.Now()
+	s.queryVectorMu.Lock()
+	if cached, ok := s.queryVectorCache[query]; ok && now.Before(cached.expiresAt) {
+		s.queryVectorMu.Unlock()
+		return cached.value, true
+	}
+	s.queryVectorMu.Unlock()
 	vec, err := s.embedder.Embed(query)
 	if err != nil || len(vec) == 0 {
+		if err != nil {
+			log.Printf("[向量检索] 查询 embedding 失败: %v", err)
+		}
 		return "", false
 	}
-	return vectorLiteral(vec), true
+	if len(vec) != s.embeddingDimension {
+		log.Printf("[向量检索] 查询 embedding 维度不匹配 got=%d want=%d", len(vec), s.embeddingDimension)
+		return "", false
+	}
+	literal := vectorLiteral(vec)
+	s.queryVectorMu.Lock()
+	if len(s.queryVectorCache) >= 128 {
+		for key, cached := range s.queryVectorCache {
+			if now.After(cached.expiresAt) {
+				delete(s.queryVectorCache, key)
+			}
+		}
+		if len(s.queryVectorCache) >= 128 {
+			for key := range s.queryVectorCache {
+				delete(s.queryVectorCache, key)
+				break
+			}
+		}
+	}
+	s.queryVectorCache[query] = cachedVectorLiteral{value: literal, expiresAt: now.Add(15 * time.Minute)}
+	s.queryVectorMu.Unlock()
+	return literal, true
 }
 
 func vectorLiteral(vec []float32) string {
@@ -444,18 +587,10 @@ type scoredMemoryResult struct {
 	score        float64
 }
 
-func (s *DatabaseStore) searchBotMemories(query string, audience string, limit int) []RetrievedMemory {
+func (s *DatabaseStore) searchBotMemories(query string, audience string, limit int, vecLiteral string) []RetrievedMemory {
 	visibility := allowedVisibility(audience)
 	if len(visibility) == 0 {
 		return nil
-	}
-
-	// Calculate query embedding vector
-	var vecLiteral string
-	if s.embedder != nil && strings.TrimSpace(query) != "" {
-		if vec, err := s.embedder.Embed(query); err == nil && len(vec) > 0 {
-			vecLiteral = vectorLiteral(vec)
-		}
 	}
 
 	// If no embedding is available, fallback to standard text search
@@ -472,7 +607,7 @@ func (s *DatabaseStore) searchBotMemories(query string, audience string, limit i
 	results := make(map[string]*scoredMemoryResult)
 
 	// Way 1: Vector similarity path
-	args := []interface{}{vecLiteral, s.profileID}
+	args := []interface{}{s.profileID}
 	placeholders := make([]string, 0, len(visibility))
 	for _, v := range visibility {
 		placeholders = append(placeholders, "?")
@@ -506,10 +641,12 @@ LIMIT ?`, where), append([]interface{}{vecLiteral, query}, args...)...)
 				results[m.ID] = &scoredMemoryResult{result: m, semanticRank: rank, vectorScore: 1 - distance, ftScore: ftScore}
 			}
 		}
+	} else {
+		log.Printf("[向量检索] bot_memories 语义召回失败，继续走关键词召回: %v", err)
 	}
 
 	// Way 2: Keyword Fulltext path
-	args2 := []interface{}{vecLiteral, s.profileID}
+	args2 := []interface{}{s.profileID}
 	placeholders2 := make([]string, 0, len(visibility))
 	for _, v := range visibility {
 		placeholders2 = append(placeholders2, "?")
@@ -549,27 +686,17 @@ LIMIT ?`, where2), append([]interface{}{vecLiteral, query}, args2...)...)
 				item.ftScore = ftScore
 			}
 		}
+	} else {
+		log.Printf("[向量检索] bot_memories 关键词召回失败: %v", err)
 	}
 
-	// Mix scoring and RRF reranking
+	// Weighted reciprocal-rank fusion is stable across vector and full-text
+	// score scales. The rank constant 60 matches OceanBase's RRF examples.
 	ranked := make([]*scoredMemoryResult, 0, len(results))
 	for _, item := range results {
-		keywordScore := 0.0
-		if item.ftScore > 0 {
-			keywordScore = item.ftScore / (item.ftScore + 10)
-		}
-		rankBonus := 0.0
-		if item.semanticRank > 0 {
-			rankBonus += 1.0 / float64(60+item.semanticRank)
-		}
-		if item.keywordRank > 0 {
-			rankBonus += 1.0 / float64(60+item.keywordRank)
-		}
-		item.score = 0.65*maxFloat(0, item.vectorScore) + 0.35*keywordScore + 6*rankBonus
-		// Bonus for manually set importance
-		if item.result.Importance > 0 {
-			item.score += float64(item.result.Importance) * 0.05
-		}
+		item.score = weightedRRF(item.semanticRank, item.keywordRank, 0.65, 0.35)
+		item.score += float64(item.result.Importance) * 0.00005
+		item.score += item.result.Confidence * 0.0001
 		ranked = append(ranked, item)
 	}
 
@@ -782,18 +909,7 @@ LIMIT ?`,
 
 	ranked := make([]*scoredTextResult, 0, len(results))
 	for _, item := range results {
-		keywordScore := 0.0
-		if item.ftScore > 0 {
-			keywordScore = item.ftScore / (item.ftScore + 10)
-		}
-		rankBonus := 0.0
-		if item.semanticRank > 0 {
-			rankBonus += 1.0 / float64(60+item.semanticRank)
-		}
-		if item.keywordRank > 0 {
-			rankBonus += 1.0 / float64(60+item.keywordRank)
-		}
-		item.score = 0.65*maxFloat(0, item.vectorScore) + 0.35*keywordScore + 6*rankBonus
+		item.score = weightedRRF(item.semanticRank, item.keywordRank, 0.65, 0.35)
 		ranked = append(ranked, item)
 	}
 	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
@@ -822,6 +938,11 @@ LIMIT ?`,
 }
 
 func (s *DatabaseStore) SearchMedia(query string, audience string, limit int) []MediaResult {
+	vecLiteral, _ := s.queryVectorLiteral(cleanMediaQuery(query))
+	return s.searchMedia(query, audience, limit, vecLiteral)
+}
+
+func (s *DatabaseStore) searchMedia(query string, audience string, limit int, vecLiteral string) []MediaResult {
 	if !s.includeMediaArchive || !s.mediaVisibleTo(audience) {
 		return nil
 	}
@@ -833,11 +954,11 @@ func (s *DatabaseStore) SearchMedia(query string, audience string, limit int) []
 	}
 	term := cleanMediaQuery(query)
 	if term == "" {
-		return s.recentMedia(limit)
+		return s.filterMediaPaths(s.recentMedia(limit))
 	}
 	var results []MediaResult
-	if vec, ok := s.queryVectorLiteral(term); ok {
-		results = s.searchMediaHybrid(term, vec, limit)
+	if vecLiteral != "" {
+		results = s.searchMediaHybrid(term, vecLiteral, limit)
 	}
 	if len(results) == 0 {
 		results = s.searchMediaFullText(term, limit)
@@ -848,7 +969,114 @@ func (s *DatabaseStore) SearchMedia(query string, audience string, limit int) []
 	if len(results) == 0 && isVagueMediaQuery(query) {
 		results = s.recentMedia(limit)
 	}
-	return results
+	return s.filterMediaPaths(results)
+}
+
+// detectMediaStatusColumn enables durable invalid-path marking when the
+// archive table exposes the optional status column. Older archives continue
+// to work with in-process filtering.
+func (s *DatabaseStore) detectMediaStatusColumn() {
+	var name string
+	err := s.db.QueryRow(fmt.Sprintf("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1"), s.mediaArchiveTable, s.mediaStatusColumn).Scan(&name)
+	if err != nil {
+		s.mediaStatusColumn = ""
+	}
+}
+
+func (s *DatabaseStore) filterMediaPaths(results []MediaResult) []MediaResult {
+	valid := make([]MediaResult, 0, len(results))
+	for _, result := range results {
+		path := strings.TrimSpace(result.FilePath)
+		if path == "" {
+			continue
+		}
+		if !filepath.IsAbs(path) && s.mediaRoot != "" {
+			path = filepath.Join(s.mediaRoot, path)
+			result.FilePath = path
+		}
+		key := mediaResultKey(result)
+		var recordedPath, recordedStatus string
+		_ = s.db.QueryRow(`SELECT file_path, status FROM bot_media_path_status WHERE profile_id=? AND media_key=?`, s.profileID, key).Scan(&recordedPath, &recordedStatus)
+		if _, err := os.Stat(path); err != nil {
+			s.saveMediaPathStatus(key, path, "invalid")
+			s.markMediaPathInvalid(result)
+			continue
+		}
+		if recordedStatus == "invalid" && recordedPath != path {
+			logPathRepair(s.profileID, key, recordedPath, path)
+		}
+		s.saveMediaPathStatus(key, path, "valid")
+		if s.mediaStatusColumn != "" {
+			_, _ = s.db.Exec(fmt.Sprintf("UPDATE %s SET %s=? WHERE %s=?", s.mediaArchiveTable, s.mediaStatusColumn, s.mediaMsgIDColumn), "valid", result.MsgID)
+		}
+		valid = append(valid, result)
+	}
+	return valid
+}
+
+func (s *DatabaseStore) saveMediaPathStatus(key, path, status string) {
+	if key == "" || path == "" {
+		return
+	}
+	_, _ = s.db.Exec(`
+INSERT INTO bot_media_path_status (profile_id, media_key, file_path, status, checked_at)
+VALUES (?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE file_path=VALUES(file_path), status=VALUES(status), checked_at=VALUES(checked_at)`,
+		s.profileID, key, path, status, time.Now().Unix())
+}
+
+func logPathRepair(profileID, key, oldPath, newPath string) {
+	if oldPath != "" && newPath != "" && oldPath != newPath {
+		log.Printf("[媒体归档] 路径已恢复 profile=%s key=%s old=%s new=%s", profileID, key, oldPath, newPath)
+	}
+}
+
+func (s *DatabaseStore) markMediaPathInvalid(result MediaResult) {
+	if s.mediaStatusColumn == "" || result.MsgID == "" {
+		return
+	}
+	_, _ = s.db.Exec(fmt.Sprintf("UPDATE %s SET %s=? WHERE %s=?", s.mediaArchiveTable, s.mediaStatusColumn, s.mediaMsgIDColumn), "invalid", result.MsgID)
+}
+
+func (s *DatabaseStore) auditMediaPaths(ctx context.Context) MediaPathDiagnostic {
+	var result MediaPathDiagnostic
+	if !s.includeMediaArchive {
+		return result
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("SELECT COALESCE(%s, ''), COALESCE(%s, '') FROM %s WHERE COALESCE(%s, '')<>''", s.mediaFilePathColumn, s.mediaMsgIDColumn, s.mediaArchiveTable, s.mediaFilePathColumn))
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path, msgID string
+		if rows.Scan(&path, &msgID) != nil {
+			continue
+		}
+		result.Checked++
+		resolved := strings.TrimSpace(path)
+		if !filepath.IsAbs(resolved) {
+			if s.mediaRoot == "" {
+				result.Unresolved++
+				continue
+			}
+			resolved = filepath.Join(s.mediaRoot, resolved)
+		}
+		media := MediaResult{MsgID: msgID, FilePath: resolved}
+		key := mediaResultKey(media)
+		if _, err := os.Stat(resolved); err != nil {
+			result.Missing++
+			if result.ExampleMissing == "" {
+				result.ExampleMissing = resolved
+			}
+			s.saveMediaPathStatus(key, resolved, "invalid")
+			s.markMediaPathInvalid(media)
+			continue
+		}
+		result.Valid++
+		s.saveMediaPathStatus(key, resolved, "valid")
+	}
+	return result
 }
 
 type scoredMediaResult struct {
@@ -940,18 +1168,7 @@ LIMIT ?`,
 
 	ranked := make([]*scoredMediaResult, 0, len(results))
 	for _, item := range results {
-		keywordScore := 0.0
-		if item.ftScore > 0 {
-			keywordScore = item.ftScore / (item.ftScore + 10)
-		}
-		rankBonus := 0.0
-		if item.semanticRank > 0 {
-			rankBonus += 1.0 / float64(60+item.semanticRank)
-		}
-		if item.keywordRank > 0 {
-			rankBonus += 1.0 / float64(60+item.keywordRank)
-		}
-		item.score = 0.70*maxFloat(0, item.vectorScore) + 0.30*keywordScore + 6*rankBonus
+		item.score = weightedRRF(item.semanticRank, item.keywordRank, 0.70, 0.30)
 		ranked = append(ranked, item)
 	}
 	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
@@ -1093,11 +1310,16 @@ func cleanMediaQuery(query string) string {
 	return q
 }
 
-func maxFloat(a, b float64) float64 {
-	if a > b {
-		return a
+func weightedRRF(semanticRank, keywordRank int, semanticWeight, keywordWeight float64) float64 {
+	const rankConstant = 60.0
+	var score float64
+	if semanticRank > 0 {
+		score += semanticWeight / (rankConstant + float64(semanticRank))
 	}
-	return b
+	if keywordRank > 0 {
+		score += keywordWeight / (rankConstant + float64(keywordRank))
+	}
+	return score
 }
 
 func isVagueMediaQuery(query string) bool {
@@ -1169,6 +1391,80 @@ func (s *DatabaseStore) Close() error {
 
 func (s *DatabaseStore) GetDBConn() *sql.DB {
 	return s.db
+}
+
+// Diagnostics returns schema-level vector health without exposing memory or
+// archive contents. It is used by memtool and the health workflow.
+func (s *DatabaseStore) Diagnostics() DatabaseDiagnostics {
+	var result DatabaseDiagnostics
+	_ = s.db.QueryRow("SELECT VERSION()").Scan(&result.ServerVersion)
+	vectorRows, err := s.db.Query(`
+SELECT DISTINCT TABLE_NAME
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA=DATABASE() AND LOWER(COLUMN_TYPE) LIKE 'vector%'
+ORDER BY TABLE_NAME`)
+	if err == nil {
+		for vectorRows.Next() {
+			var table string
+			if vectorRows.Scan(&table) == nil {
+				result.DiscoveredVectorTables = append(result.DiscoveredVectorTables, table)
+			}
+		}
+		vectorRows.Close()
+	}
+	tableRows, err := s.db.Query(`
+SELECT TABLE_NAME
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE'
+ORDER BY TABLE_NAME`)
+	if err == nil {
+		for tableRows.Next() {
+			var table string
+			if tableRows.Scan(&table) == nil {
+				result.AvailableTables = append(result.AvailableTables, table)
+			}
+		}
+		tableRows.Close()
+	}
+	tables := []string{"bot_memories"}
+	if s.includeChatArchive {
+		tables = append(tables, s.chatArchiveTable)
+	}
+	if s.includeMediaArchive {
+		tables = append(tables, s.mediaArchiveTable)
+	}
+	seen := make(map[string]bool)
+	for _, table := range tables {
+		if seen[table] || !isSafeIdentifier(table) {
+			continue
+		}
+		seen[table] = true
+		item := VectorDiagnostic{Table: table}
+		if err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*), COALESCE(SUM(embedding IS NOT NULL), 0) FROM %s", table)).Scan(&item.Rows, &item.EmbeddedRows); err != nil {
+			item.Problem = err.Error()
+			result.Tables = append(result.Tables, item)
+			continue
+		}
+		item.Exists = true
+		rows, err := s.db.Query(`
+SELECT INDEX_NAME, COALESCE(INDEX_TYPE, ''), GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)
+FROM INFORMATION_SCHEMA.STATISTICS
+WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?
+GROUP BY INDEX_NAME, INDEX_TYPE
+ORDER BY INDEX_NAME`, table)
+		if err == nil {
+			for rows.Next() {
+				var name, indexType, columns string
+				if rows.Scan(&name, &indexType, &columns) == nil {
+					item.Indexes = append(item.Indexes, fmt.Sprintf("%s (%s: %s)", name, indexType, columns))
+				}
+			}
+			rows.Close()
+		}
+		result.Tables = append(result.Tables, item)
+	}
+	result.MediaPaths = s.auditMediaPaths(context.Background())
+	return result
 }
 
 func (s *DatabaseStore) GetProfileID() string {

@@ -30,6 +30,7 @@ import (
 	"feishu-companion-bot/internal/latency"
 	"feishu-companion-bot/internal/llm"
 	"feishu-companion-bot/internal/localapps"
+	"feishu-companion-bot/internal/lovenote"
 	"feishu-companion-bot/internal/memory"
 	"feishu-companion-bot/internal/profile"
 	"feishu-companion-bot/internal/safety"
@@ -379,7 +380,7 @@ func planReply(ctx stdctx.Context, llmClient *llm.Client, msg feishu.Message, in
 - 如果用户表达低落/生气/累，comfort，并查记忆。
 - 积极开启记忆检索（use_memory 设为 true）。只要用户的发言可能关联到他的偏好、习惯、承诺、过去的约定、或者可能有相关背景事实，就应当开启记忆检索，以便机器人能表现出极强的上下文连贯记忆。
 - 如果问题涉及图片、截图，再 use_media。
-- **核心实体识别 (detected_entities)**：分析最新用户消息和上下文，提取出其中所指的核心人名、外号、别名、宠物名、专属代名词（例如：把错别字“舒叔”、“叔叔”纠正并映射为标准实体名“舒舒”；把代词“她”、“我妈”结合前文还原为标准名“舒舒”或“阿姨”）。如果有提取出来的实体，放进 detected_entities 列表中；如果没有提取出任何特定实体，返回空数组 []。
+- **核心实体识别 (detected_entities)**：分析最新用户消息和上下文，提取其中所指的人名、外号、别名、宠物名和专属代名词（例如：结合成员资料纠正昵称错别字；把“她”、“我妈”等代词结合前文还原为标准实体名）。如果有提取出来的实体，放进 detected_entities 列表中；如果没有提取出任何特定实体，返回空数组 []。
 - max_tokens 通常推荐在 500 到 600 之间，以保证回答内容丰满有深度。
 
 会话状态：
@@ -744,7 +745,7 @@ func shouldRememberViaLLM(ctx stdctx.Context, content string, fromOwner bool, pr
 
 判断标准：
 - 记住稳定偏好、重要事实、长期习惯、关系边界、称呼方式、明确承诺、重要计划。
-- 如果消息中包含“图片理解：视觉描述/OCR文字”，说明发送人发了一张照片。请结合视觉描述或文字提炼出生活相关的重要事实、动作、喜好或场景状态（例如：‘三哥和朋友去吃了烤肉’，‘舒舒发了自拍，表示今天很开心’）。对于这类视觉相关的具体动作/事件记忆，memory_type 优先归类为 episodic；如果是图片反映出的长期稳定喜好，则归类为 semantic。
+- 如果消息中包含“图片理解：视觉描述/OCR文字”，说明发送人发了一张照片。请结合视觉描述或文字提炼出生活相关的重要事实、动作、喜好或场景状态（例如：‘用户和朋友去吃了烤肉’，‘伴侣发了自拍，表示今天很开心’）。对于这类视觉相关的具体动作/事件记忆，memory_type 优先归类为 episodic；如果是图片反映出的长期稳定喜好，则归类为 semantic。
 - memory_type 含义：semantic=稳定事实/偏好保存，relational=相处方式/边界/称呼/安慰方式，episodic=值得长期留痕的重要事件。
 - 不记普通寒暄、即时情绪、重复废话、临时闲聊、表情语气、已经过时的细枝末节。
 - 不要编造消息里没有的信息。
@@ -1152,11 +1153,13 @@ func buildChatMessages(prof *profile.Profile, mem memory.MemoryStore, currentCon
 
 // ---- Health card ----
 
-func buildHealthCard(cfg *config.Config, llmClient *llm.Client, mem memory.MemoryStore) map[string]interface{} {
+func buildHealthCard(cfg *config.Config, fs *feishu.Client, llmClient *llm.Client, mem memory.MemoryStore) map[string]interface{} {
 	h := health.NewChecker(
 		func(ctx stdctx.Context) error {
-			// Feishu health: try token refresh
-			return nil
+			if fs == nil {
+				return fmt.Errorf("飞书客户端未初始化")
+			}
+			return fs.HealthCheck(ctx, cfg.FeishuChatID)
 		},
 		func(ctx stdctx.Context) error {
 			if llmClient == nil {
@@ -1367,7 +1370,6 @@ func recentMediaSearch(chatID string) bool {
 	t, ok := lastMediaAt[chatID]
 	return ok && time.Since(t) <= lastMediaTTL
 }
-
 
 // interpretMediaRequest uses the LLM to understand, in conversation context,
 // what images the user wants and whether they want all of them — resolving
@@ -1645,7 +1647,10 @@ func runBotMode() {
 				MediaSenderColumn:     cfg.MemoryMediaSenderColumn,
 				MediaFilePathColumn:   cfg.MemoryMediaFilePathColumn,
 				MediaMsgIDColumn:      cfg.MemoryMediaMsgIDColumn,
+				MediaStatusColumn:     cfg.MemoryMediaStatusColumn,
+				MediaRoot:             cfg.MemoryMediaRoot,
 				Embedder:              embedder,
+				EmbeddingDimension:    cfg.MemoryEmbeddingDimension,
 			})
 			if err != nil {
 				log.Printf("初始化数据库记忆库失败: %v", err)
@@ -1706,6 +1711,31 @@ func runBotMode() {
 
 	// Start GitHub polling
 	go githubPollLoop(ctx, cfg, ghClient, fsClient, llmClient, ghState, prof)
+	if cfg.LoveNoteEnabled && ghState != nil {
+		loveNotes := lovenote.New(cfg, llmClient, ghState, prof)
+		interval := cfg.LoveNoteCheckInterval
+		if interval <= 0 {
+			interval = 5 * time.Minute
+		}
+		go func() {
+			if err := loveNotes.Run(ctx); err != nil {
+				log.Printf("[恋爱笔记] 启动检查跳过: %v", err)
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			log.Println("[恋爱笔记] 增量评论任务已启动")
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := loveNotes.Run(ctx); err != nil {
+						log.Printf("[恋爱笔记] 本轮跳过: %v", err)
+					}
+				}
+			}
+		}()
+	}
 
 	// Start proactive topic loop
 	if cfg.ProactiveTopicEnabled {
@@ -1753,7 +1783,7 @@ func runBotMode() {
 				}
 
 				backoff *= 2
-				if backoff > 60 * time.Second {
+				if backoff > 60*time.Second {
 					backoff = 60 * time.Second
 				}
 			} else {
@@ -2079,7 +2109,7 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 		handleGitHubIntent(ctx, cfg, fs, msg, thinkReactID, llmClient, prof)
 		return
 	case IntentHealth:
-		handleHealthIntent(ctx, cfg, fs, msg, thinkReactID)
+		handleHealthIntent(ctx, cfg, fs, llmClient, mem, msg, thinkReactID)
 		return
 	case IntentMemoryAudit:
 		handleMemoryAuditIntent(ctx, cfg, prof, mem, fs, msg, thinkReactID)
@@ -2287,8 +2317,8 @@ func handleGitHubIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 	convoState.MarkBotReply(msg.ChatID)
 }
 
-func handleHealthIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message, reactID string) {
-	card := buildHealthCard(cfg, nil, nil)
+func handleHealthIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, llmClient *llm.Client, mem memory.MemoryStore, msg feishu.Message, reactID string) {
+	card := buildHealthCard(cfg, fs, llmClient, mem)
 	if msg.MessageID != "" {
 		fs.ReplyCard(ctx, card, msg.MessageID)
 	} else {
@@ -2579,24 +2609,24 @@ func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore mem
 		for idx, turn := range recentTurns {
 			contextBuilder.WriteString(fmt.Sprintf("[轮次 %d] %s: %s\n", idx+1, turn.Sender, turn.Content))
 		}
-		contextBuilder.WriteString("====================\n\n请结合上述对话背景事实，仔细推理出这句记忆中所指向的标准实体名（例如，通过前文对话推断出“他”其实是“三哥”；“她”其实是“舒舒”）。\n")
+		contextBuilder.WriteString("====================\n\n请结合上述对话背景事实，仔细推理出这句记忆中代词所指向的标准实体名。\n")
 	}
 
 	prompt := fmt.Sprintf(`你是一个机器人知识图谱提炼专家。请只返回 JSON。
 给定一句话（这是一条已经提炼过的机器人长期记忆），请提取出其中的实体（人、地、物、概念等）以及它们之间的关系三元组。
 %s
 【强制关系 Schema 限制】：为了使图谱关系能演进并自我纠偏，你提炼的关系边名称（relation 字段）必须且只能在以下预定义词中选择（直接输出中文名词）：
-- 别名 : 指代名字别名、大名、网名、昵称（如“秋酿是三哥的别名” -> ("秋酿", "别名", "三哥")）
-- 喜欢 : 指代喜欢的事物、喜好、喜欢的零食/食物等（如“三哥喜欢吃火锅” -> ("三哥", "喜欢", "火锅")。如果提到“三哥戒了火锅/坚决不吃火锅”，仍然要提炼为关系 ("三哥", "喜欢", "火锅")，后面的纠偏程序会自动将其处理删除）
-- 所在地 : 指代居住地、定居城市、出差所在地等（如“三哥搬去深圳定居了/定居在北京” -> ("三哥", "所在地", "深圳") / ("三哥", "所在地", "北京")）
-- 同事 : 指代同事关系（如“大叔是三哥的同事” -> ("大叔", "同事", "三哥")）
+- 别名 : 指代大名、网名或昵称（如“小明是阿山的别名” -> ("小明", "别名", "阿山")）
+- 喜欢 : 指代喜欢的事物、零食或食物等（如“阿山喜欢吃火锅” -> ("阿山", "喜欢", "火锅")。如果提到“阿山戒了火锅”，仍提炼原关系，后续纠偏程序会处理删除）
+- 所在地 : 指代居住地、定居城市或出差所在地等（如“阿山搬去深圳定居了” -> ("阿山", "所在地", "深圳")）
+- 同事 : 指代同事关系（如“小林是阿山的同事” -> ("小林", "同事", "阿山")）
 - 朋友 : 指代朋友关系
 - 妈妈 / 爸爸 : 指代父母关系
 
 你的 JSON 格式必须是：
 {
   "entities": [
-    {"name": "实体名称，如 舒舒", "category": "person|alias|item|place|concept"}
+    {"name": "实体名称，如 阿山", "category": "person|alias|item|place|concept"}
   ],
   "relations": [
     {"src_name": "实体A名称", "relation": "必须在上述强 Schema 限定词中选择", "dst_name": "实体B名称"}
@@ -3019,4 +3049,3 @@ ORDER BY r.created_at DESC`)
 		log.Printf("[Web控制台] 服务器异常关闭: %v", err)
 	}
 }
-

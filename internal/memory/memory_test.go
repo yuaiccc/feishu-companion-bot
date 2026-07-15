@@ -6,6 +6,13 @@ import (
 	"testing"
 )
 
+type countingEmbedder struct{ calls int }
+
+func (e *countingEmbedder) Embed(text string) ([]float32, error) {
+	e.calls++
+	return []float32{0.1, 0.2, 0.3}, nil
+}
+
 func TestStoreVisibility(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore("test-vis", tmpDir)
@@ -79,5 +86,30 @@ func TestHashContent(t *testing.T) {
 	}
 	if h1 == h3 {
 		t.Errorf("different content should produce different hash")
+	}
+}
+
+func TestQueryVectorLiteralCachesRepeatedQuery(t *testing.T) {
+	embedder := &countingEmbedder{}
+	store := &DatabaseStore{embedder: embedder, embeddingDimension: 3, queryVectorCache: make(map[string]cachedVectorLiteral)}
+	first, ok := store.queryVectorLiteral("同一个问题")
+	if !ok || first == "" {
+		t.Fatal("first query should return a vector literal")
+	}
+	second, ok := store.queryVectorLiteral("同一个问题")
+	if !ok || second != first {
+		t.Fatal("cached query should return the same vector literal")
+	}
+	if embedder.calls != 1 {
+		t.Fatalf("embedder calls = %d, want 1", embedder.calls)
+	}
+}
+
+func TestWeightedRRFRewardsBothRetrievers(t *testing.T) {
+	both := weightedRRF(1, 1, 0.65, 0.35)
+	semanticOnly := weightedRRF(1, 0, 0.65, 0.35)
+	keywordOnly := weightedRRF(0, 1, 0.65, 0.35)
+	if both <= semanticOnly || both <= keywordOnly {
+		t.Fatalf("both=%f semantic=%f keyword=%f", both, semanticOnly, keywordOnly)
 	}
 }
