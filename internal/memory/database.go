@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -157,14 +158,14 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(30 * time.Minute)
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	var vault *mediavault.Vault
 	if strings.TrimSpace(opts.MediaVault) != "" {
 		vault, err = mediavault.NewVault(opts.MediaVault)
 		if err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("initialize media vault: %w", err)
 		}
 	}
@@ -194,7 +195,7 @@ func NewDatabaseStore(opts DatabaseOptions) (*DatabaseStore, error) {
 		queryVectorCache:      make(map[string]cachedVectorLiteral),
 	}
 	if err := store.ensureSchema(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if store.includeMediaArchive {
@@ -456,7 +457,7 @@ func (s *DatabaseStore) enqueueMissingEmbeddings() {
 		log.Printf("[向量索引] 查询待补记忆失败: %v", err)
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
@@ -486,7 +487,7 @@ ORDER BY created_at DESC`, s.profileID)
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []Memory
 	for rows.Next() {
@@ -640,7 +641,7 @@ func vectorLiteral(vec []float32) string {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString(fmt.Sprintf("%.8g", v))
+		b.WriteString(strconv.FormatFloat(float64(v), 'g', 8, 32))
 	}
 	b.WriteByte(']')
 	return b.String()
@@ -694,7 +695,7 @@ WHERE %s
 ORDER BY vector_distance ASC
 LIMIT ?`, where), append([]interface{}{vecLiteral, query}, args...)...)
 	if err == nil {
-		defer semanticRows.Close()
+		defer func() { _ = semanticRows.Close() }()
 		rank := 0
 		for semanticRows.Next() {
 			rank++
@@ -733,7 +734,7 @@ WHERE %s AND (MATCH(content) AGAINST (? IN NATURAL LANGUAGE MODE) OR content LIK
 ORDER BY ft_score DESC
 LIMIT ?`, where2), append([]interface{}{vecLiteral, query}, args2...)...)
 	if err == nil {
-		defer keywordRows.Close()
+		defer func() { _ = keywordRows.Close() }()
 		rank := 0
 		for keywordRows.Next() {
 			rank++
@@ -804,7 +805,7 @@ LIMIT ?`, args...)
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []RetrievedMemory
 	for rows.Next() {
@@ -872,7 +873,7 @@ LIMIT ?`,
 			return nil
 		}
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []string
 	for rows.Next() {
@@ -921,7 +922,7 @@ LIMIT ?`,
 		s.chatArchiveTable,
 	), vecLiteral, query, pool)
 	if err == nil {
-		defer semanticRows.Close()
+		defer func() { _ = semanticRows.Close() }()
 		rank := 0
 		for semanticRows.Next() {
 			rank++
@@ -954,7 +955,7 @@ LIMIT ?`,
 		s.chatArchiveTextColumn,
 	), vecLiteral, query, query, pool)
 	if err == nil {
-		defer keywordRows.Close()
+		defer func() { _ = keywordRows.Close() }()
 		rank := 0
 		for keywordRows.Next() {
 			rank++
@@ -1068,7 +1069,7 @@ func mergeMediaResults(primary, secondary []MediaResult, limit int) []MediaResul
 // to work with in-process filtering.
 func (s *DatabaseStore) detectMediaStatusColumn() {
 	var name string
-	err := s.db.QueryRow(fmt.Sprintf("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1"), s.mediaArchiveTable, s.mediaStatusColumn).Scan(&name)
+	err := s.db.QueryRow("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1", s.mediaArchiveTable, s.mediaStatusColumn).Scan(&name)
 	if err != nil {
 		s.mediaStatusColumn = ""
 	}
@@ -1138,7 +1139,7 @@ func (s *DatabaseStore) auditMediaPaths(ctx context.Context) MediaPathDiagnostic
 	if err != nil {
 		return result
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var path, msgID string
 		if rows.Scan(&path, &msgID) != nil {
@@ -1207,7 +1208,7 @@ LIMIT ?`,
 		s.mediaArchiveTable,
 	), vecLiteral, query, pool)
 	if err == nil {
-		defer semanticRows.Close()
+		defer func() { _ = semanticRows.Close() }()
 		rank := 0
 		for semanticRows.Next() {
 			rank++
@@ -1238,7 +1239,7 @@ LIMIT ?`,
 		s.mediaOCRColumn, s.mediaCaptionColumn,
 	), vecLiteral, query, query, pool)
 	if err == nil {
-		defer keywordRows.Close()
+		defer func() { _ = keywordRows.Close() }()
 		rank := 0
 		for keywordRows.Next() {
 			rank++
@@ -1297,7 +1298,7 @@ LIMIT ?`,
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanMediaRows(rows)
 }
 
@@ -1330,7 +1331,7 @@ LIMIT ?`,
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanMediaRows(rows)
 }
 
@@ -1349,7 +1350,7 @@ LIMIT ?`,
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanMediaRows(rows)
 }
 
@@ -1504,7 +1505,7 @@ ORDER BY TABLE_NAME`)
 				result.DiscoveredVectorTables = append(result.DiscoveredVectorTables, table)
 			}
 		}
-		vectorRows.Close()
+		_ = vectorRows.Close()
 	}
 	tableRows, err := s.db.Query(`
 SELECT TABLE_NAME
@@ -1518,7 +1519,7 @@ ORDER BY TABLE_NAME`)
 				result.AvailableTables = append(result.AvailableTables, table)
 			}
 		}
-		tableRows.Close()
+		_ = tableRows.Close()
 	}
 	tables := []string{"bot_memories", "bot_media_assets"}
 	if s.includeChatArchive {
@@ -1553,7 +1554,7 @@ ORDER BY INDEX_NAME`, table)
 					item.Indexes = append(item.Indexes, fmt.Sprintf("%s (%s: %s)", name, indexType, columns))
 				}
 			}
-			rows.Close()
+			_ = rows.Close()
 		}
 		result.Tables = append(result.Tables, item)
 	}
@@ -1629,7 +1630,7 @@ ORDER BY created_at ASC`, s.profileID)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var states []RelationshipState
 	var times []int64
@@ -1769,7 +1770,7 @@ WHERE e1.name IN (%s) OR e2.name IN (%s)`, inClause, inClause)
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var facts []string
 	seen := make(map[string]bool)
@@ -1819,7 +1820,7 @@ WHERE e1.name = ? AND r.relation = ?`, srcName, relation)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var dests []string
 	for rows.Next() {

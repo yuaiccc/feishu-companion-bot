@@ -20,21 +20,27 @@ func TestStoreVisibility(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 
-	store.Add(Memory{
+	if err := store.Add(Memory{
 		ID:         "1",
 		Content:    "owner only memory",
 		Visibility: VisOwnerOnly,
-	})
-	store.Add(Memory{
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(Memory{
 		ID:         "2",
 		Content:    "public to target memory",
 		Visibility: VisPublicToTarget,
-	})
-	store.Add(Memory{
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(Memory{
 		ID:         "3",
 		Content:    "private memory",
 		Visibility: VisPrivate,
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// owner sees owner_only and public_to_target, not private
 	ownerResults := store.Search("memory", "owner")
@@ -57,8 +63,12 @@ func TestStorePath(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 
-	store.Add(Memory{ID: "test1", Content: "hello"})
-	store.Add(Memory{ID: "test2", Content: "world"})
+	if err := store.Add(Memory{ID: "test1", Content: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(Memory{ID: "test2", Content: "world"}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Verify file path
 	expectedPath := filepath.Join(tmpDir, profileID, "memories.json")

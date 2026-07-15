@@ -44,7 +44,7 @@ func (c *Client) refreshToken(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var result struct {
 		Code              int    `json:"code"`
 		TenantAccessToken string `json:"tenant_access_token"`
@@ -84,7 +84,7 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}) 
 			return nil, err
 		}
 		data, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if readErr != nil {
 			return nil, readErr
 		}

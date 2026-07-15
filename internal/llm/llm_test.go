@@ -14,7 +14,7 @@ func TestChatRequest(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("missing or wrong Authorization header")
 		}
-		w.Write([]byte(`{"choices":[{"message":{"content":"hello back"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hello back"}}]}`))
 	}))
 	defer server.Close()
 
@@ -40,9 +40,9 @@ func TestChatStream(t *testing.T) {
 		chunk2 := StreamChunk{Choices: []StreamChoice{{Delta: delta{Content: " world"}}}}
 		data1, _ := json.Marshal(chunk1)
 		data2, _ := json.Marshal(chunk2)
-		w.Write([]byte("data: " + string(data1) + "\n"))
-		w.Write([]byte("data: " + string(data2) + "\n"))
-		w.Write([]byte("data: [DONE]\n"))
+		_, _ = w.Write([]byte("data: " + string(data1) + "\n"))
+		_, _ = w.Write([]byte("data: " + string(data2) + "\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n"))
 	}))
 	defer server.Close()
 

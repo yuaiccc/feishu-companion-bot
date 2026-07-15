@@ -84,7 +84,7 @@ func (c *Client) searchDeerFlow(ctx context.Context, query string) ([]Result, er
 
 	select {
 	case <-ctx.Done():
-		cmd.Process.Signal(syscall.SIGKILL)
+		_ = cmd.Process.Signal(syscall.SIGKILL)
 		return nil, ctx.Err()
 	case err := <-done:
 		if err != nil {
@@ -113,7 +113,7 @@ func (c *Client) searchOpenClaw(ctx context.Context, query string) ([]Result, er
 
 	select {
 	case <-ctx.Done():
-		cmd.Process.Signal(syscall.SIGKILL)
+		_ = cmd.Process.Signal(syscall.SIGKILL)
 		return nil, ctx.Err()
 	case err := <-done:
 		if err != nil {
@@ -143,12 +143,12 @@ func Summarize(query string, results []Result) string {
 		return fmt.Sprintf("关于「%s」，没有找到相关信息。", query)
 	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("关于「%s」：\n\n", query))
+	_, _ = fmt.Fprintf(&b, "关于「%s」：\n\n", query)
 	for _, r := range results {
 		if r.Summary != "" {
-			b.WriteString(fmt.Sprintf("• %s\n", r.Summary))
+			_, _ = fmt.Fprintf(&b, "• %s\n", r.Summary)
 		} else {
-			b.WriteString(fmt.Sprintf("• %s：%s\n", r.Title, r.URL))
+			_, _ = fmt.Fprintf(&b, "• %s：%s\n", r.Title, r.URL)
 		}
 	}
 	return b.String()
@@ -171,7 +171,7 @@ func (c *Client) searchDeerFlowHTTP(ctx context.Context, query string) ([]Result
 	if err != nil {
 		return nil, fmt.Errorf("http request to deerflow gateway failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		var errData bytes.Buffer

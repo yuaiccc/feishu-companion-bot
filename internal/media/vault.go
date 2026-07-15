@@ -58,13 +58,13 @@ func (v *Vault) StoreBytes(data []byte, originalName string) (Asset, error) {
 		return Asset{}, err
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return Asset{}, err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return Asset{}, err
 	}
 	if err := tmp.Close(); err != nil {
@@ -84,7 +84,7 @@ func (v *Vault) IngestFile(path string) (Asset, error) {
 	if err != nil {
 		return Asset{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(f)
 	if err != nil {
 		return Asset{}, err

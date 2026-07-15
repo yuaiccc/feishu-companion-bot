@@ -64,7 +64,7 @@ func (c *Client) fetchEvents(ctx context.Context, url string) ([]Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(resp.Body)
@@ -95,7 +95,7 @@ func (c *Client) FetchPrivateCommits(ctx context.Context, repo string) ([]Event,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("github api %d", resp.StatusCode)

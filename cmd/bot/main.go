@@ -557,7 +557,7 @@ func alignTemporalMemory(ctx stdctx.Context, llmClient *llm.Client, memories []s
 
 	var sb strings.Builder
 	for i, m := range memories {
-		sb.WriteString(fmt.Sprintf("[%d] %s\n", i, m))
+		_, _ = fmt.Fprintf(&sb, "[%d] %s\n", i, m)
 	}
 	memList := sb.String()
 
@@ -716,7 +716,7 @@ func shouldRememberViaLLM(ctx stdctx.Context, content string, fromOwner bool, pr
 			start = len(recentTurns) - 5
 		}
 		for _, turn := range recentTurns[start:] {
-			sb.WriteString(fmt.Sprintf("- %s: %s\n", turn.Sender, turn.Content))
+			_, _ = fmt.Fprintf(&sb, "- %s: %s\n", turn.Sender, turn.Content)
 		}
 	}
 
@@ -774,7 +774,7 @@ func consolidateMemory(ctx stdctx.Context, llmClient *llm.Client, memStore memor
 	var sb strings.Builder
 	for _, m := range existing {
 		if m.ID != "" && m.SourceType != "chat_archive" && m.SourceType != "media_archive" {
-			sb.WriteString(fmt.Sprintf("- ID: %s | 内容: %s\n", m.ID, m.Text))
+			_, _ = fmt.Fprintf(&sb, "- ID: %s | 内容: %s\n", m.ID, m.Text)
 		}
 	}
 	similars := sb.String()
@@ -898,13 +898,16 @@ func streamingCardReply(
 	_ = messageID
 
 	var lastUpdate time.Time
+	var updateErr error
 	seq := 0
 	streamErr := llmClient.ChatStream(ctx, msgs, func(chunk string) {
 		fullText += chunk
 		now := time.Now()
 		if now.Sub(lastUpdate) >= updateInterval || endsWithPunct(chunk) {
 			seq++
-			fsClient.StreamUpdateCardText(ctx, cardID, feishu.StreamingCardElementID, fullText, seq)
+			if err := fsClient.StreamUpdateCardText(ctx, cardID, feishu.StreamingCardElementID, fullText, seq); err != nil && updateErr == nil {
+				updateErr = err
+			}
 			lastUpdate = now
 		}
 	}, llm.WithMaxTokens(maxTokens))
@@ -913,10 +916,19 @@ func streamingCardReply(
 		fullText = emptyReplyPlaceholder
 	}
 	seq++
-	fsClient.StreamUpdateCardText(ctx, cardID, feishu.StreamingCardElementID, fullText, seq)
-	fsClient.CloseStreamingCard(ctx, cardID, seq+1)
+	finalUpdateErr := fsClient.StreamUpdateCardText(ctx, cardID, feishu.StreamingCardElementID, fullText, seq)
+	closeErr := fsClient.CloseStreamingCard(ctx, cardID, seq+1)
 	if streamErr != nil {
 		return fullText, sent, streamErr
+	}
+	if updateErr != nil {
+		return fullText, sent, fmt.Errorf("stream card update: %w", updateErr)
+	}
+	if finalUpdateErr != nil {
+		return fullText, sent, fmt.Errorf("final card update: %w", finalUpdateErr)
+	}
+	if closeErr != nil {
+		return fullText, sent, fmt.Errorf("close streaming card: %w", closeErr)
 	}
 	return fullText, sent, nil
 }
@@ -939,22 +951,30 @@ func streamingTextReply(
 
 	fullText := ""
 	var lastUpdate time.Time
+	var updateErr error
 
 	err = llmClient.ChatStream(ctx, msgs, func(chunk string) {
 		fullText += chunk
 		now := time.Now()
 		if now.Sub(lastUpdate) >= updateInterval || endsWithPunct(chunk) {
-			fsClient.UpdateTextMessage(ctx, initialID, fullText)
+			if err := fsClient.UpdateTextMessage(ctx, initialID, fullText); err != nil && updateErr == nil {
+				updateErr = err
+			}
 			lastUpdate = now
 		}
 	}, llm.WithMaxTokens(maxTokens))
 	if err != nil {
 		return fullText, err
 	}
+	if updateErr != nil {
+		return fullText, fmt.Errorf("update streaming text: %w", updateErr)
+	}
 	if fullText == "" {
 		fullText = emptyReplyPlaceholder
 	}
-	fsClient.UpdateTextMessage(ctx, initialID, fullText)
+	if err := fsClient.UpdateTextMessage(ctx, initialID, fullText); err != nil {
+		return fullText, fmt.Errorf("final streaming text update: %w", err)
+	}
 	return fullText, nil
 }
 
@@ -974,7 +994,7 @@ func buildSystemPrompt(prof *profile.Profile, mem memory.MemoryStore) string {
 			var b strings.Builder
 			b.WriteString(customPrompt)
 			if state, err := mem.GetRelationshipState(); err == nil {
-				b.WriteString(fmt.Sprintf(" 【当前情感氛围】当前大哥的情绪指数为 %d/100（状态：%s，当分值较小如小于70时，说明他疲惫或受挫，请加倍温和与多给安慰；分值正常时可幽默）；你们当前的亲密度分值为 %d/100。请根据此分值自动微调你的语调。", state.MoodScore, state.LastSentiment, state.AffinityScore))
+				_, _ = fmt.Fprintf(&b, " 【当前情感氛围】当前大哥的情绪指数为 %d/100（状态：%s，当分值较小如小于70时，说明他疲惫或受挫，请加倍温和与多给安慰；分值正常时可幽默）；你们当前的亲密度分值为 %d/100。请根据此分值自动微调你的语调。", state.MoodScore, state.LastSentiment, state.AffinityScore)
 			}
 			b.WriteString(" 【重要记忆与会话一体化原则】提供给你的“相关记忆”中如果包含 `[聊天记录 YYYY-MM-DD HH:MM]` 前缀的文本，这与“对话历史”一样，全都是你与 owner 过去在不同渠道（如微信、飞书等）留下的连续会话足迹。你必须把它们视为一个整体且连贯的聊天时间线。在回复时，请极其自然、直接地融入这些过去的聊天背景，像是一直在同一个会话中无间断聊天一样，直接使用这些历史内容作为你回答的背景和默契事实。绝不要生硬地向用户提及“根据我的记忆”、“在微信聊天记录里查到”等带有机器痕迹的词汇，让所有历史对话上下文与当前对话浑然一体。")
 			b.WriteString(" 不要在回复末尾加\"正在输入\"或\"整理中\"这类占位文字。")
@@ -983,17 +1003,17 @@ func buildSystemPrompt(prof *profile.Profile, mem memory.MemoryStore) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("你是%s，%s的小助手。", prof.BotRoleText(), prof.OwnerName))
+	_, _ = fmt.Fprintf(&b, "你是%s，%s的小助手。", prof.BotRoleText(), prof.OwnerName)
 	if prof.TargetName != "" {
-		b.WriteString(fmt.Sprintf(" 和%s关系亲密。", prof.TargetName))
+		_, _ = fmt.Fprintf(&b, " 和%s关系亲密。", prof.TargetName)
 	}
 	b.WriteString(" 你不是owner本人，只是小弟/助手。语气轻松自然，克制不腻。")
-	b.WriteString(fmt.Sprintf(" 必须分清发言人身份：owner 是%s", prof.OwnerDisplay()))
+	_, _ = fmt.Fprintf(&b, " 必须分清发言人身份：owner 是%s", prof.OwnerDisplay())
 	if target := prof.TargetDisplay(); target != "" {
-		b.WriteString(fmt.Sprintf("，target 是%s", target))
+		_, _ = fmt.Fprintf(&b, "，target 是%s", target)
 	}
 	if prof.BotName != "" {
-		b.WriteString(fmt.Sprintf("，机器人是%s。", prof.BotName))
+		_, _ = fmt.Fprintf(&b, "，机器人是%s。", prof.BotName)
 	} else {
 		b.WriteString("，机器人是小弟。")
 	}
@@ -1006,7 +1026,7 @@ func buildSystemPrompt(prof *profile.Profile, mem memory.MemoryStore) string {
 	// Dynamic sentiment and relationship injection
 	if mem != nil {
 		if state, err := mem.GetRelationshipState(); err == nil {
-			b.WriteString(fmt.Sprintf(" 【当前情感氛围】当前大哥的情绪指数为 %d/100（状态：%s，当分值较小如小于70时，说明他疲惫或受挫，请加倍温和与多给安慰；分值正常时可幽默）；你们当前的亲密度分值为 %d/100。请根据此分值自动微调你的语调。", state.MoodScore, state.LastSentiment, state.AffinityScore))
+			_, _ = fmt.Fprintf(&b, " 【当前情感氛围】当前大哥的情绪指数为 %d/100（状态：%s，当分值较小如小于70时，说明他疲惫或受挫，请加倍温和与多给安慰；分值正常时可幽默）；你们当前的亲密度分值为 %d/100。请根据此分值自动微调你的语调。", state.MoodScore, state.LastSentiment, state.AffinityScore)
 		}
 	}
 	b.WriteString(" 【重要记忆与会话一体化原则】提供给你的“相关记忆”中如果包含 `[聊天记录 YYYY-MM-DD HH:MM]` 前缀的文本，这与“对话历史”一样，全都是你与 owner 过去在不同渠道（如微信、飞书等）留下的连续会话足迹。你必须把它们视为一个整体且连贯的聊天时间线。在回复时，请极其自然、直接地融入这些过去的聊天背景，像是一直在同一个会话中无间断聊天一样，直接使用这些历史内容作为你回答的背景和默契事实。绝不要生硬地向用户提及“根据我的记忆”、“在微信聊天记录里查到”等带有机器痕迹的词汇，让所有历史对话上下文与当前对话浑然一体。")
@@ -1256,7 +1276,7 @@ func summarizeSearch(query string, results []search.Result, llmClient *llm.Clien
 
 	var sb strings.Builder
 	for i, res := range results {
-		sb.WriteString(fmt.Sprintf("[%d] 标题：%s | 链接：%s\n内容：%s\n\n", i+1, res.Title, res.URL, res.Summary))
+		_, _ = fmt.Fprintf(&sb, "[%d] 标题：%s | 链接：%s\n内容：%s\n\n", i+1, res.Title, res.URL, res.Summary)
 	}
 	sources := sb.String()
 
@@ -1293,7 +1313,6 @@ func summarizeSearch(query string, results []search.Result, llmClient *llm.Clien
 
 var (
 	passiveAssistant = NewPassiveAssistant()
-	streamingContext = make(map[string]map[string]interface{}) // messageID -> context
 	convoState       = newStateManager()
 )
 
@@ -1330,28 +1349,6 @@ func alreadyProcessed(msgID string) bool {
 	}
 	processedMsgIDs[msgID] = now
 	return false
-}
-
-// lastMediaAt tracks, per chat, when the last image search happened so
-// follow-ups can be resolved while that search is still the active topic.
-var (
-	lastMediaAt = make(map[string]time.Time)
-	lastMediaMu sync.Mutex
-)
-
-const lastMediaTTL = 10 * time.Minute
-
-func noteMediaSearch(chatID string) {
-	lastMediaMu.Lock()
-	defer lastMediaMu.Unlock()
-	lastMediaAt[chatID] = time.Now()
-}
-
-func recentMediaSearch(chatID string) bool {
-	lastMediaMu.Lock()
-	defer lastMediaMu.Unlock()
-	t, ok := lastMediaAt[chatID]
-	return ok && time.Since(t) <= lastMediaTTL
 }
 
 // interpretMediaRequest uses the LLM to understand, in conversation context,
@@ -1583,7 +1580,7 @@ func describeImageWithOllama(ctx stdctx.Context, cfg *config.Config, image []byt
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respData, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
@@ -2066,8 +2063,11 @@ func proactiveTopicLoop(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 			return
 		case <-ticker.C:
 			if passiveAssistant.ShouldSendProactiveTopic() {
-				fs.SendText(ctx, "最近有没有什么想聊的呀？", cfg.FeishuChatID)
-				passiveAssistant.MarkTopicSent()
+				if _, err := fs.SendText(ctx, "最近有没有什么想聊的呀？", cfg.FeishuChatID); err != nil {
+					log.Printf("[主动话题] 发送失败: %v", err)
+				} else {
+					passiveAssistant.MarkTopicSent()
+				}
 			}
 		}
 	}
@@ -2154,9 +2154,13 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	case IntentRecall:
 		if err := fs.RecallLastSent(ctx, msg.ChatID); err != nil {
 			log.Printf("[撤回] %v", err)
-			fs.ReplyText(ctx, "没找到能撤回的消息呀", msg.MessageID)
+			if _, replyErr := fs.ReplyText(ctx, "没找到能撤回的消息呀", msg.MessageID); replyErr != nil {
+				log.Printf("[撤回] 回复失败: %v", replyErr)
+			}
 		} else {
-			fs.ReplyText(ctx, "已撤回～", msg.MessageID)
+			if _, replyErr := fs.ReplyText(ctx, "已撤回～", msg.MessageID); replyErr != nil {
+				log.Printf("[撤回] 确认回复失败: %v", replyErr)
+			}
 		}
 		cleanupReaction(ctx, fs, msg, thinkReactID)
 		return
@@ -2256,7 +2260,9 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 				fs.NoteSent(msg.ChatID, m)
 			}
 		} else {
-			fs.SendText(ctx, reply, msg.ChatID)
+			if _, sendErr := fs.SendText(ctx, reply, msg.ChatID); sendErr != nil {
+				log.Printf("[回复] 发送失败: %v", sendErr)
+			}
 		}
 	}
 	convoState.MarkBotReply(msg.ChatID)
@@ -2264,7 +2270,9 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 	// Cleanup thinking reaction and add content emoji
 	cleanupReaction(ctx, fs, msg, thinkReactID)
 	if msg.MessageID != "" {
-		fs.AddReaction(ctx, msg.MessageID, pickEmoji(msg.Content, msg.IsOwner, prof))
+		if _, reactionErr := fs.AddReaction(ctx, msg.MessageID, pickEmoji(msg.Content, msg.IsOwner, prof)); reactionErr != nil {
+			log.Printf("[表情回应] 添加失败: %v", reactionErr)
+		}
 	}
 	if mem != nil && mem.GetConfig("module_emotion_tracker", "true") == "true" {
 		go updateEmotionMetrics(ctx, llmClient, mem, msg.Content, reply)
@@ -2278,11 +2286,12 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 			for i := len(history) - 1; i >= 0; i-- {
 				h := history[i]
 				senderLabel := "对方"
-				if h.Sender == cfg.FeishuOwnerOpenID {
+				switch h.Sender {
+				case cfg.FeishuOwnerOpenID:
 					senderLabel = prof.OwnerName
-				} else if h.Sender == cfg.FeishuTargetOpenID {
+				case cfg.FeishuTargetOpenID:
 					senderLabel = prof.TargetDisplay()
-				} else if h.Sender == cfg.FeishuBotOpenID {
+				case cfg.FeishuBotOpenID:
 					senderLabel = "机器人"
 				}
 				recentTurns = append(recentTurns, workingMemoryTurn{
@@ -2309,7 +2318,9 @@ func onMessageReceived(ctx stdctx.Context, cfg *config.Config, prof *profile.Pro
 				} else {
 					log.Printf("[记忆沉淀] 自动整理并成功存入长期记忆: %q", mergedCandidate)
 					go extractAndSaveGraph(ctx, llmClient, mem, mergedCandidate, recentTurns)
-					fs.AddReaction(ctx, msg.MessageID, "SUBMIT")
+					if _, reactionErr := fs.AddReaction(ctx, msg.MessageID, "SUBMIT"); reactionErr != nil {
+						log.Printf("[记忆沉淀] 添加确认表情失败: %v", reactionErr)
+					}
 				}
 			}
 		}
@@ -2321,7 +2332,9 @@ func handleGitHubIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 	events, err := gh.FetchEvents(ctx)
 	if err != nil {
 		log.Printf("获取 GitHub 事件失败: %v", err)
-		fs.ReplyText(ctx, "GitHub 数据拉取失败，稍后再试试", msg.MessageID)
+		if _, replyErr := fs.ReplyText(ctx, "GitHub 数据拉取失败，稍后再试试", msg.MessageID); replyErr != nil {
+			log.Printf("[GitHub] 失败提示发送失败: %v", replyErr)
+		}
 		cleanupReaction(ctx, fs, msg, reactID)
 		return
 	}
@@ -2354,44 +2367,64 @@ func handleGitHubIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 			fs.NoteSent(msg.ChatID, m)
 		}
 	} else {
-		fs.SendText(ctx, reply, msg.ChatID)
+		if _, sendErr := fs.SendText(ctx, reply, msg.ChatID); sendErr != nil {
+			log.Printf("[GitHub] 回复发送失败: %v", sendErr)
+		}
 	}
 	cleanupReaction(ctx, fs, msg, reactID)
-	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	if _, reactionErr := fs.AddReaction(ctx, msg.MessageID, "DONE"); reactionErr != nil {
+		log.Printf("[GitHub] 完成表情添加失败: %v", reactionErr)
+	}
 	convoState.MarkBotReply(msg.ChatID)
 }
 
 func handleHealthIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, llmClient *llm.Client, mem memory.MemoryStore, msg feishu.Message, reactID string) {
 	card := buildHealthCard(cfg, fs, llmClient, mem)
+	var err error
 	if msg.MessageID != "" {
-		fs.ReplyCard(ctx, card, msg.MessageID)
+		err = fs.ReplyCard(ctx, card, msg.MessageID)
 	} else {
-		fs.SendCard(ctx, card, msg.ChatID)
+		_, err = fs.SendCard(ctx, card, msg.ChatID)
+	}
+	if err != nil {
+		log.Printf("[健康检查] 卡片发送失败: %v", err)
 	}
 	cleanupReaction(ctx, fs, msg, reactID)
-	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	if _, err := fs.AddReaction(ctx, msg.MessageID, "DONE"); err != nil {
+		log.Printf("[健康检查] 完成表情添加失败: %v", err)
+	}
 	convoState.MarkBotReply(msg.ChatID)
 }
 
 func handleMemoryAuditIntent(ctx stdctx.Context, cfg *config.Config, prof *profile.Profile, mem memory.MemoryStore, fs *feishu.Client, msg feishu.Message, reactID string) {
 	audience := audienceForSender(cfg, prof, msg)
 	card := buildMemoryAuditCard(mem, audience)
+	var err error
 	if msg.MessageID != "" {
-		fs.ReplyCard(ctx, card, msg.MessageID)
+		err = fs.ReplyCard(ctx, card, msg.MessageID)
 	} else {
-		fs.SendCard(ctx, card, msg.ChatID)
+		_, err = fs.SendCard(ctx, card, msg.ChatID)
+	}
+	if err != nil {
+		log.Printf("[记忆审计] 卡片发送失败: %v", err)
 	}
 	cleanupReaction(ctx, fs, msg, reactID)
-	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	if _, err := fs.AddReaction(ctx, msg.MessageID, "DONE"); err != nil {
+		log.Printf("[记忆审计] 完成表情添加失败: %v", err)
+	}
 	convoState.MarkBotReply(msg.ChatID)
 }
 
 func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.MemoryStore, fs *feishu.Client, msg feishu.Message, reactID string, llmClient *llm.Client, prof *profile.Profile) {
 	searcher, ok := mem.(mediaMemoryStore)
 	if !ok || !cfg.MemoryIncludeMediaArchive {
-		fs.ReplyText(ctx, "图片回忆还没接到记忆库里，等图片索引跑完并打开 MEMORY_INCLUDE_MEDIA_ARCHIVE 后就能找。", msg.MessageID)
+		if _, err := fs.ReplyText(ctx, "图片回忆还没接到记忆库里，等图片索引跑完并打开 MEMORY_INCLUDE_MEDIA_ARCHIVE 后就能找。", msg.MessageID); err != nil {
+			log.Printf("[图片记忆] 提示发送失败: %v", err)
+		}
 		cleanupReaction(ctx, fs, msg, reactID)
-		fs.AddReaction(ctx, msg.MessageID, "DONE")
+		if _, err := fs.AddReaction(ctx, msg.MessageID, "DONE"); err != nil {
+			log.Printf("[图片记忆] 完成表情添加失败: %v", err)
+		}
 		return
 	}
 
@@ -2406,9 +2439,13 @@ func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.Memory
 	query, showAll := interpretMediaRequest(ctx, llmClient, msg, recentMsgs, label, prof)
 	log.Printf("[图片记忆] 理解查询=%q showAll=%v audience=%s 原文=%q", query, showAll, audience, msg.Content)
 	if query == "" {
-		fs.ReplyText(ctx, "我没太明白要找哪张图，可以说具体点：地点、物品、截图里的字，或大概时间。", msg.MessageID)
+		if _, err := fs.ReplyText(ctx, "我没太明白要找哪张图，可以说具体点：地点、物品、截图里的字，或大概时间。", msg.MessageID); err != nil {
+			log.Printf("[图片记忆] 澄清提示发送失败: %v", err)
+		}
 		cleanupReaction(ctx, fs, msg, reactID)
-		fs.AddReaction(ctx, msg.MessageID, "DONE")
+		if _, err := fs.AddReaction(ctx, msg.MessageID, "DONE"); err != nil {
+			log.Printf("[图片记忆] 完成表情添加失败: %v", err)
+		}
 		return
 	}
 
@@ -2417,13 +2454,16 @@ func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.Memory
 		limit = 8
 	}
 	results := searcher.SearchMedia(query, audience, limit)
-	noteMediaSearch(msg.ChatID)
 	convoState.MarkMediaSearch(msg.ChatID, query)
 	log.Printf("[图片记忆] 查询=%q 命中=%d", query, len(results))
 	if len(results) == 0 {
-		fs.ReplyText(ctx, fmt.Sprintf("图片记忆里没翻到跟“%s”相关的内容，换个词试试？", query), msg.MessageID)
+		if _, err := fs.ReplyText(ctx, fmt.Sprintf("图片记忆里没翻到跟“%s”相关的内容，换个词试试？", query), msg.MessageID); err != nil {
+			log.Printf("[图片记忆] 空结果提示发送失败: %v", err)
+		}
 		cleanupReaction(ctx, fs, msg, reactID)
-		fs.AddReaction(ctx, msg.MessageID, "DONE")
+		if _, err := fs.AddReaction(ctx, msg.MessageID, "DONE"); err != nil {
+			log.Printf("[图片记忆] 完成表情添加失败: %v", err)
+		}
 		return
 	}
 
@@ -2500,7 +2540,9 @@ func handleMediaIntent(ctx stdctx.Context, cfg *config.Config, mem memory.Memory
 	}
 
 	cleanupReaction(ctx, fs, msg, reactID)
-	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	if _, err := fs.AddReaction(ctx, msg.MessageID, "DONE"); err != nil {
+		log.Printf("[图片记忆] 完成表情添加失败: %v", err)
+	}
 	convoState.MarkBotReply(msg.ChatID)
 }
 
@@ -2515,7 +2557,7 @@ func isLikelyImage(path string) bool {
 	if err != nil {
 		return false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var head [12]byte
 	n, _ := io.ReadFull(f, head[:])
 	b := head[:n]
@@ -2601,13 +2643,19 @@ func fallbackMediaSummary(results []memory.MediaResult) string {
 func handleSearchIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Client, msg feishu.Message, reactID string, llmClient *llm.Client, prof *profile.Profile) {
 	results, err := webSearch(msg.Content, cfg)
 	if err != nil || len(results) == 0 {
-		fs.ReplyText(ctx, fmt.Sprintf("小弟这边外部搜索暂时没接通，等%s电脑上的本地搜索服务稳一下再查。", prof.OwnerDisplay()), msg.MessageID)
+		if _, replyErr := fs.ReplyText(ctx, fmt.Sprintf("小弟这边外部搜索暂时没接通，等%s电脑上的本地搜索服务稳一下再查。", prof.OwnerDisplay()), msg.MessageID); replyErr != nil {
+			log.Printf("[外部搜索] 失败提示发送失败: %v", replyErr)
+		}
 	} else {
 		summary := summarizeSearch(msg.Content, results, llmClient)
-		fs.ReplyText(ctx, summary, msg.MessageID)
+		if _, replyErr := fs.ReplyText(ctx, summary, msg.MessageID); replyErr != nil {
+			log.Printf("[外部搜索] 结果发送失败: %v", replyErr)
+		}
 	}
 	cleanupReaction(ctx, fs, msg, reactID)
-	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	if _, reactionErr := fs.AddReaction(ctx, msg.MessageID, "DONE"); reactionErr != nil {
+		log.Printf("[外部搜索] 完成表情添加失败: %v", reactionErr)
+	}
 	convoState.MarkBotReply(msg.ChatID)
 }
 
@@ -2616,19 +2664,27 @@ func handleStatusIntent(ctx stdctx.Context, cfg *config.Config, fs *feishu.Clien
 	status, err := statusReader.GetStatus()
 	if err != nil {
 		log.Printf("[状态] 获取失败: %v", err)
-		fs.ReplyText(ctx, fmt.Sprintf("小弟这边暂时没有获取到%s的详细状态，等配置好了再告诉你～", prof.OwnerDisplay()), msg.MessageID)
+		if _, replyErr := fs.ReplyText(ctx, fmt.Sprintf("小弟这边暂时没有获取到%s的详细状态，等配置好了再告诉你～", prof.OwnerDisplay()), msg.MessageID); replyErr != nil {
+			log.Printf("[状态] 失败提示发送失败: %v", replyErr)
+		}
 	} else {
 		statusText := localapps.InterpretStatus(status)
-		fs.ReplyText(ctx, statusText, msg.MessageID)
+		if _, replyErr := fs.ReplyText(ctx, statusText, msg.MessageID); replyErr != nil {
+			log.Printf("[状态] 回复发送失败: %v", replyErr)
+		}
 	}
 	cleanupReaction(ctx, fs, msg, reactID)
-	fs.AddReaction(ctx, msg.MessageID, "DONE")
+	if _, reactionErr := fs.AddReaction(ctx, msg.MessageID, "DONE"); reactionErr != nil {
+		log.Printf("[状态] 完成表情添加失败: %v", reactionErr)
+	}
 	convoState.MarkBotReply(msg.ChatID)
 }
 
 func cleanupReaction(ctx stdctx.Context, fs *feishu.Client, msg feishu.Message, reactID string) {
 	if reactID != "" && msg.MessageID != "" {
-		fs.DeleteReaction(ctx, msg.MessageID, reactID)
+		if err := fs.DeleteReaction(ctx, msg.MessageID, reactID); err != nil {
+			log.Printf("[表情回应] 清理失败: %v", err)
+		}
 	}
 }
 
@@ -2651,7 +2707,7 @@ func extractAndSaveGraph(ctx stdctx.Context, llmClient *llm.Client, memStore mem
 	if memStore.GetConfig("module_multi_turn_graph", "true") == "true" && len(recentTurns) > 0 {
 		contextBuilder.WriteString("\n为了帮助你消解代词（如“她/他/它”指代具体谁）以及推断跨对话的隐含关联，以下是产生这句记忆时的最近对话上下文历史：\n=== 最近对话历史 ===\n")
 		for idx, turn := range recentTurns {
-			contextBuilder.WriteString(fmt.Sprintf("[轮次 %d] %s: %s\n", idx+1, turn.Sender, turn.Content))
+			_, _ = fmt.Fprintf(&contextBuilder, "[轮次 %d] %s: %s\n", idx+1, turn.Sender, turn.Content)
 		}
 		contextBuilder.WriteString("====================\n\n请结合上述对话背景事实，仔细推理出这句记忆中代词所指向的标准实体名。\n")
 	}
@@ -2985,7 +3041,7 @@ ORDER BY r.created_at DESC`)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 
 			type Trio struct {
 				Src      string `json:"src"`

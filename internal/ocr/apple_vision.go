@@ -66,9 +66,9 @@ func (e *AppleVision) RecognizeBytes(ctx context.Context, image []byte) (Result,
 		return Result{}, err
 	}
 	path := tmp.Name()
-	defer os.Remove(path)
+	defer func() { _ = os.Remove(path) }()
 	if _, err := tmp.Write(image); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return Result{}, err
 	}
 	if err := tmp.Close(); err != nil {

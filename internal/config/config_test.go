@@ -1,13 +1,9 @@
 package config
 
-import (
-	"os"
-	"testing"
-)
+import "testing"
 
 func TestGetEnv(t *testing.T) {
-	os.Setenv("TEST_KEY", "test_value")
-	defer os.Unsetenv("TEST_KEY")
+	t.Setenv("TEST_KEY", "test_value")
 
 	if got := getEnv("TEST_KEY", "default"); got != "test_value" {
 		t.Errorf("getEnv = %q, want %q", got, "test_value")
@@ -18,10 +14,8 @@ func TestGetEnv(t *testing.T) {
 }
 
 func TestGetEnvBool(t *testing.T) {
-	os.Setenv("TEST_BOOL_TRUE", "true")
-	os.Setenv("TEST_BOOL_FALSE", "false")
-	defer os.Unsetenv("TEST_BOOL_TRUE")
-	defer os.Unsetenv("TEST_BOOL_FALSE")
+	t.Setenv("TEST_BOOL_TRUE", "true")
+	t.Setenv("TEST_BOOL_FALSE", "false")
 
 	if got := getEnvBool("TEST_BOOL_TRUE", false); !got {
 		t.Errorf("getEnvBool true = %v, want true", got)
@@ -35,8 +29,7 @@ func TestGetEnvBool(t *testing.T) {
 }
 
 func TestGetEnvInt(t *testing.T) {
-	os.Setenv("TEST_INT", "42")
-	defer os.Unsetenv("TEST_INT")
+	t.Setenv("TEST_INT", "42")
 
 	if got := getEnvInt("TEST_INT", 0); got != 42 {
 		t.Errorf("getEnvInt = %d, want 42", got)

@@ -41,7 +41,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Printf("关闭数据库失败: %v", err)
+		}
+	}()
 	report := rageval.Run(context.Background(), store, cases)
 	data, _ := json.MarshalIndent(report, "", "  ")
 	if *output == "" {
@@ -63,7 +67,11 @@ func readCases(path string) ([]rageval.Case, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Printf("关闭评测集失败: %v", err)
+		}
+	}()
 	var cases []rageval.Case
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {

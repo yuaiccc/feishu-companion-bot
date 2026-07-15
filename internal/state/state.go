@@ -89,10 +89,6 @@ func (s *State) SaveLoveNote(seen map[string]bool, dateKey string, added int) er
 		s.LoveNoteDailyCounts = make(map[string]int)
 	}
 	s.LoveNoteDailyCounts[dateKey] += added
-	if len(s.LoveNoteDailyCounts) > 14 {
-		// Keep the newest dates; map order is not meaningful, so only prune
-		// when the next run naturally rewrites the small state file.
-	}
 	return s.flush()
 }
 

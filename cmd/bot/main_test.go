@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	stdctx "context"
 	"feishu-companion-bot/internal/config"
 	ctxmgr "feishu-companion-bot/internal/context"
 	"feishu-companion-bot/internal/llm"
@@ -120,8 +119,9 @@ func init() {
 	dir := "."
 	for i := 0; i < 5; i++ {
 		if _, err := os.Stat(filepath.Join(dir, ".env")); err == nil {
-			os.Chdir(dir)
-			break
+			if err := os.Chdir(dir); err == nil {
+				break
+			}
 		}
 		dir = filepath.Join(dir, "..")
 	}
@@ -268,7 +268,7 @@ func TestContextAwareMemoryExtraction(t *testing.T) {
 		OwnerName: "owner",
 	}
 
-	// 1. Mock recent turns context: 
+	// 1. Mock recent turns context:
 	// The conversation was discussing plans to go to Beijing next Monday.
 	recentTurns := []workingMemoryTurn{
 		{
@@ -277,7 +277,7 @@ func TestContextAwareMemoryExtraction(t *testing.T) {
 		},
 	}
 
-	// The current message is a simple confirmation, which would be rejected 
+	// The current message is a simple confirmation, which would be rejected
 	// as meaningless without context.
 	currentMessage := "对的，就是这个安排。"
 
@@ -323,15 +323,15 @@ func TestSmokeQueryShushuFood(t *testing.T) {
 	}
 
 	memStore, err := memory.NewDatabaseStore(memory.DatabaseOptions{
-		DSN:                dsn,
-		ProfileID:          cfg.ProfileID,
-		IncludeChatArchive: true,
-		ChatVisibility:        memory.Visibility(cfg.MemoryChatVisibility),
-		ChatArchiveTable:      cfg.MemoryChatArchiveTable,
-		IncludeMediaArchive:   true,
-		MediaVisibility:       memory.Visibility(cfg.MemoryMediaVisibility),
-		MediaArchiveTable:     cfg.MemoryMediaArchiveTable,
-		Embedder:              embedder,
+		DSN:                 dsn,
+		ProfileID:           cfg.ProfileID,
+		IncludeChatArchive:  true,
+		ChatVisibility:      memory.Visibility(cfg.MemoryChatVisibility),
+		ChatArchiveTable:    cfg.MemoryChatArchiveTable,
+		IncludeMediaArchive: true,
+		MediaVisibility:     memory.Visibility(cfg.MemoryMediaVisibility),
+		MediaArchiveTable:   cfg.MemoryMediaArchiveTable,
+		Embedder:            embedder,
 	})
 	if err != nil {
 		t.Fatalf("Failed to connect to OceanBase: %v", err)
@@ -342,7 +342,7 @@ func TestSmokeQueryShushuFood(t *testing.T) {
 	t.Logf("🔍 Smoke query: %q", query)
 	results := memStore.SearchRelevant(query, "owner")
 	t.Logf("📊 Found %d matching records in OceanBase:", len(results))
-	
+
 	var memoryTexts []string
 	for idx, item := range results {
 		t.Logf("  [%d] (Type: %s, Source: %s): %s", idx+1, item.MemoryType, item.SourceType, item.Text)
@@ -353,12 +353,12 @@ func TestSmokeQueryShushuFood(t *testing.T) {
 	llmClient := llm.NewClient(cfg.DeepSeekAPIKey, cfg.DeepSeekBaseURL, cfg.DeepSeekModel)
 	prof := &profile.Profile{
 		OwnerName: "三哥",
-		BotName: "小弟",
+		BotName:   "小弟",
 		Config: map[string]interface{}{
 			"persona": "你是三哥的小助手小弟，语气轻松自然，有理有据。你和舒舒（即owner，三哥）在微信有大量的历史聊天记录。当检索出来的记忆标记有 [聊天记录] 时，这代表你们的历史微信会话足迹，你必须把它们和你的飞书对话当作统一连贯的时间线，浑然一体地融入你的回答背景，千万不要说出‘在微信记录里看到’这种机器化套话。",
 		},
 	}
-	
+
 	messages := buildChatMessages(
 		prof,
 		nil,
@@ -373,7 +373,7 @@ func TestSmokeQueryShushuFood(t *testing.T) {
 	)
 
 	t.Log("🧠 Asking DeepSeek...")
-	reply, err := llmClient.Chat(stdctx.Background(), messages, llm.WithTemperature(0.3), llm.WithMaxTokens(600))
+	reply, err := llmClient.Chat(context.Background(), messages, llm.WithTemperature(0.3), llm.WithMaxTokens(600))
 	if err != nil {
 		t.Fatalf("LLM call failed: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestTemporalMemoryAlignment(t *testing.T) {
 		"[语义记忆] 舒舒最近在减肥，说以后再也不吃油腻的鸡爪煲了，只吃清蒸沙拉。",
 	}
 
-	aligned := alignTemporalMemory(stdctx.Background(), llmClient, memories)
+	aligned := alignTemporalMemory(context.Background(), llmClient, memories)
 	if len(aligned) == 0 {
 		t.Fatalf("Aligned memories should not be empty")
 	}
@@ -441,7 +441,7 @@ func TestAsyncEmbeddingAndHashCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect to OceanBase: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// 1. Test image hash cache
 	testHash := "img_md5_test_hash_val"
@@ -526,7 +526,7 @@ func TestGraphRAGEntityCollisionAndExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect to OceanBase: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	db := store.GetDBConn()
 	_, _ = db.Exec(`
@@ -626,7 +626,7 @@ func TestGraphSelfEvolution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect to OceanBase: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	db := store.GetDBConn()
 	_, _ = db.Exec(`
@@ -719,7 +719,7 @@ func TestMultiTurnGraphExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect to OceanBase: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	db := store.GetDBConn()
 	_, _ = db.Exec(`
@@ -777,7 +777,7 @@ func TestConfigToggles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect to OceanBase: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	val := store.GetConfig("non_existent_key", "default_val")
 	if val != "default_val" {
@@ -873,7 +873,7 @@ func TestMultiModalMemoryAndGraphExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to connect to OceanBase: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	db := store.GetDBConn()
 	_, _ = db.Exec("DELETE FROM knowledge_relations WHERE src_id IN (SELECT id FROM knowledge_entities WHERE profile_id = 'test_multimodal_graph')")
@@ -932,7 +932,3 @@ func TestMultiModalMemoryAndGraphExtraction(t *testing.T) {
 		t.Log("Success: Multimodal GraphRAG relations extracted and verified successfully!")
 	}
 }
-
-
-
-

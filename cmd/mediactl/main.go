@@ -39,7 +39,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("打开媒体库失败: %v", err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Printf("关闭媒体库失败: %v", err)
+		}
+	}()
 
 	roots := splitNonEmpty(*sources)
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Hour)

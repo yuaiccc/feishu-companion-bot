@@ -61,7 +61,9 @@ func main() {
 				}
 			}
 			detail = strings.Join(parts, " ")
-			store.Close()
+			if closeErr := store.Close(); closeErr != nil && err == nil {
+				err = closeErr
+			}
 		}
 		checks = append(checks, check{name: "OceanBase 记忆库", critical: true, err: err, detail: detail})
 	} else {

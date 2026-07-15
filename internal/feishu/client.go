@@ -144,7 +144,7 @@ func (c *Client) refreshToken(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("token api: %d", resp.StatusCode)
 	}
@@ -191,7 +191,7 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}) 
 			return nil, err
 		}
 		data, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return nil, err
 		}
@@ -238,7 +238,9 @@ func (c *Client) ReplyText(ctx context.Context, text string, messageID string) (
 	var resp struct {
 		MessageID string `json:"message_id"`
 	}
-	json.Unmarshal(data, &resp)
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", err
+	}
 	return resp.MessageID, nil
 }
 
@@ -282,7 +284,7 @@ func (c *Client) UploadImage(ctx context.Context, filePath string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -310,7 +312,7 @@ func (c *Client) UploadImage(ctx context.Context, filePath string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
@@ -372,7 +374,7 @@ func (c *Client) DownloadImage(ctx context.Context, imageKey string) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
@@ -436,7 +438,7 @@ func (c *Client) doOCR(ctx context.Context, body interface{}) (json.RawMessage, 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
@@ -507,7 +509,9 @@ func (c *Client) sendMsgToIDType(ctx context.Context, receiveID, msgType string,
 	var result struct {
 		MessageID string `json:"message_id"`
 	}
-	json.Unmarshal(respData, &result)
+	if err := json.Unmarshal(respData, &result); err != nil {
+		return "", err
+	}
 	c.NoteSent(receiveID, result.MessageID)
 	return result.MessageID, nil
 }
@@ -523,7 +527,9 @@ func (c *Client) AddReaction(ctx context.Context, messageID string, emojiType st
 	var result struct {
 		ReactionID string `json:"reaction_id"`
 	}
-	json.Unmarshal(respData, &result)
+	if err := json.Unmarshal(respData, &result); err != nil {
+		return "", err
+	}
 	return result.ReactionID, nil
 }
 

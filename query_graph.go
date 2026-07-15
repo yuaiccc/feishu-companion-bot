@@ -21,7 +21,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Open failed: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// 1. Query all entities
 	fmt.Println("=== 实体列表 (Entities) ===")
@@ -29,7 +29,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Query entities failed: %v", err)
 	}
-	defer rowsEnt.Close()
+	defer func() { _ = rowsEnt.Close() }()
 
 	hasEnt := false
 	for rowsEnt.Next() {
@@ -54,7 +54,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Query relations failed: %v", err)
 	}
-	defer rowsRel.Close()
+	defer func() { _ = rowsRel.Close() }()
 
 	hasRel := false
 	for rowsRel.Next() {

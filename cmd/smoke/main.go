@@ -201,7 +201,7 @@ func testImage(ctx context.Context, cfg *config.Config, fs *feishu.Client, recei
 			log.Printf("初始化媒体库失败: %v", err)
 			return false
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		results := store.SearchMedia("", "owner", 1)
 		if len(results) == 0 || results[0].FilePath == "" {
 			fmt.Println("  媒体库无可用图片")
@@ -239,7 +239,9 @@ func loadDotEnv(path string) {
 		val := strings.TrimSpace(parts[1])
 		val = strings.Trim(val, `"'`)
 		if _, set := os.LookupEnv(key); !set {
-			os.Setenv(key, val)
+			if err := os.Setenv(key, val); err != nil {
+				log.Printf("设置环境变量 %s 失败: %v", key, err)
+			}
 		}
 	}
 }

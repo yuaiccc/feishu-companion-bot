@@ -215,7 +215,9 @@ func NewStore(profileID, dataDir string) (*Store, error) {
 
 	s := &Store{path: path}
 	if data, err := os.ReadFile(path); err == nil {
-		json.Unmarshal(data, &s.Items)
+		if err := json.Unmarshal(data, &s.Items); err != nil {
+			return nil, fmt.Errorf("decode memory file: %w", err)
+		}
 	}
 	return s, nil
 }

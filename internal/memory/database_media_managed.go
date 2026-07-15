@@ -110,7 +110,7 @@ WHERE profile_id=? AND status='valid' AND ` + visibility
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	results := make([]MediaResult, 0, limit)
 	for rows.Next() {
 		var result MediaResult
@@ -183,7 +183,7 @@ FROM %s ORDER BY %s ASC`, s.mediaMsgIDColumn, s.mediaSenderColumn, s.mediaFilePa
 	if err != nil {
 		return MediaReingestStats{}, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var stats MediaReingestStats
 	for rows.Next() {
 		var key, sender, oldPath, ocr, caption string
