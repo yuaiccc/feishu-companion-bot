@@ -37,6 +37,7 @@ import (
 	"feishu-companion-bot/internal/safety"
 	"feishu-companion-bot/internal/search"
 	"feishu-companion-bot/internal/state"
+	"feishu-companion-bot/internal/vision/sensenova"
 )
 
 //go:embed web/dist/*
@@ -1455,17 +1456,14 @@ func understandIncomingImage(ctx stdctx.Context, cfg *config.Config, fs *feishu.
 		resChan <- understandResult{ocr: text}
 	}()
 
-	// 2. 并发协程 B: Ollama 本地多模态 Vision 图像描述
+	// 2. 图片描述优先走本地 Qwen-VL，失败后才走 SenseNova 云端备用。
 	go func() {
-		if !cfg.LocalVisionEnabled || cfg.OllamaVisionModel == "" {
-			resChan <- understandResult{}
-			return
-		}
-		desc, err := describeImageWithOllama(ctx, cfg, image)
+		desc, backend, err := describeImageWithVision(ctx, cfg, image)
 		if err != nil {
-			resChan <- understandResult{err: fmt.Errorf("ollama vision error: %w", err)}
+			resChan <- understandResult{err: err}
 			return
 		}
+		log.Printf("[图片理解] vision backend=%s chars=%d", backend, len([]rune(desc)))
 		resChan <- understandResult{caption: desc}
 	}()
 
@@ -1599,6 +1597,29 @@ func describeImageWithOllama(ctx stdctx.Context, cfg *config.Config, image []byt
 		return "", fmt.Errorf("parse ollama response: %w", err)
 	}
 	return strings.TrimSpace(parsed.Response), nil
+}
+
+func describeImageWithVision(ctx stdctx.Context, cfg *config.Config, image []byte) (string, string, error) {
+	if cfg.LocalVisionEnabled && cfg.OllamaVisionModel != "" {
+		desc, err := describeImageWithOllama(ctx, cfg, image)
+		if err == nil && strings.TrimSpace(desc) != "" {
+			return desc, "ollama/" + cfg.OllamaVisionModel, nil
+		}
+		if err != nil {
+			log.Printf("[图片理解] Ollama Vision 不可用，尝试 SenseNova 备用: %v", err)
+		}
+	}
+	if cfg.SenseNovaVisionEnabled {
+		client := sensenova.NewClient(cfg.SenseNovaAPIKey, cfg.SenseNovaBaseURL, cfg.SenseNovaVisionModel, cfg.SenseNovaTimeout)
+		desc, err := client.DescribeImage(ctx, image)
+		if err == nil && strings.TrimSpace(desc) != "" {
+			return desc, "sensenova/" + cfg.SenseNovaVisionModel, nil
+		}
+		if err != nil {
+			return "", "", fmt.Errorf("sensenova vision error: %w", err)
+		}
+	}
+	return "", "", fmt.Errorf("no vision backend is available")
 }
 
 func main() {

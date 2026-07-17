@@ -1,7 +1,7 @@
 .PHONY: build test doctor build-ocr
 
 build: build-ocr
-	go build -o bot ./cmd/bot
+	go build -o bin/bot ./cmd/bot
 
 test:
 	go test ./...

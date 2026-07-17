@@ -33,11 +33,11 @@
 
 ## 环境要求
 
-- Go 1.26.2（以 `go.mod` 为准）
+- Go 1.26.2（以 go.mod 为准）
 - 一个已发布的飞书企业自建应用
 - DeepSeek 或兼容 OpenAI Chat Completions 的模型服务
 - 可选：OceanBase SeekDB/MySQL 兼容数据库
-- 可选：Ollama 与 `qwen3-embedding:0.6b`
+- 可选：Ollama 与 qwen3-embedding:0.6b
 
 ## 快速开始
 
@@ -48,10 +48,10 @@ cp .env.example .env
 make test
 make build
 go run ./cmd/doctor -online
-./bot
+./bin/bot
 ```
 
-默认启用 `DRY_RUN=true`，只打印而不发送消息。完成飞书配置并通过 smoke 测试后，再将其改为 `false`。
+默认启用 DRY_RUN=true，只打印而不发送消息。完成飞书配置并通过 smoke 测试后，再将其改为 false。
 
 最低限度配置：
 
@@ -70,18 +70,24 @@ PROFILE_ID=default
 DRY_RUN=true
 ```
 
-飞书权限、事件订阅和 CardKit 配置见 [飞书配置](docs/飞书配置.md)，本地常驻与 GitHub Actions 说明见 [开源部署](docs/开源部署.md)。
+飞书权限、事件订阅和 CardKit 配置见 docs/飞书配置.md，本地常驻与 GitHub Actions 说明见 docs/开源部署.md。
 
 ## 人物与成员配置
 
-复制 `profiles/default.json` 或 `profiles/example-couple.json` 创建自己的 profile。多人群聊应为每位成员配置 `open_id`、名称、角色和别名，避免模型混淆说话者。
+复制 profiles/default.json 或 profiles/example-couple.json 创建自己的 profile。多人群聊应为每位成员配置 open_id、名称、角色和别名，避免模型混淆说话者。
 
-私有 profile 默认被 `.gitignore` 排除；仓库只跟踪两个示例文件。
+私有 profile 默认被 .gitignore 排除；仓库只跟踪两个示例文件。
 
-## OceanBase 记忆库
+---
 
-不配置数据库时，记忆保存在本地 `memory_data/<PROFILE_ID>/memories.json`。配置 SeekDB/OceanBase 后，机器人会把自身记忆写入 `bot_memories`，并可只读接入已有聊天归档和媒体归档。
+## ⚙️ 详细配置与高级工具 (按需展开)
 
+<details>
+<summary><b>🗄️ 1. OceanBase 记忆库与混合检索评测</b></summary>
+
+不配置数据库时，记忆保存在本地 memory_data/<PROFILE_ID>/memories.json。配置 SeekDB/OceanBase 后，机器人会把自身记忆写入 bot_memories，并可只读接入已有聊天归档和媒体归档。
+
+### 数据库环境变量配置
 ```env
 MEMORY_ENABLED=true
 MEMORY_DATABASE_DSN=user:password@tcp(127.0.0.1:2881)/companion_memory?charset=utf8mb4&parseTime=True&loc=Local
@@ -100,52 +106,55 @@ MEMORY_MEDIA_ROOT=/absolute/path/to/media
 MEMORY_MEDIA_VAULT=memory_data/default/media
 ```
 
-`MEMORY_EMBEDDING_DIMENSION` 必须与 embedding 模型输出一致。服务会在启动时补齐当前 profile 中缺失的记忆向量；同一轮检索只生成一次查询向量，并短时缓存重复查询。当前实现对向量结果和全文结果使用加权 RRF，避免直接混合两种不可比的原始分数。
+MEMORY_EMBEDDING_DIMENSION 必须与 embedding 模型输出一致。服务会在启动时补齐当前 profile 中缺失的记忆向量；同一轮检索只生成一次查询向量，并短时缓存重复查询。当前实现对向量结果和全文结果使用加权 RRF，避免直接混合两种不可比的原始分数。
 
-检查数据库版本、表映射、embedding 覆盖率和索引：
+### 数据库与记忆管理指令
+*   **诊断表映射、覆盖率和索引：**
+    ```bash
+    go run ./cmd/memtool -diagnose
+    ```
+*   **记忆清洗与优化建议：**
+    ```bash
+    go run ./cmd/memtool -quality-audit
+    ```
+    ```bash
+    go run ./cmd/memtool -quality-apply -quality-threshold 0.98
+    ```
+*   **RAG 检索质量与评测分析：**
+    ```bash
+    cp eval/sample.jsonl memory_data/default/retrieval-eval.jsonl
+    go run ./cmd/rageval -input memory_data/default/retrieval-eval.jsonl
+    ```
+</details>
 
-```bash
-go run ./cmd/memtool -diagnose
-```
+<details>
+<summary><b>🖼️ 2. 图片 OCR 识别与媒体内容寻址</b></summary>
 
-清洗长期记忆时先生成只读报告。只有人工检查后才执行高置信度建议：
+macOS 默认先调用系统 Vision 框架的 VNRecognizeTextRequest，失败后再按配置回退到飞书 OCR；其他系统会直接使用飞书兜底。本地 OCR 不会把图片发送给第三方。
 
-```bash
-go run ./cmd/memtool -quality-audit
-go run ./cmd/memtool -quality-apply -quality-threshold 0.98
-```
-
-检索评测集采用 JSONL，统计 Hit@K、MRR、来源命中、隐私违规和 P50/P95 延迟：
-
-```bash
-cp eval/sample.jsonl memory_data/default/retrieval-eval.jsonl
-go run ./cmd/rageval -input memory_data/default/retrieval-eval.jsonl
-```
-
-## 图片 OCR 与媒体入库
-
-macOS 默认先调用系统 Vision 框架的 `VNRecognizeTextRequest`，失败后再按配置回退到飞书 OCR；其他系统会直接使用飞书兜底。本地 OCR 不会把图片发送给第三方。
-
+### 编译与验证本地 OCR 辅助工具
 ```bash
 # 编译 Apple Vision OCR 助手和机器人
 make build
 
-# 直接验证 OCR
+# 直接命令行验证图片 OCR
 bin/macos-vision-ocr /absolute/path/to/image.png zh-Hans,en-US
 ```
 
-机器人接收的新图片会以 SHA-256 内容哈希存进 `MEMORY_MEDIA_VAULT`，目录权限为 `0700`，文件权限为 `0600`。消息 ID 是数据库幂等键，同一消息重复投递不会产生重复资产。
+### 媒体库内容寻址与归档导入
+机器人接收的新图片会以 SHA-256 内容哈希存进 MEMORY_MEDIA_VAULT，目录权限为 0700，文件权限为 0600。消息 ID 是数据库幂等键，同一消息重复投递不会产生重复资产。
 
 已有媒体归档可重新扫描并复制到受管媒体库。命令默认只预览；旧文件已删除时会明确统计为“缺失”，不会伪造图片：
-
 ```bash
 go run ./cmd/mediactl -sources "/path/to/export,/path/to/photos"
 go run ./cmd/mediactl -sources "/path/to/export,/path/to/photos" -apply
 ```
 
-数据量较小时使用精确余弦检索。只有在数据明显增长并经过延迟测试后，才建议按 OceanBase 官方文档增加 HNSW 及 `APPROXIMATE` 查询，不应只为“用了向量库”而创建近似索引。
+提示：数据量较小时使用精确余弦检索。只有在数据明显增长并经过延迟测试后，才建议按 OceanBase 官方文档增加 HNSW 及 APPROXIMATE 查询，不应只为“用了向量库”而创建近似索引。
+</details>
 
-## 可选能力
+<details>
+<summary><b>💘 3. 恋爱笔记与其他扩展选项</b></summary>
 
 恋爱笔记评论任务默认关闭。启用后首次运行只建立文档块基线，之后仅处理新增内容，并按每日上限控制评论数量：
 
@@ -156,52 +165,60 @@ LOVE_NOTE_WIKI_TOKEN=
 LOVE_NOTE_MAX_DAILY_COMMENTS=2
 ```
 
-外部搜索、主动话题、图片理解和 GitHub 轮询的开关与路径均在 [.env.example](.env.example) 中说明。
+外部搜索、主动话题、图片理解和 GitHub 轮询的开关与路径均在 .env.example 中说明。
+</details>
 
-## 验证与诊断
+<details>
+<summary><b>🛠️ 4. 验证、诊断与隐私自检</b></summary>
 
+### 编译与单元测试
 ```bash
-# 单元测试和编译
 make test
 make build
-
-# 本地依赖与真实飞书鉴权
-go run ./cmd/doctor
-go run ./cmd/doctor -online
-
-# 以下命令会向 .env 指定的真实飞书会话发送消息
-go run ./cmd/smoke -mode stream
-go run ./cmd/smoke -mode image -image /absolute/path/to/test.png
-
-# 记忆工具
-go run ./cmd/memtool -list
-go run ./cmd/memtool -search "查询内容"
-go run ./cmd/memtool -diagnose
-go run ./cmd/memtool -quality-audit
-go run ./cmd/rageval -input eval/sample.jsonl
 ```
 
-## 隐私与开源检查
+### 环境健康检查（自检依赖与飞书连接）
+```bash
+go run ./cmd/doctor
+go run ./cmd/doctor -online
+```
 
-仓库已忽略 `.env`、日志、二进制、运行状态、媒体文件、私有 profile 和本地扩展脚本。公开或部署前仍应执行：
+### 飞书端真实链路测试（向指定会话发消息/图片）
+```bash
+go run ./cmd/smoke -mode stream
+go run ./cmd/smoke -mode image -image /absolute/path/to/test.png
+```
 
+### 记忆查看与全文搜索
+```bash
+go run ./cmd/memtool -list
+go run ./cmd/memtool -search "查询内容"
+```
+
+### 隐私泄露自检
+仓库已忽略 .env、日志、二进制、运行状态、媒体文件、私有 profile 和本地扩展脚本。公开或部署前建议执行：
 ```bash
 git status --short
 git diff --check
 git grep -nE 'sk-|cli_[A-Za-z0-9]+|ou_[A-Za-z0-9]+|password@tcp'
 ```
 
-不要将聊天归档、照片、评测报告、真实人物 profile、数据库口令或飞书应用密钥提交到公开仓库。生产部署建议为数据库账号只授予所需库表权限，并让外部搜索、文档评论和媒体发送保持显式开关。完整威胁边界见 [安全说明](SECURITY.md)。
+不要将聊天归档、照片、评测报告、真实人物 profile、数据库口令或飞书应用密钥提交到公开仓库。生产部署建议为数据库账号只授予所需库表权限，并让外部搜索、文档评论和媒体发送保持显式开关。完整威胁边界见 SECURITY.md。
+</details>
 
-## 项目结构
+---
+
+## 📂 项目结构
 
 ```text
+bin/              所有编译生成的本地二进制执行程序 (如 bot, macos-vision-ocr)
 cmd/bot/          机器人主进程与 GitHub Actions 模式
 cmd/memtool/      记忆迁移、清洗、检索与数据库诊断
 cmd/mediactl/     旧媒体扫描、修复与幂等重新入库
 cmd/rageval/      检索质量、隐私边界与延迟评测
 cmd/doctor/       本地依赖、数据库和飞书真实健康检查
 cmd/smoke/        飞书真实链路测试
+cmd/query_graph/  命令行快速查询 GraphRAG 关系与实体列表
 internal/feishu/  飞书 OpenAPI、长连接与 CardKit
 internal/memory/  分层记忆、OceanBase 与混合检索
 internal/ocr/     Apple Vision OCR 调用层
@@ -209,9 +226,12 @@ internal/media/   私有内容寻址媒体保险库
 internal/lovenote/ 云文档增量评论任务
 internal/llm/     DeepSeek 客户端与回复决策
 internal/profile/ 人物和群成员配置
-web/              本地记忆审计面板
+profiles/         人物设定与群聊成员 OpenID 配置文件
+scripts/          本地日常任务与增量评论自动化 Python 脚本
+tools/            macOS Vision OCR 原生 Swift 源码工具
+web/              本地记忆审计面板与 GraphRAG 关系三元组展示
 ```
 
 ## 许可证
 
-项目采用 [MIT](LICENSE) 许可证。提交代码前请阅读 [参与贡献](CONTRIBUTING.md) 和 [安全说明](SECURITY.md)。
+项目采用 [MIT](LICENSE) 许可证。提交代码前请阅读 CONTRIBUTING.md 和 SECURITY.md。

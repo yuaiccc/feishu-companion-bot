@@ -40,6 +40,13 @@ type Config struct {
 	LocalOCRTimeout    time.Duration
 	LocalVisionEnabled bool
 
+	// SenseNova vision fallback
+	SenseNovaVisionEnabled bool
+	SenseNovaAPIKey        string
+	SenseNovaBaseURL       string
+	SenseNovaVisionModel   string
+	SenseNovaTimeout       time.Duration
+
 	// GitHub
 	GitHubUsername     string
 	GitHubToken        string
@@ -124,16 +131,21 @@ func Load() *Config {
 		DeepSeekBaseURL: getEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 		DeepSeekModel:   getEnv("DEEPSEEK_MODEL", "deepseek-chat"),
 
-		OllamaBaseURL:      getEnv("OLLAMA_BASE_URL", getEnv("MEMORY_OLLAMA_BASE_URL", "http://localhost:11434")),
-		OllamaModel:        getEnv("OLLAMA_MODEL", getEnv("MEMORY_OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")),
-		OllamaVisionModel:  getEnv("OLLAMA_VISION_MODEL", "qwen2.5vl:3b"),
-		FeishuOCREnabled:   getEnvBool("FEISHU_OCR_ENABLED", true),
-		FeishuOCRCooldown:  getEnvDuration("FEISHU_OCR_COOLDOWN_SECONDS", 5*time.Minute),
-		LocalOCREnabled:    getEnvBool("LOCAL_OCR_ENABLED", true),
-		LocalOCRBackend:    getEnv("LOCAL_OCR_BACKEND", "auto"),
-		AppleVisionOCRPath: getEnv("APPLE_VISION_OCR_BINARY", "bin/macos-vision-ocr"),
-		LocalOCRTimeout:    getEnvDuration("LOCAL_OCR_TIMEOUT_SECONDS", 15*time.Second),
-		LocalVisionEnabled: getEnvBool("LOCAL_VISION_ENABLED", true),
+		OllamaBaseURL:          getEnv("OLLAMA_BASE_URL", getEnv("MEMORY_OLLAMA_BASE_URL", "http://localhost:11434")),
+		OllamaModel:            getEnv("OLLAMA_MODEL", getEnv("MEMORY_OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")),
+		OllamaVisionModel:      getEnv("OLLAMA_VISION_MODEL", "qwen2.5vl:3b"),
+		FeishuOCREnabled:       getEnvBool("FEISHU_OCR_ENABLED", true),
+		FeishuOCRCooldown:      getEnvDuration("FEISHU_OCR_COOLDOWN_SECONDS", 5*time.Minute),
+		LocalOCREnabled:        getEnvBool("LOCAL_OCR_ENABLED", true),
+		LocalOCRBackend:        getEnv("LOCAL_OCR_BACKEND", "auto"),
+		AppleVisionOCRPath:     getEnv("APPLE_VISION_OCR_BINARY", "bin/macos-vision-ocr"),
+		LocalOCRTimeout:        getEnvDuration("LOCAL_OCR_TIMEOUT_SECONDS", 15*time.Second),
+		LocalVisionEnabled:     getEnvBool("LOCAL_VISION_ENABLED", true),
+		SenseNovaVisionEnabled: getEnvBool("SENSENOVA_VISION_ENABLED", false),
+		SenseNovaAPIKey:        getEnv("SENSENOVA_API_KEY", getEnv("SENSENOVA_API_TOKEN", "")),
+		SenseNovaBaseURL:       getEnv("SENSENOVA_BASE_URL", "https://token.sensenova.cn/v1"),
+		SenseNovaVisionModel:   getEnv("SENSENOVA_VISION_MODEL", "sensenova-6.7-flash-lite"),
+		SenseNovaTimeout:       getEnvDuration("SENSENOVA_TIMEOUT_SECONDS", 90*time.Second),
 
 		GitHubUsername: getEnv("GH_USERNAME", getEnv("GITHUB_USERNAME", "")),
 		GitHubToken:    getEnv("GH_TOKEN", getEnv("GITHUB_TOKEN", "")),
