@@ -109,7 +109,7 @@ func (c *Client) DescribeImage(ctx context.Context, image []byte) (string, error
 	if err != nil {
 		return "", fmt.Errorf("sensenova request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("read sensenova response: %w", err)
