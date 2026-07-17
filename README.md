@@ -122,7 +122,7 @@ MEMORY_EMBEDDING_DIMENSION 必须与 embedding 模型输出一致。服务会在
     ```
 *   **RAG 检索质量与评测分析：**
     ```bash
-    cp eval/sample.jsonl memory_data/default/retrieval-eval.jsonl
+    cp cmd/rageval/eval/sample.jsonl memory_data/default/retrieval-eval.jsonl
     go run ./cmd/rageval -input memory_data/default/retrieval-eval.jsonl
     ```
 </details>
@@ -234,4 +234,4 @@ web/              本地记忆审计面板与 GraphRAG 关系三元组展示
 
 ## 许可证
 
-项目采用 [MIT](LICENSE) 许可证。提交代码前请阅读 CONTRIBUTING.md 和 SECURITY.md。
+项目采用 [MIT](LICENSE) 许可证。提交代码前请阅读 [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md) 和 [.github/SECURITY.md](.github/SECURITY.md)。
