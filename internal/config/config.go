@@ -21,7 +21,7 @@ type Config struct {
 	FeishuTargetOpenID string
 	FeishuReadMsg      bool
 
-	// DeepSeek
+	// LLM provider (legacy field names retained for compatibility)
 	DeepSeekAPIKey  string
 	DeepSeekBaseURL string
 	DeepSeekModel   string
@@ -127,9 +127,9 @@ func Load() *Config {
 		FeishuTargetOpenID: getEnv("FEISHU_TARGET_OPEN_ID", ""),
 		FeishuReadMsg:      getEnvBool("FEISHU_READ_MESSAGES", true),
 
-		DeepSeekAPIKey:  getEnv("DEEPSEEK_API_KEY", ""),
-		DeepSeekBaseURL: getEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-		DeepSeekModel:   getEnv("DEEPSEEK_MODEL", "deepseek-chat"),
+		DeepSeekAPIKey:  getEnv("LLM_API_KEY", getEnv("ARK_AGENT_PLAN_API_KEY", getEnv("DEEPSEEK_API_KEY", ""))),
+		DeepSeekBaseURL: getEnv("LLM_BASE_URL", getEnv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")),
+		DeepSeekModel:   getEnv("LLM_MODEL", getEnv("DEEPSEEK_MODEL", "deepseek-chat")),
 
 		OllamaBaseURL:          getEnv("OLLAMA_BASE_URL", getEnv("MEMORY_OLLAMA_BASE_URL", "http://localhost:11434")),
 		OllamaModel:            getEnv("OLLAMA_MODEL", getEnv("MEMORY_OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")),

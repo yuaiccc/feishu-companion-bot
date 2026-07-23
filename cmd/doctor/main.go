@@ -30,7 +30,7 @@ func main() {
 	checks := []check{
 		{name: "运行环境", detail: runtime.GOOS + "/" + runtime.GOARCH + " go=" + runtime.Version()},
 		{name: "飞书凭证", critical: true, err: require(cfg.FeishuAppID != "" && cfg.FeishuAppSecret != "", "FEISHU_APP_ID/SECRET 未配置")},
-		{name: "DeepSeek", critical: true, err: require(cfg.DeepSeekAPIKey != "", "DEEPSEEK_API_KEY 未配置"), detail: cfg.DeepSeekModel},
+		{name: "LLM", critical: true, err: require(cfg.DeepSeekAPIKey != "", "LLM_API_KEY/DEEPSEEK_API_KEY 未配置"), detail: cfg.DeepSeekModel},
 	}
 	engine := localocr.NewAppleVision(cfg.AppleVisionOCRPath, cfg.LocalOCRTimeout)
 	checks = append(checks, check{name: "Apple Vision OCR", err: engine.Available(), detail: cfg.AppleVisionOCRPath})

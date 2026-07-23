@@ -22,10 +22,18 @@ type Client struct {
 func NewClient(apiKey, baseURL, model string) *Client {
 	return &Client{
 		apiKey:  apiKey,
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		model:   model,
 		httpCli: &http.Client{Timeout: 60 * time.Second},
 	}
+}
+
+func chatCompletionsURL(baseURL string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if strings.HasSuffix(baseURL, "/v1") || strings.HasSuffix(baseURL, "/v3") {
+		return baseURL + "/chat/completions"
+	}
+	return baseURL + "/v1/chat/completions"
 }
 
 type Message struct {
@@ -74,7 +82,7 @@ func (c *Client) Chat(ctx context.Context, msgs []Message, opts ...Option) (stri
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", chatCompletionsURL(c.baseURL), bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
@@ -117,7 +125,7 @@ func (c *Client) ChatStream(ctx context.Context, msgs []Message, onChunk func(te
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", chatCompletionsURL(c.baseURL), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}

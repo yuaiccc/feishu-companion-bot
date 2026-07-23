@@ -5,9 +5,24 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestChatCompletionsURL(t *testing.T) {
+	tests := map[string]string{
+		"https://api.deepseek.com":                         "https://api.deepseek.com/v1/chat/completions",
+		"https://example.com/v1/":                          "https://example.com/v1/chat/completions",
+		"https://ark.cn-beijing.volces.com/api/plan/v3":    "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
+		"https://ark.cn-beijing.volces.com/api/coding/v3/": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+	}
+	for input, want := range tests {
+		if got := chatCompletionsURL(input); got != want {
+			t.Errorf("chatCompletionsURL(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
 
 func TestChatRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,5 +70,28 @@ func TestChatStream(t *testing.T) {
 	}
 	if full.String() != "hello world" {
 		t.Errorf("stream = %q, want %q", full.String(), "hello world")
+	}
+}
+
+func TestLiveChat(t *testing.T) {
+	if os.Getenv("LIVE_LLM_TEST") != "1" {
+		t.Skip("set LIVE_LLM_TEST=1 to run against a configured provider")
+	}
+	apiKey := os.Getenv("LLM_API_KEY")
+	baseURL := os.Getenv("LLM_BASE_URL")
+	model := os.Getenv("LLM_MODEL")
+	if apiKey == "" || baseURL == "" || model == "" {
+		t.Fatal("LLM_API_KEY, LLM_BASE_URL, and LLM_MODEL are required")
+	}
+	reply, err := NewClient(apiKey, baseURL, model).Chat(
+		context.Background(),
+		[]Message{{Role: "user", Content: "Reply only: OK"}},
+		WithMaxTokens(128),
+	)
+	if err != nil {
+		t.Fatalf("live chat: %v", err)
+	}
+	if strings.TrimSpace(reply) != "OK" {
+		t.Fatalf("reply = %q, want OK", reply)
 	}
 }
