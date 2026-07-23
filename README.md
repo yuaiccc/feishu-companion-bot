@@ -62,9 +62,9 @@ FEISHU_BOT_OPEN_ID=ou_xxx
 FEISHU_CHAT_ID=oc_xxx
 FEISHU_OWNER_OPEN_ID=ou_xxx
 
-DEEPSEEK_API_KEY=sk_xxx
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
+LLM_API_KEY=ark_xxx
+LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/plan/v3
+LLM_MODEL=glm-5.2
 
 PROFILE_ID=default
 DRY_RUN=true
